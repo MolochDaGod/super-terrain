@@ -5,6 +5,7 @@ import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
 import { ThreeTerrainRenderBackend } from '../rendering/ThreeTerrainRenderBackend'
 import { BrushCursor } from './BrushCursor'
+import { useEditorSnapshot } from './hooks'
 
 interface TerrainViewProps {
   terrain: WorldTerrain
@@ -18,6 +19,7 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
     [group, terrain.config.sectionSize],
   )
   const { camera, gl, raycaster, size } = useThree()
+  const { renderMode } = useEditorSnapshot(editor)
   const pointer = useMemo(() => new Vector2(), [])
   const dragging = useRef(false)
   const activePointerId = useRef<number | null>(null)
@@ -29,6 +31,10 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
       backend.dispose()
     }
   }, [backend, terrain])
+
+  useEffect(() => {
+    backend.setRenderMode(renderMode)
+  }, [backend, renderMode])
 
   useEffect(() => {
     const canvas = gl.domElement

@@ -42,6 +42,12 @@ export interface CompileSectionRequest {
     TerrainConfig,
     'sectionSize' | 'lodResolutions' | 'seed' | 'operationHalo'
   >
+  /**
+   * Optional subset of LOD levels to compile. Distant sections never display
+   * their fine levels, and the offline capture harness only ever needs one, so
+   * compiling the whole pyramid is often pure waste.
+   */
+  levels?: readonly number[]
   modifiers: ModifierPacket
 }
 

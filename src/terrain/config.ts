@@ -26,9 +26,12 @@ const availableWorkers =
 export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   worldSize: 16_384,
   sectionSize: 128,
-  // Power-of-two nesting keeps every coarser boundary sample present in the
-  // next finer LOD, avoiding the non-matching edge polylines that exposed skirts.
-  lodResolutions: [32, 16, 8, 4, 2],
+  // Every coarser resolution divides the next finer one, so all boundary
+  // samples of a coarse LOD are present in the fine one and adjacent sections
+  // at different LODs still meet along an identical polyline.
+  // 96 segments over a 128 m section is ~1.3 m triangles at LOD0, which is what
+  // lets cliff faces and strata read as geometry rather than as shading.
+  lodResolutions: [96, 48, 24, 12, 6],
   operationHalo: 12,
   workerCount: Math.max(2, Math.min(4, availableWorkers - 2)),
   targetFps: 60,

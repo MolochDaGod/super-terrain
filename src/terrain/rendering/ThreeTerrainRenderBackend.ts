@@ -5,6 +5,7 @@ import {
   Group,
   LineBasicMaterial,
   LineSegments,
+  type Material,
   Mesh,
   MeshStandardNodeMaterial,
   Matrix3,
@@ -22,10 +23,11 @@ import type {
   TerrainRenderStats,
 } from './TerrainRenderBackend'
 import {
-  createTerrainMaterial,
-  type TerrainMaterialResources,
-} from './createTerrainMaterial'
-import { addSectionSkirts } from './addSectionSkirts'
+  createTerrainMaterialForMode,
+  type TerrainMaterialHandle,
+} from './createTerrainMaterialForMode'
+import type { TerrainRenderMode } from './renderModes'
+import { createSectionGeometry } from './createSectionGeometry'
 
 interface RuntimeSection {
   section: TerrainSection
@@ -50,8 +52,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private runtime = new Map<SectionId, RuntimeSection>()
   private deferredDisposals: DeferredGeometry[] = []
   private overlay: TerrainOverlay = 'none'
-  private readonly terrainMaterial: MeshStandardNodeMaterial
-  private readonly terrainMaterialResources: TerrainMaterialResources
+  private renderMode: TerrainRenderMode = 'preview'
+  private terrainMaterial: TerrainMaterialHandle
   private readonly lodMaterials: MeshStandardNodeMaterial[]
   private readonly densityMaterial: MeshStandardNodeMaterial
   private readonly boundaryMaterials = {
@@ -69,8 +71,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   constructor(root: Group, sectionSize: number) {
     this.root = root
     this.sectionSize = sectionSize
-    this.terrainMaterialResources = createTerrainMaterial()
-    this.terrainMaterial = this.terrainMaterialResources.material
+    this.terrainMaterial = createTerrainMaterialForMode(this.renderMode)
     this.lodMaterials = LOD_COLORS.map(
       (color) =>
         new MeshStandardNodeMaterial({
@@ -89,7 +90,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   upload(section: TerrainSection, compiled: CompiledSection): number {
-    const geometries = compiled.lods.map((lod) => createGeometry(lod, this.sectionSize))
+    const geometries = compiled.lods.map((lod) => createSectionGeometry(lod, this.sectionSize))
     let runtime = this.runtime.get(section.id)
     if (runtime) {
       const previousMesh = runtime.mesh
@@ -101,7 +102,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       runtime.mesh = createTerrainMesh(
         section,
         geometries[runtime.lod],
-        this.terrainMaterial,
+        this.terrainMaterial.material,
         this.sectionSize,
       )
       runtime.mesh.visible = runtime.visible
@@ -112,7 +113,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       const mesh = createTerrainMesh(
         section,
         geometries[section.activeLod] ?? geometries.at(-1),
-        this.terrainMaterial,
+        this.terrainMaterial.material,
         this.sectionSize,
       )
       const boundary = createBoundary(
@@ -173,6 +174,24 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       runtime.boundary.material = this.boundaryMaterials.clean
     }
     runtime.boundary.visible = runtime.visible && this.overlay !== 'none'
+  }
+
+  /**
+   * Swaps the surface material for every resident section. Geometry is
+   * untouched, so toggling quality never re-streams or re-compiles anything.
+   */
+  setRenderMode(mode: TerrainRenderMode): void {
+    if (this.renderMode === mode) return
+    this.renderMode = mode
+    const previous = this.terrainMaterial
+    this.terrainMaterial = createTerrainMaterialForMode(mode)
+    for (const runtime of this.runtime.values()) {
+      const castsShadow = mode === 'full'
+      runtime.mesh.castShadow = castsShadow
+      runtime.mesh.receiveShadow = castsShadow
+      this.applyMaterial(runtime)
+    }
+    previous.dispose()
   }
 
   setOverlay(overlay: TerrainOverlay): void {
@@ -314,7 +333,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const id of [...this.runtime.keys()]) this.evict(id)
     for (const pending of this.deferredDisposals) pending.geometry.dispose()
     this.deferredDisposals.length = 0
-    this.terrainMaterialResources.dispose()
+    this.terrainMaterial.dispose()
     this.densityMaterial.dispose()
     for (const material of this.lodMaterials) material.dispose()
     for (const material of Object.values(this.boundaryMaterials)) material.dispose()
@@ -323,7 +342,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private applyMaterial(runtime: RuntimeSection): void {
     if (this.overlay === 'lod') runtime.mesh.material = this.lodMaterials[runtime.lod]
     else if (this.overlay === 'density') runtime.mesh.material = this.densityMaterial
-    else runtime.mesh.material = this.terrainMaterial
+    else runtime.mesh.material = this.terrainMaterial.material
   }
 
   private updateBoundary(runtime: RuntimeSection, compiled: CompiledSection): void {
@@ -499,7 +518,7 @@ function expandPreviewBounds(
 function createTerrainMesh(
   section: TerrainSection,
   geometry: BufferGeometry,
-  material: MeshStandardNodeMaterial,
+  material: Material,
   sectionSize: number,
 ): Mesh {
   const mesh = new Mesh(geometry, material)
@@ -510,21 +529,6 @@ function createTerrainMesh(
   mesh.userData.terrainSectionId = section.id
   mesh.name = `terrain-section-${section.id}`
   return mesh
-}
-
-function createGeometry(
-  lod: CompiledSection['lods'][number],
-  sectionSize: number,
-): BufferGeometry {
-  const skirted = addSectionSkirts(lod, sectionSize)
-  const geometry = new BufferGeometry()
-  geometry.setAttribute('position', new BufferAttribute(skirted.positions, 3))
-  geometry.setAttribute('normal', new BufferAttribute(skirted.normals, 3))
-  geometry.setAttribute('color', new BufferAttribute(skirted.colors, 3))
-  geometry.setIndex(new BufferAttribute(skirted.indices, 1))
-  geometry.computeBoundingBox()
-  geometry.computeBoundingSphere()
-  return geometry
 }
 
 function createBoundary(

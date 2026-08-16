@@ -5,6 +5,7 @@ import type {
   BrushSample,
 } from '../modifiers/types'
 import type { TerrainOverlay } from '../editor/EditorStore'
+import type { TerrainRenderMode } from './renderModes'
 import type { CompiledSection, SectionId } from '../core/types'
 import type { TerrainSection } from '../partition/MeshPartition'
 
@@ -39,6 +40,7 @@ export interface TerrainRenderBackend {
   setVisible(sectionId: SectionId, visible: boolean): void
   setSectionState(section: TerrainSection): void
   setOverlay(overlay: TerrainOverlay): void
+  setRenderMode(mode: TerrainRenderMode): void
   previewBrush(preview: PreviewBrush): void
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined
   flushDeferredDisposals(maxCount: number): void

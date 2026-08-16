@@ -1,6 +1,7 @@
 import { ExternalStore } from '../core/ExternalStore'
 import type { SectionId, Vec3Like } from '../core/types'
 import type { BrushDomain } from '../modifiers/types'
+import type { TerrainRenderMode } from '../rendering/renderModes'
 
 export type EditorTool =
   | 'select'
@@ -28,6 +29,7 @@ export interface EditorSnapshot {
   tunnelRadius: number
   tunnelDepth: number
   overlay: TerrainOverlay
+  renderMode: TerrainRenderMode
   showHud: boolean
   showHelp: boolean
   cursorPosition: Vec3Like
@@ -49,6 +51,7 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   tunnelRadius: 8,
   tunnelDepth: 14,
   overlay: 'none',
+  renderMode: 'preview',
   showHud: true,
   showHelp: false,
   cursorPosition: { x: 0, y: 0, z: 0 },

@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import {
   Activity,
+  Gem,
   HelpCircle,
+  Pencil,
   RotateCcw,
   Save,
   Sparkles,
@@ -68,6 +70,22 @@ export function TopBar({ terrain, editor }: TopBarProps) {
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
+        <div className="mr-1 flex items-center gap-0.5 rounded-md border border-white/[0.07] bg-white/[0.035] p-0.5">
+          <RenderModeButton
+            active={editorSnapshot.renderMode === 'preview'}
+            label="Preview quality — fast editing"
+            onClick={() => editor.patch({ renderMode: 'preview' })}
+          >
+            <Pencil size={12} /> Preview
+          </RenderModeButton>
+          <RenderModeButton
+            active={editorSnapshot.renderMode === 'full'}
+            label="Full quality — layered materials, parallax detail, atmosphere"
+            onClick={() => editor.patch({ renderMode: 'full' })}
+          >
+            <Gem size={12} /> Full
+          </RenderModeButton>
+        </div>
         <div className="mr-1 hidden items-center gap-2 rounded-md border border-white/[0.07] bg-white/[0.035] px-2.5 py-1.5 lg:flex">
           <Activity size={12} className="text-[#77e8be]" />
           <span className="font-mono text-[9px] tabular-nums text-white/55">
@@ -98,6 +116,31 @@ export function TopBar({ terrain, editor }: TopBarProps) {
         </TopButton>
       </div>
     </header>
+  )
+}
+
+interface RenderModeButtonProps {
+  active: boolean
+  label: string
+  children: React.ReactNode
+  onClick: () => void
+}
+
+function RenderModeButton({ active, label, children, onClick }: RenderModeButtonProps) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-pressed={active}
+      className={`flex items-center gap-1.5 rounded px-2 py-1 text-[9px] font-medium uppercase tracking-[0.1em] transition ${
+        active
+          ? 'bg-[#77e8be]/15 text-[#a6f2d5]'
+          : 'text-white/40 hover:bg-white/[0.06] hover:text-white/75'
+      }`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
   )
 }
 

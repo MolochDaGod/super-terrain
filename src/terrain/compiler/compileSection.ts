@@ -58,6 +58,7 @@ export function compileTerrainSection(
   let cpuBytes = 0
 
   for (let level = 0; level < request.config.lodResolutions.length; level += 1) {
+    if (request.levels && !request.levels.includes(level)) continue
     const resolution = request.config.lodResolutions[level]
     const generated = generateSectionMesh(
       request.key,

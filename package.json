@@ -10,7 +10,10 @@
     "lint": "oxlint",
     "test": "vitest run",
     "test:watch": "vitest",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "capture:build": "vite build --config tools/capture/vite.config.ts",
+    "capture": "npm run capture:build && node .capture/capture.mjs",
+    "survey": "vite build --config tools/capture/vite.config.ts --ssr tools/capture/survey.ts --outDir .capture/survey && node .capture/survey/capture.mjs"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.8",
@@ -23,6 +26,7 @@
     "three-mesh-bvh": "^0.9.14"
   },
   "devDependencies": {
+    "@kmamal/gpu": "0.1.6",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
@@ -35,5 +39,8 @@
     "typescript": "~6.0.2",
     "vite": "^8.2.0",
     "vitest": "^4.1.10"
-  }
+  },
+  "trustedDependencies": [
+    "@kmamal/gpu"
+  ]
 }

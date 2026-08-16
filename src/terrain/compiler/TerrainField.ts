@@ -1,4 +1,5 @@
 import { clamp, lerp, smoothstep } from '../core/bounds'
+import { sampleHeight } from './heightField'
 import type { Vec3Like } from '../core/types'
 import type {
   BrushStrokeModifier,
@@ -11,8 +12,7 @@ export function evaluateHeight(
   seed: number,
   modifiers: TerrainModifier[],
 ): number {
-  const lowFrequency = broadTerrainHeight(worldX, worldZ, seed)
-  let height = lowFrequency + surfaceDetail(worldX, worldZ, seed)
+  let height = sampleHeight(worldX, worldZ, seed)
 
   for (const modifier of modifiers) {
     if (!modifier.enabled) continue
@@ -124,27 +124,6 @@ function applyBrushToPoint(
       }
     }
   }
-}
-
-function broadTerrainHeight(x: number, z: number, seed: number): number {
-  const phase = seed * 0.00013
-  const rolling =
-    Math.sin(x * 0.0061 + phase) * 8 +
-    Math.cos(z * 0.0053 - phase * 2) * 7 +
-    Math.sin((x + z) * 0.0028) * 10
-  const ridgeDistance = z - (x * 0.28 + 44)
-  const ridge = Math.exp(-(ridgeDistance * ridgeDistance) / (2 * 105 * 105))
-  const ridgeShape = ridge * (34 + Math.sin(x * 0.019) * 9)
-  const cliffBand = Math.exp(-((z + 55) * (z + 55)) / (2 * 250 * 250))
-  const cliff = smoothstep(-85, -24, x + Math.sin(z * 0.017) * 22) * 27 * cliffBand
-  const basin = -18 * Math.exp(-((x - 250) ** 2 + (z - 80) ** 2) / 95_000)
-  return 10 + rolling + ridgeShape + cliff + basin
-}
-
-function surfaceDetail(x: number, z: number, seed: number): number {
-  const first = valueNoise(x * 0.022, z * 0.022, seed)
-  const second = valueNoise(x * 0.061, z * 0.061, seed + 97)
-  return (first - 0.5) * 7 + (second - 0.5) * 2.2
 }
 
 function valueNoise(x: number, z: number, seed: number): number {

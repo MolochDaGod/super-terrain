@@ -165,6 +165,7 @@ function fakeRenderer(
     setVisible() {},
     setSectionState() {},
     setOverlay() {},
+    setRenderMode() {},
     previewBrush,
     raycast: () => undefined,
     flushDeferredDisposals() {},
