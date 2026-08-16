@@ -84,7 +84,7 @@ function createFullEnvironment(
   sky.material.colorNode = (sky.material.colorNode as any).mul(skyIntensity)
   group.add(sky)
 
-  const sun = new DirectionalLight(0xffeec4, 3.4)
+  const sun = new DirectionalLight(0xffeec4, 1.15)
   sun.position.copy(DEFAULT_SUN.direction).multiplyScalar(2_400)
   sun.castShadow = options.shadows ?? true
   sun.shadow.mapSize.set(2048, 2048)
@@ -100,9 +100,9 @@ function createFullEnvironment(
   // Sky bounce. Ground colour is the average of the dry-grass and rock albedo
   // so shadowed slopes pick up the same family of hues as the lit ones, and
   // the sky colour is what keeps shadows blue instead of merely dark.
-  const skyFill = new HemisphereLight(0x86b6ec, 0x413c2d, 0.42)
+  const skyFill = new HemisphereLight(0x86b6ec, 0x413c2d, 0.16)
   group.add(skyFill)
-  const ambient = new AmbientLight(0x4a5a74, 0.09)
+  const ambient = new AmbientLight(0x4a5a74, 0.035)
   group.add(ambient)
 
   // Cascades. One shadow map stretched over kilometres gives metre-wide texels

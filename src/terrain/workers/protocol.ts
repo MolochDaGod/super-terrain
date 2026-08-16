@@ -43,9 +43,9 @@ export interface CompileSectionRequest {
     'sectionSize' | 'lodResolutions' | 'seed' | 'operationHalo'
   >
   /**
-   * Optional subset of LOD levels to compile. Distant sections never display
-   * their fine levels, and the offline capture harness only ever needs one, so
-   * compiling the whole pyramid is often pure waste.
+   * Optional subset of LOD levels to return. Purely procedural sections can
+   * start at the finest requested level; localized edits still simplify from
+   * LOD0 so their topology cannot disappear in a distant-only compile.
    */
   levels?: readonly number[]
   modifiers: ModifierPacket

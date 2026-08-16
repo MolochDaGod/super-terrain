@@ -1,23 +1,30 @@
-import { clamp } from '../core/bounds'
+import { clamp, smoothstep } from '../core/bounds'
+import { sampleHeightFieldCached } from './heightField'
 
 export interface TerrainMaterialFields {
   regional: number
-  patch: number
+  /** Regolith depth proxy in 0..1: where loose material can come to rest. */
+  deposition: number
+  /** Ground water availability in 0..1, from drainage and altitude. */
   moisture: number
   macro: number
-  dipAngle: number
-  dipAzimuth: number
+  /** Unit normal of the local bedding planes, shared with the mesh terracing. */
+  beddingX: number
+  beddingY: number
+  beddingZ: number
   bedThickness: number
+  /** 0..1 strength of bedding expression, shared with the mesh terracing. */
   bedExposure: number
   jointing: number
   lichen: number
-  outcrop: number
   mottle: number
   beddedOffsetX: number
   beddedOffsetY: number
   beddedOffsetZ: number
   regionalTint: number
   buttress: number
+  /** 0..1 proximity to a drainage line: the path water actually takes. */
+  flow: number
 }
 
 interface Point3 {
@@ -26,35 +33,92 @@ interface Point3 {
   z: number
 }
 
+/** Metres of bed thickness the packed unit value spans. */
+export const BED_THICKNESS_MIN = 9
+export const BED_THICKNESS_MAX = 26
+
 /**
- * CPU counterpart of the broad fields in the full terrain material. These
- * values are evaluated once by the section worker and then interpolated by the
- * rasterizer. The implementation mirrors MaterialX's 3D Perlin noise, including
- * its Jenkins hash and gradient scale, so moving the work out of the vertex
- * shader does not replace the authored field with a cheaper approximation.
+ * Broad material fields, evaluated once per vertex by the section worker and
+ * interpolated by the rasteriser.
+ *
+ * The fields that decide *what a surface is made of* are read from the terrain
+ * itself — the drainage network, the local slope, the bedding attitude that the
+ * mesh was terraced with — rather than from independent noise. A noise field
+ * thresholded into a mask can only ever produce a plausible-looking blob; it
+ * has no reason to put scree beneath a cliff, moss in a gully or a bench where
+ * a resistant bed outcrops, so it produces terrain that is busy without being
+ * coherent. Reading the same quantities the landform was built from costs
+ * nothing extra here and is the difference.
+ *
+ * What remains noise-driven is only genuine small-scale material variation —
+ * lichen, mottling, jointing density — where noise is the honest model.
+ *
+ * The Perlin implementation mirrors MaterialX's, including its Jenkins hash and
+ * gradient scale, so these agree exactly with the fragment shader's own taps.
  */
 export function evaluateTerrainMaterialFields(
   x: number,
   y: number,
   z: number,
+  seed: number,
 ): TerrainMaterialFields {
   const position = { x, y, z }
   const firstWarp = warp(position, 9.5, 0.021)
   const bedded = warp(firstWarp, 1.6, 0.1373)
   const buttressPosition = warp(position, 11, 0.02)
 
+  const terrain = sampleHeightFieldCached(x, z, seed)
+  const { bedding } = terrain
+
+  // Slope from the height stack rather than the mesh normal, so it survives LOD
+  // changes and skirt vertices unchanged.
+  const slope = clamp(terrain.steepness, 0, 3)
+
+  // Water collects in the carved drainage lines and thins out with altitude,
+  // where there is less catchment above and more of the year is frozen.
+  const altitudeDrying = smoothstep(210, 540, y)
+  const flow = terrain.flow
+  const moisture = clamp(
+    0.4 +
+      flow * 0.5 +
+      (1 - smoothstep(0.45, 1.4, slope)) * 0.24 -
+      altitudeDrying * 0.42 +
+      (fbm(position, 150, 2) - 0.5) * 0.3,
+    0,
+    1,
+  )
+
+  // How much loose material this part of the range is supplied with and can
+  // keep at the catchment scale: drainage lines collect it, and whole faces
+  // steep enough to shed everything supply it. The per-pixel decision about
+  // whether it can rest on *this* gradient belongs to the shader, which knows
+  // the real surface normal; this is only the budget it draws from.
+  const deposition = clamp(
+    0.62 +
+      flow * 0.3 -
+      smoothstep(0.9, 2.1, slope) * 0.5 +
+      (fbm(position, 46, 2) - 0.5) * 0.34,
+    0,
+    1,
+  )
+
   return {
     regional: perlin3(x * 0.011, y * 0.011, z * 0.011),
-    patch: fbm(position, 46, 3),
-    moisture: fbm(position, 150, 3),
+    deposition,
+    moisture,
     macro: fbm(position, 34, 3),
-    dipAngle: fbm(position, 900, 1),
-    dipAzimuth: fbm(position, 1_400, 1),
-    bedThickness: fbm(position, 420, 1),
-    bedExposure: fbm(position, 85, 3),
+    beddingX: bedding.normalX,
+    beddingY: bedding.normalY,
+    beddingZ: bedding.normalZ,
+    bedThickness: clamp(
+      (bedding.thickness - BED_THICKNESS_MIN) /
+        (BED_THICKNESS_MAX - BED_THICKNESS_MIN),
+      0,
+      1,
+    ),
+    bedExposure: bedding.expression,
     jointing: fbm(position, 24, 2),
     lichen: fbm(position, 9, 3),
-    outcrop: ridged({ x, y: y * 0.35, z }, 17, 3),
     mottle: fbm(position, 14, 2),
     beddedOffsetX: bedded.x - x,
     beddedOffsetY: bedded.y - y,
@@ -65,6 +129,7 @@ export function evaluateTerrainMaterialFields(
       9,
       3,
     ),
+    flow,
   }
 }
 

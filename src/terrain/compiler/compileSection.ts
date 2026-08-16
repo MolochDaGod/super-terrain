@@ -1,3 +1,4 @@
+import { MeshoptSimplifier } from 'meshoptimizer/simplifier'
 import { clamp, lerp, smoothstep } from '../core/bounds'
 import type {
   AABB,
@@ -12,6 +13,7 @@ import {
 } from '../modifiers/boolean/MeshBooleanBackend'
 import type {
   BooleanSubtractModifier,
+  BrushStrokeModifier,
   RemeshModifier,
   TerrainModifier,
   TessellateModifier,
@@ -42,11 +44,24 @@ interface GeneratedMesh {
     Uint16Array,
   ]
   indices: Uint32Array
+  /** Vertices authored by a modifier that must survive every LOD. */
+  featureLocks: Uint8Array
   warnings: number
   hasArbitraryTopology: boolean
 }
 
 const tunnelBackend = new BvhCsgTunnelBooleanBackend()
+const MISSING_VERTEX = 0xffff_ffff
+const POSITION_ERROR_FRACTION = 0.075
+
+let meshSimplifierAvailable = false
+try {
+  await MeshoptSimplifier.ready
+  meshSimplifierAvailable = MeshoptSimplifier.supported
+} catch {
+  // Retaining the authoritative mesh is a safe fallback on platforms without
+  // WebAssembly. It costs memory, but never drops authored terrain topology.
+}
 
 export function compileTerrainSection(
   request: CompileSectionRequest,
@@ -55,6 +70,31 @@ export function compileTerrainSection(
   const modifiers = materializeModifierTransforms(
     decodeModifiers(request.modifiers),
   )
+  const requestedLevels = normalizedRequestedLevels(request)
+  if (requestedLevels.length === 0) {
+    throw new Error('Section compile requested no valid LOD levels')
+  }
+  const hasLocalAuthoring = modifiers.some(
+    (modifier) =>
+      modifier.enabled &&
+      (modifier.type === 'brush-stroke' ||
+        modifier.type === 'boolean-subtract' ||
+        modifier.type === 'remesh' ||
+        modifier.type === 'tessellate'),
+  )
+  // Local edits must always be sampled by the finest authoritative grid, even
+  // when a caller asks for only a distant LOD. Procedural capture requests can
+  // start at their finest requested level and avoid compiling hidden detail.
+  const sourceLevel = hasLocalAuthoring ? 0 : requestedLevels[0]
+  const sourceResolution = request.config.lodResolutions[sourceLevel]
+  const source = generateSectionMesh(
+    request.key,
+    request.config.sectionSize,
+    sourceResolution,
+    request.config.seed,
+    modifiers,
+    new Map<string, TerrainMaterialFields>(),
+  )
   const lods: CompiledLOD[] = []
   let minY = Infinity
   let maxY = -Infinity
@@ -62,46 +102,40 @@ export function compileTerrainSection(
   let maxX = -Infinity
   let minZ = Infinity
   let maxZ = -Infinity
-  let warnings = 0
-  let vertexCount = 0
-  let triangleCount = 0
-  let hasArbitraryTopology = false
+  let warnings = source.warnings
   let cpuBytes = 0
-  const materialFieldCache = new Map<string, TerrainMaterialFields>()
+  const originX = request.key.x * request.config.sectionSize
+  const originZ = request.key.z * request.config.sectionSize
+  for (let index = 0; index < source.positions.length; index += 3) {
+    minX = Math.min(minX, originX + source.positions[index])
+    maxX = Math.max(maxX, originX + source.positions[index])
+    minY = Math.min(minY, source.positions[index + 1])
+    maxY = Math.max(maxY, source.positions[index + 1])
+    minZ = Math.min(minZ, originZ + source.positions[index + 2])
+    maxZ = Math.max(maxZ, originZ + source.positions[index + 2])
+  }
 
-  for (let level = 0; level < request.config.lodResolutions.length; level += 1) {
-    if (request.levels && !request.levels.includes(level)) continue
+  const sourceGeometricError = sourceLevel === 0
+    ? 0
+    : lodErrorBudget(request.config.sectionSize, sourceResolution)
+  let previousError = sourceGeometricError
+  for (const level of requestedLevels) {
     const resolution = request.config.lodResolutions[level]
-    const generated = generateSectionMesh(
-      request.key,
-      request.config.sectionSize,
-      resolution,
-      level,
-      request.config.seed,
-      modifiers,
-      materialFieldCache,
-    )
-    const originX = request.key.x * request.config.sectionSize
-    const originZ = request.key.z * request.config.sectionSize
-    for (let index = 0; index < generated.positions.length; index += 3) {
-      minX = Math.min(minX, originX + generated.positions[index])
-      maxX = Math.max(maxX, originX + generated.positions[index])
-      minY = Math.min(minY, generated.positions[index + 1])
-      maxY = Math.max(maxY, generated.positions[index + 1])
-      minZ = Math.min(minZ, originZ + generated.positions[index + 2])
-      maxZ = Math.max(maxZ, originZ + generated.positions[index + 2])
-    }
-    const gpuBytes =
-      generated.positions.byteLength +
-      generated.normals.byteLength +
-      generated.colors.byteLength +
-      generated.surfaceFields.reduce((bytes, field) => bytes + field.byteLength, 0) +
-      generated.indices.byteLength
+    const simplified = level === sourceLevel
+      ? { mesh: source, geometricError: previousError }
+      : simplifyGeneratedMesh(
+          source,
+          sourceResolution,
+          resolution,
+          request.config.sectionSize,
+          sourceGeometricError,
+        )
+    const generated = simplified.mesh
+    previousError = Math.max(previousError, simplified.geometricError)
+    const gpuBytes = generatedMeshBytes(generated)
     lods.push({
       level,
-      geometricError:
-        (request.config.sectionSize / (resolution * resolution)) *
-        (0.18 + level * 0.2),
+      geometricError: previousError,
       positions: generated.positions,
       normals: generated.normals,
       colors: generated.colors,
@@ -111,12 +145,7 @@ export function compileTerrainSection(
       gpuBytes,
     })
     cpuBytes += gpuBytes
-    warnings += generated.warnings
-    hasArbitraryTopology ||= generated.hasArbitraryTopology
-    if (level === 0) {
-      vertexCount = generated.positions.length / 3
-      triangleCount = generated.indices.length / 3
-    }
+    if (generated !== source) warnings += generated.warnings
   }
 
   const bounds: AABB = {
@@ -132,20 +161,201 @@ export function compileTerrainSection(
     cpuBytes,
     metadata: {
       compileMs: performance.now() - started,
-      vertexCount,
-      triangleCount,
-      density: vertexCount / (request.config.sectionSize * request.config.sectionSize),
-      hasArbitraryTopology,
+      vertexCount: source.positions.length / 3,
+      triangleCount: source.indices.length / 3,
+      density:
+        source.positions.length /
+        3 /
+        (request.config.sectionSize * request.config.sectionSize),
+      hasArbitraryTopology: source.hasArbitraryTopology,
       validationWarnings: warnings,
     },
   }
+}
+
+function normalizedRequestedLevels(request: CompileSectionRequest): number[] {
+  const configured = request.config.lodResolutions.length
+  const levels = request.levels ?? Array.from(
+    { length: configured },
+    (_, level) => level,
+  )
+  return [...new Set(levels)]
+    .filter((level) => Number.isInteger(level) && level >= 0 && level < configured)
+    .sort((a, b) => a - b)
+}
+
+function simplifyGeneratedMesh(
+  source: GeneratedMesh,
+  sourceResolution: number,
+  targetResolution: number,
+  sectionSize: number,
+  sourceGeometricError: number,
+): { mesh: GeneratedMesh; geometricError: number } {
+  if (!meshSimplifierAvailable || targetResolution >= sourceResolution) {
+    return {
+      mesh: cloneGeneratedMesh(source),
+      geometricError: sourceGeometricError,
+    }
+  }
+
+  const triangleRatio = (targetResolution / sourceResolution) ** 2
+  const targetIndexCount = Math.max(
+    3,
+    Math.min(
+      source.indices.length,
+      Math.floor((source.indices.length * triangleRatio) / 3) * 3,
+    ),
+  )
+  const absoluteErrorLimit = Math.max(
+    0.01,
+    lodErrorBudget(sectionSize, targetResolution) - sourceGeometricError,
+  )
+  try {
+    const [indices, measuredError] = MeshoptSimplifier.simplifyWithAttributes(
+      source.indices,
+      source.positions,
+      3,
+      source.normals,
+      3,
+      [0.5, 0.5, 0.5],
+      source.featureLocks,
+      targetIndexCount,
+      absoluteErrorLimit,
+      ['LockBorder', 'ErrorAbsolute'],
+    )
+    const safeError = Number.isFinite(measuredError)
+      ? Math.max(0, measuredError)
+      : absoluteErrorLimit
+    return {
+      mesh: compactGeneratedMesh(source, indices),
+      geometricError: sourceGeometricError + safeError,
+    }
+  } catch {
+    // Invalid or unusually fragmented topology should cost detail, not make a
+    // section disappear. The source mesh is always a valid renderable LOD.
+    return {
+      mesh: cloneGeneratedMesh(source),
+      geometricError: sourceGeometricError,
+    }
+  }
+}
+
+function cloneGeneratedMesh(source: GeneratedMesh): GeneratedMesh {
+  return {
+    positions: new Float32Array(source.positions),
+    normals: new Float32Array(source.normals),
+    colors: new Float32Array(source.colors),
+    surfaceFields: source.surfaceFields.map((field) =>
+      new Uint16Array(field),
+    ) as unknown as GeneratedMesh['surfaceFields'],
+    indices: new Uint32Array(source.indices),
+    featureLocks: new Uint8Array(source.featureLocks),
+    warnings: source.warnings,
+    hasArbitraryTopology: source.hasArbitraryTopology,
+  }
+}
+
+function compactGeneratedMesh(
+  source: GeneratedMesh,
+  simplifiedIndices: Uint32Array,
+): GeneratedMesh {
+  const indices = new Uint32Array(simplifiedIndices)
+  const [remap, vertexCount] = MeshoptSimplifier.compactMesh(indices)
+  const positions = remapFloatStream(source.positions, 3, remap, vertexCount)
+  const normals = remapFloatStream(source.normals, 3, remap, vertexCount)
+  const colors = remapFloatStream(source.colors, 3, remap, vertexCount)
+  const surfaceFields = source.surfaceFields.map((field) =>
+    remapUint16Stream(field, 4, remap, vertexCount),
+  ) as unknown as GeneratedMesh['surfaceFields']
+  const featureLocks = remapUint8Stream(
+    source.featureLocks,
+    remap,
+    vertexCount,
+  )
+  const validation = validateMeshData(positions, indices)
+  if (!validation.valid) throw new Error(validation.errors.join('; '))
+  return {
+    positions,
+    normals,
+    colors,
+    surfaceFields,
+    indices,
+    featureLocks,
+    warnings: validation.warnings.length,
+    hasArbitraryTopology: source.hasArbitraryTopology,
+  }
+}
+
+function remapFloatStream(
+  source: Float32Array,
+  stride: number,
+  remap: Uint32Array,
+  vertexCount: number,
+): Float32Array {
+  const target = new Float32Array(vertexCount * stride)
+  remapVertexStream(source, target, stride, remap)
+  return target
+}
+
+function remapUint16Stream(
+  source: Uint16Array,
+  stride: number,
+  remap: Uint32Array,
+  vertexCount: number,
+): Uint16Array {
+  const target = new Uint16Array(vertexCount * stride)
+  remapVertexStream(source, target, stride, remap)
+  return target
+}
+
+function remapUint8Stream(
+  source: Uint8Array,
+  remap: Uint32Array,
+  vertexCount: number,
+): Uint8Array {
+  const target = new Uint8Array(vertexCount)
+  remapVertexStream(source, target, 1, remap)
+  return target
+}
+
+function remapVertexStream(
+  source: Float32Array | Uint16Array | Uint8Array,
+  target: Float32Array | Uint16Array | Uint8Array,
+  stride: number,
+  remap: Uint32Array,
+): void {
+  for (let sourceVertex = 0; sourceVertex < remap.length; sourceVertex += 1) {
+    const targetVertex = remap[sourceVertex]
+    if (targetVertex === MISSING_VERTEX) continue
+    const sourceOffset = sourceVertex * stride
+    const targetOffset = targetVertex * stride
+    for (let component = 0; component < stride; component += 1) {
+      target[targetOffset + component] = source[sourceOffset + component]
+    }
+  }
+}
+
+function lodErrorBudget(sectionSize: number, resolution: number): number {
+  return (sectionSize / Math.max(1, resolution)) * POSITION_ERROR_FRACTION
+}
+
+function generatedMeshBytes(generated: GeneratedMesh): number {
+  return (
+    generated.positions.byteLength +
+    generated.normals.byteLength +
+    generated.colors.byteLength +
+    generated.surfaceFields.reduce(
+      (bytes, field) => bytes + field.byteLength,
+      0,
+    ) +
+    generated.indices.byteLength
+  )
 }
 
 function generateSectionMesh(
   key: SectionKey,
   sectionSize: number,
   resolution: number,
-  level: number,
   seed: number,
   modifiers: TerrainModifier[],
   materialFieldCache: Map<string, TerrainMaterialFields>,
@@ -164,7 +374,6 @@ function generateSectionMesh(
     originX,
     sectionSize,
     resolution,
-    level,
     densityModifiers,
     'x',
   )
@@ -172,7 +381,6 @@ function generateSectionMesh(
     originZ,
     sectionSize,
     resolution,
-    level,
     densityModifiers,
     'z',
   )
@@ -233,7 +441,7 @@ function generateSectionMesh(
           originX,
           originZ,
           sectionSize,
-          Math.max(0.5, 1 - level * 0.12),
+          1,
         )
       : baseBuffers
 
@@ -249,6 +457,7 @@ function generateSectionMesh(
     result.interiorVertices,
     originX,
     originZ,
+    seed,
     materialFieldCache,
   )
   const validation = validateMeshData(result.positions, result.indices)
@@ -259,10 +468,113 @@ function generateSectionMesh(
     colors,
     surfaceFields,
     indices: result.indices,
+    featureLocks: createFeatureLocks(
+      result.positions,
+      result.interiorVertices,
+      originX,
+      originZ,
+      sectionSize,
+      sectionSize / resolution,
+      modifiers,
+    ),
     warnings: validation.warnings.length,
     hasArbitraryTopology:
       tunnels.length > 0 || hasLateralDisplacement(modifiers),
   }
+}
+
+function createFeatureLocks(
+  positions: Float32Array,
+  interiorVertices: Uint8Array,
+  originX: number,
+  originZ: number,
+  sectionSize: number,
+  sourceSpacing: number,
+  modifiers: TerrainModifier[],
+): Uint8Array {
+  const locks = new Uint8Array(positions.length / 3)
+  const localModifiers = modifiers.filter(
+    (
+      modifier,
+    ): modifier is BrushStrokeModifier | BooleanSubtractModifier =>
+      modifier.enabled &&
+      (modifier.type === 'brush-stroke' ||
+        modifier.type === 'boolean-subtract'),
+  )
+  const padding = Math.max(0.05, sourceSpacing * 1.25)
+  const boundaryEpsilon = Math.max(1e-4, sectionSize * 1e-5)
+
+  for (let vertex = 0; vertex < locks.length; vertex += 1) {
+    const offset = vertex * 3
+    const localX = positions[offset]
+    const y = positions[offset + 1]
+    const localZ = positions[offset + 2]
+    if (
+      interiorVertices[vertex] === 1 ||
+      localX <= boundaryEpsilon ||
+      localX >= sectionSize - boundaryEpsilon ||
+      localZ <= boundaryEpsilon ||
+      localZ >= sectionSize - boundaryEpsilon
+    ) {
+      locks[vertex] = 1
+      continue
+    }
+
+    const x = originX + localX
+    const z = originZ + localZ
+    for (const modifier of localModifiers) {
+      if (modifier.type === 'boolean-subtract') {
+        if (insideExpandedBounds(x, y, z, modifier.bounds, padding)) {
+          locks[vertex] = 1
+          break
+        }
+        continue
+      }
+
+      if (
+        x < modifier.bounds.min.x - padding ||
+        x > modifier.bounds.max.x + padding ||
+        z < modifier.bounds.min.z - padding ||
+        z > modifier.bounds.max.z + padding
+      ) {
+        continue
+      }
+      // Brush evaluation can move a point by up to 2.8 m before locks are
+      // calculated. Include that displacement so edge vertices cannot escape
+      // the authored region and then be simplified away.
+      const radius = modifier.radius + padding + 2.8
+      for (const sample of modifier.points) {
+        const dx = x - sample.x
+        const dz = z - sample.z
+        const distance = modifier.domain === 'heightfield'
+          ? Math.hypot(dx, dz)
+          : Math.hypot(dx, y - sample.y, dz)
+        if (distance <= radius) {
+          locks[vertex] = 1
+          break
+        }
+      }
+      if (locks[vertex] === 1) break
+    }
+  }
+  return locks
+}
+
+function insideExpandedBounds(
+  x: number,
+  y: number,
+  z: number,
+  bounds: AABB,
+  padding: number,
+): boolean {
+  return (
+    x >= bounds.min.x - padding &&
+    x <= bounds.max.x + padding &&
+    y >= bounds.min.y - padding &&
+    y <= bounds.max.y + padding &&
+    z >= bounds.min.z - padding &&
+    z <= bounds.max.z + padding
+  )
 }
 
 const PACKED_UNIT_MAX = 65_535
@@ -275,6 +587,7 @@ function calculateSurfaceFields(
   interiorVertices: Uint8Array,
   originX: number,
   originZ: number,
+  seed: number,
   cache: Map<string, TerrainMaterialFields>,
 ): readonly [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] {
   const vertexCount = positions.length / 3
@@ -291,6 +604,7 @@ function calculateSurfaceFields(
     indices,
     interiorVertices,
   )
+  const curvature = calculateMeshCurvature(positions, normals, indices)
 
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     const source = vertex * 3
@@ -301,26 +615,26 @@ function calculateSurfaceFields(
     const key = `${x}:${y}:${z}`
     let fields = cache.get(key)
     if (!fields) {
-      fields = evaluateTerrainMaterialFields(x, y, z)
+      fields = evaluateTerrainMaterialFields(x, y, z, seed)
       cache.set(key, fields)
     }
 
     packed[0].set([
       packUnit(fields.regional * 0.5 + 0.5),
-      packUnit(fields.patch),
+      packUnit(fields.deposition),
       packUnit(fields.moisture),
       packUnit(fields.macro),
     ], target)
     packed[1].set([
-      packUnit(fields.dipAngle),
-      packUnit(fields.dipAzimuth),
+      packUnit(fields.beddingX * 0.5 + 0.5),
+      packUnit(fields.beddingY * 0.5 + 0.5),
+      packUnit(fields.beddingZ * 0.5 + 0.5),
       packUnit(fields.bedThickness),
-      packUnit(fields.bedExposure),
     ], target)
     packed[2].set([
       packUnit(fields.jointing),
       packUnit(fields.lichen),
-      packUnit(fields.outcrop),
+      packUnit(curvature[vertex] * 0.5 + 0.5),
       packUnit(fields.mottle),
     ], target)
     packed[3].set([
@@ -331,10 +645,100 @@ function calculateSurfaceFields(
     ], target)
     packed[4][target] = packUnit(fields.buttress)
     packed[4][target + 1] = packUnit(occlusion[vertex])
-    packed[4][target + 2] = 0
-    packed[4][target + 3] = 0
+    packed[4][target + 2] = packUnit(fields.flow)
+    packed[4][target + 3] = packUnit(fields.bedExposure)
   }
   return packed
+}
+
+/**
+ * Mean curvature at every vertex, signed, in roughly 1/m and remapped to
+ * [-1, 1].
+ *
+ * Positive is convex — ridge crests, rib noses, the lip of a bench — where
+ * weathering is fastest and nothing loose can stay, so bare rock outcrops.
+ * Negative is concave — gully floors, the foot of a face, the back of a ledge —
+ * where debris, soil, water and snow all collect. Almost every honest material
+ * boundary on a mountainside follows this quantity, and it is the field a
+ * thresholded noise mask is standing in for when it happens to look right.
+ *
+ * Measured as the divergence of the normal field over each vertex's edge ring,
+ * normalised by edge length so the value does not change with LOD.
+ */
+function calculateMeshCurvature(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: Uint32Array,
+): Float32Array {
+  const vertexCount = positions.length / 3
+  const sum = new Float32Array(vertexCount)
+  const counts = new Uint32Array(vertexCount)
+
+  for (let index = 0; index < indices.length; index += 3) {
+    for (let edge = 0; edge < 3; edge += 1) {
+      const a = indices[index + edge]
+      const b = indices[index + ((edge + 1) % 3)]
+      const pa = a * 3
+      const pb = b * 3
+      const dx = positions[pb] - positions[pa]
+      const dy = positions[pb + 1] - positions[pa + 1]
+      const dz = positions[pb + 2] - positions[pa + 2]
+      const length = Math.hypot(dx, dy, dz)
+      if (length < 1e-6) continue
+      // How much the normal turns away from the neighbour over that edge.
+      // Dividing twice by the length converts a turn per edge into a turn per
+      // metre per metre, which is what makes this LOD-independent.
+      const turn =
+        (normals[pb] - normals[pa]) * dx +
+        (normals[pb + 1] - normals[pa + 1]) * dy +
+        (normals[pb + 2] - normals[pa + 2]) * dz
+      const value = turn / (length * length)
+      sum[a] += value
+      sum[b] += value
+      counts[a] += 1
+      counts[b] += 1
+    }
+  }
+
+  const raw = new Float32Array(vertexCount)
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (counts[vertex] === 0) continue
+    raw[vertex] = sum[vertex] / counts[vertex]
+  }
+
+  // Curvature measured over a single edge is dominated by whatever noise the
+  // height stack put at the triangle scale, and saturates instantly. What
+  // decides where debris rests is the shape of the *slope*, over tens of
+  // metres, so the field is relaxed across the vertex ring a few times to reach
+  // that scale before it is used.
+  const smoothed = new Float32Array(raw)
+  const accumulation = new Float32Array(vertexCount)
+  for (let iteration = 0; iteration < 6; iteration += 1) {
+    accumulation.fill(0)
+    counts.fill(0)
+    for (let index = 0; index < indices.length; index += 3) {
+      for (let edge = 0; edge < 3; edge += 1) {
+        const a = indices[index + edge]
+        const b = indices[index + ((edge + 1) % 3)]
+        accumulation[a] += smoothed[b]
+        accumulation[b] += smoothed[a]
+        counts[a] += 1
+        counts[b] += 1
+      }
+    }
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      if (counts[vertex] === 0) continue
+      smoothed[vertex] = accumulation[vertex] / counts[vertex]
+    }
+  }
+
+  const curvature = new Float32Array(vertexCount)
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    // Scaled so an ordinary hillside sits near zero and only a real rib nose or
+    // gully floor approaches the ends of the range.
+    curvature[vertex] = clamp(smoothed[vertex] * 9, -1, 1)
+  }
+  return curvature
 }
 
 /**
@@ -436,7 +840,6 @@ function createAdaptiveAxis(
   origin: number,
   size: number,
   resolution: number,
-  level: number,
   modifiers: (RemeshModifier | TessellateModifier)[],
   axis: 'x' | 'z',
 ): number[] {
@@ -444,23 +847,18 @@ function createAdaptiveAxis(
   for (let index = 0; index <= resolution; index += 1) {
     coordinates.add(roundCoordinate(origin + (index / resolution) * size))
   }
-  if (level <= 2) {
-    for (const modifier of modifiers) {
-      const center = modifier.center[axis]
-      const minimum = Math.max(origin, center - modifier.radius)
-      const maximum = Math.min(origin + size, center + modifier.radius)
-      // Keep modifier-authored boundary samples identical across every LOD.
-      // The nested base grid still becomes coarser, but a density region may
-      // not introduce a different edge tessellation on each side of a seam.
-      const spacing = clamp(modifier.targetEdgeLength, size / 96, size / 6)
-      const maxLines = 48
-      let lines = 0
-      for (let coordinate = minimum; coordinate <= maximum && lines < maxLines; coordinate += spacing) {
-        coordinates.add(roundCoordinate(coordinate))
-        lines += 1
-      }
-      coordinates.add(roundCoordinate(maximum))
+  for (const modifier of modifiers) {
+    const center = modifier.center[axis]
+    const minimum = Math.max(origin, center - modifier.radius)
+    const maximum = Math.min(origin + size, center + modifier.radius)
+    const spacing = clamp(modifier.targetEdgeLength, size / 96, size / 6)
+    const maxLines = 48
+    let lines = 0
+    for (let coordinate = minimum; coordinate <= maximum && lines < maxLines; coordinate += spacing) {
+      coordinates.add(roundCoordinate(coordinate))
+      lines += 1
     }
+    coordinates.add(roundCoordinate(maximum))
   }
   return [...coordinates].sort((a, b) => a - b)
 }

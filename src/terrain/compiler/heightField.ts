@@ -25,10 +25,82 @@ export interface HeightFieldSample {
   height: number
   /** 0 on plains, 1 in the high massif. Drives material and detail decisions. */
   massif: number
-  /** 0..1 proximity to a carved drainage line. */
+  /** 0..1 proximity to a carved drainage line; the mask the carving used. */
   valley: number
+  /** 0..1 catchment concentration: where water runs, carved or not. */
+  flow: number
   /** Cheap local gradient magnitude estimate; ~1 is a 45-degree slope. */
   steepness: number
+  /** The bedding attitude used to terrace this point. */
+  bedding: Bedding
+}
+
+/**
+ * Attitude of the local bedding planes.
+ *
+ * Sedimentary rock is a stack of parallel planes cutting *through* the rock
+ * mass. They are not a function of elevation, and that distinction is the
+ * entire difference between strata and a contour map: because the planes are
+ * tilted and the topography is not, the outcrop trace of a bed cuts obliquely
+ * across a slope, widens on gentle ground, narrows on a face, and vanishes
+ * altogether where a hillside happens to lie parallel to the bedding.
+ *
+ * One model produces this, and both the mesh terracing and the material read
+ * from it, so the geometric ledge and the shaded band are the same bed.
+ */
+export interface Bedding {
+  /** Unit normal of the bedding planes; `y` is `cos(dip)`. */
+  normalX: number
+  normalY: number
+  normalZ: number
+  /** Metres of true thickness between successive beds. */
+  thickness: number
+  /** 0..1 how strongly bedding is expressed at the surface in this region. */
+  expression: number
+}
+
+/** Dip range in radians. Below ~10 degrees the outcrop trace is a contour. */
+const MIN_DIP = 0.22
+const MAX_DIP = 0.62
+
+/**
+ * Bedding attitude at a point. Dip and strike drift over kilometres — the scale
+ * of a fold limb — so one massif reads as a single tilted block rather than as
+ * a pattern applied per-pixel.
+ */
+export function sampleBedding(x: number, z: number, seed: number): Bedding {
+  const dip =
+    MIN_DIP +
+    (fbm(x * 0.00042, z * 0.00042, seed + 811, 2, 2.1, 0.5) * 0.5 + 0.5) *
+      (MAX_DIP - MIN_DIP)
+  // The strike follows the range's own trend, as it does in a real orogeny
+  // where the folding and the topography share a cause.
+  const azimuth =
+    0.42 +
+    Math.PI * 0.5 +
+    fbm(x * 0.00031, z * 0.00031, seed + 823, 2, 2.1, 0.5) * 1.1
+  const sinDip = Math.sin(dip)
+  const thickness =
+    9 + (fbm(x * 0.00075, z * 0.00075, seed + 839, 2, 2, 0.5) * 0.5 + 0.5) * 17
+  // Only part of a range is well-bedded at the surface. Elsewhere the rock is
+  // massive, or the beds are too thin to resolve, or the face is a fresh
+  // fracture across them. Without this gate the banding rings every summit.
+  const expression = clamp(
+    smoothstep(
+      0.44,
+      0.82,
+      fbm(x * 0.00095, z * 0.00095, seed + 857, 3, 2.1, 0.5) * 0.5 + 0.5,
+    ),
+    0,
+    1,
+  )
+  return {
+    normalX: Math.sin(azimuth) * sinDip,
+    normalY: Math.cos(dip),
+    normalZ: Math.cos(azimuth) * sinDip,
+    thickness,
+    expression,
+  }
 }
 
 const MOUNTAIN_AMPLITUDE = 470
@@ -94,6 +166,17 @@ export function sampleHeightField(
   const cutDepth = (26 + massif * 120) * valley
   height -= cutDepth
 
+  // Water does not only run where the valley is deep enough to have been cut.
+  // It runs down every hollow, and the wet rock, the moss and the green strip
+  // that marks a runnel are visible long before there is a gorge. `valley` is
+  // the carving mask and is deliberately narrow; this is the catchment the
+  // material should read, and it reaches into every tributary above it.
+  // Concentration falls off sharply away from a channel: most of a hillside is
+  // interfluve that sheds water rather than carrying it. Widening this until
+  // the tributaries appear also makes every face wet, which reads as polished
+  // mud — so the band stays narrow and the tail is what reaches upslope.
+  const flow = clamp(smoothstep(0.5, 0.95, 1 - drainage), 0, 1) ** 1.4
+
   // Flatten the valley floor so rivers and meadows have somewhere to sit.
   const floor = SEA_LEVEL + 6 + massif * 40
   if (valley > 0.55) {
@@ -103,14 +186,43 @@ export function sampleHeightField(
 
   // --- 5. strata terracing ---------------------------------------------
   const steepness = estimateSteepness(x, z, seed, massif)
-  const terraced = applyStrata(height, x, z, seed, massif, steepness)
+  const bedding = sampleBedding(x, z, seed)
+  const terraced = applyStrata(height, x, z, seed, massif, steepness, bedding)
 
-  return { height: terraced, massif, valley, steepness }
+  return { height: terraced, massif, valley, flow, steepness, bedding }
+}
+
+/**
+ * Memoised whole-sample access.
+ *
+ * Meshing evaluates the height at every vertex and the material pass then needs
+ * the terrain-derived fields at the same points. The stack behind these is nine
+ * octaves of ridged multifractal plus a drainage network, so recomputing it
+ * would roughly double compile time; a bounded map keyed on the exact
+ * coordinates the mesher used turns the second pass into a lookup.
+ */
+const sampleCache = new Map<string, HeightFieldSample>()
+const SAMPLE_CACHE_LIMIT = 300_000
+
+export function sampleHeightFieldCached(
+  x: number,
+  z: number,
+  seed: number,
+): HeightFieldSample {
+  const key = `${x}:${z}:${seed}`
+  const hit = sampleCache.get(key)
+  if (hit) return hit
+  const sample = sampleHeightField(x, z, seed)
+  // Compiles arrive section by section, so the oldest entries are the least
+  // likely to be asked for again. Clearing wholesale beats evicting one by one.
+  if (sampleCache.size >= SAMPLE_CACHE_LIMIT) sampleCache.clear()
+  sampleCache.set(key, sample)
+  return sample
 }
 
 /** Convenience wrapper for callers that only need elevation. */
 export function sampleHeight(x: number, z: number, seed: number): number {
-  return sampleHeightField(x, z, seed).height
+  return sampleHeightFieldCached(x, z, seed).height
 }
 
 /**
@@ -145,12 +257,18 @@ function coarseRelief(x: number, z: number, seed: number): number {
 }
 
 /**
- * Quantises elevation towards discrete bedding planes, blended in by how steep
- * the ground is. This is the difference between strata and contour lines: on a
- * bench the surface keeps its smooth profile, and only faces steep enough to
- * expose the rock gain the ledge-and-riser profile. The band phase is also
- * perturbed horizontally so ledges break up instead of ringing the whole massif
- * at one elevation.
+ * Cuts ledge-and-riser profiles into faces where resistant beds outcrop.
+ *
+ * The surface is pulled towards the nearest *bedding plane*, measured along the
+ * bedding normal, not towards the nearest elevation. Because the planes are
+ * tilted 13-36 degrees and the topography is not, the resulting ledges climb
+ * across a slope and die out where the hillside turns to face along the dip —
+ * the behaviour that reads as geology. Quantising elevation instead, however
+ * finely it is jittered, can only ever produce contours.
+ *
+ * Terracing is also confined to genuinely steep, well-bedded ground: a bench or
+ * a meadow keeps its smooth profile, so the ledges belong to the cliffs that
+ * carry them rather than ringing the whole massif.
  */
 function applyStrata(
   height: number,
@@ -159,28 +277,31 @@ function applyStrata(
   seed: number,
   massif: number,
   steepness: number,
+  bedding: Bedding,
 ): number {
-  const exposure = smoothstep(0.62, 1.5, steepness) * massif
+  const exposure =
+    smoothstep(0.85, 1.9, steepness) * massif * bedding.expression
   if (exposure < 0.02) return height
-  const bandHeight = 21 + fbm(x * 0.0009, z * 0.0009, seed + 503, 2, 2, 0.5) * 9
-  // Tilt the bedding so strata are not level, and jitter the phase so a single
-  // bedding plane does not survive all the way around the mountain.
-  const tilt = x * 0.041 + z * 0.023
-  const jitter = fbm(x * 0.0021, z * 0.0021, seed + 601, 3, 2.1, 0.5) * bandHeight * 0.55
-  const local = height + tilt + jitter
-  const band = local / bandHeight
+
+  // Distance from the origin along the bedding normal, in bed counts. The
+  // horizontal terms carry sin(dip), which is what makes the trace oblique.
+  const along =
+    x * bedding.normalX + height * bedding.normalY + z * bedding.normalZ
+  const band = along / bedding.thickness
   const index = Math.floor(band)
   const fraction = band - index
-  // Hard bands alternate with soft ones, so ledges vary in prominence.
+  // Beds alternate resistant and weak, so ledges vary in prominence instead of
+  // arriving as a regular comb.
   const hardness = 0.5 + fbm(index * 0.7, index * 1.3, seed + 701, 2, 2, 0.5) * 0.5
-  // A narrow transition band is what makes the riser near-vertical; widening it
+  // A narrow transition is what makes the riser near-vertical; widening it
   // turns the same code into gentle steps.
-  const stepped =
-    (index + smoothstep(0.46 - hardness * 0.1, 0.54 + hardness * 0.14, fraction)) *
-      bandHeight -
-    tilt -
-    jitter
-  return lerp(height, stepped, 0.6 * exposure * hardness)
+  const snapped =
+    index + smoothstep(0.44 - hardness * 0.12, 0.56 + hardness * 0.16, fraction)
+  // Convert the correction back to a vertical displacement. Dividing by the
+  // normal's vertical component moves the point onto the plane along Y, which
+  // is the only axis a heightfield may move on.
+  const shift = ((snapped - band) * bedding.thickness) / bedding.normalY
+  return height + shift * clamp(0.55 * exposure * hardness, 0, 1)
 }
 
 function ridgedMultifractal(

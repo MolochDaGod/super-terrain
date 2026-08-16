@@ -26,11 +26,10 @@ const availableWorkers =
 export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   worldSize: 16_384,
   sectionSize: 128,
-  // Every coarser resolution divides the next finer one, so all boundary
-  // samples of a coarse LOD are present in the fine one and adjacent sections
-  // at different LODs still meet along an identical polyline.
-  // 96 segments over a 128 m section is ~1.3 m triangles at LOD0, which is what
-  // lets cliff faces and strata read as geometry rather than as shading.
+  // The finest resolution creates the authoritative section mesh. Coarser
+  // values define QEM triangle-count targets; borders and authored features
+  // remain locked, so a level may deliberately retain more triangles than its
+  // nominal target. 96 segments over 128 m is ~1.3 m source topology.
   lodResolutions: [96, 48, 24, 12, 6],
   operationHalo: 12,
   workerCount: Math.max(2, Math.min(4, availableWorkers - 2)),

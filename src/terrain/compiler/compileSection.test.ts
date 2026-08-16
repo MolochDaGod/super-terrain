@@ -54,8 +54,12 @@ describe('section compiler', () => {
   it('is deterministic for procedural source and modifier inputs', () => {
     const first = compileTerrainSection(requestWithTunnel(false))
     const second = compileTerrainSection(requestWithTunnel(false))
-    expect(first.lods[0].positions).toEqual(second.lods[0].positions)
-    expect(first.lods[0].indices).toEqual(second.lods[0].indices)
+    expect(first.lods.map((lod) => lod.positions)).toEqual(
+      second.lods.map((lod) => lod.positions),
+    )
+    expect(first.lods.map((lod) => lod.indices)).toEqual(
+      second.lods.map((lod) => lod.indices),
+    )
   })
 
   it('emits genuine non-heightfield tunnel topology', () => {
@@ -66,15 +70,76 @@ describe('section compiler', () => {
     expect(tunnel.lods).toHaveLength(3)
     expect(tunnel.metadata.validationWarnings).toBe(0)
 
-    const positions = tunnel.lods[0].positions
-    const elevationsByPlanarPoint = new Map<string, Set<number>>()
-    for (let index = 0; index < positions.length; index += 3) {
-      const key = `${positions[index].toFixed(2)}:${positions[index + 2].toFixed(2)}`
-      const heights = elevationsByPlanarPoint.get(key) ?? new Set<number>()
-      heights.add(Math.round(positions[index + 1] * 100))
-      elevationsByPlanarPoint.set(key, heights)
+    for (const lod of tunnel.lods) {
+      const elevationsByPlanarPoint = new Map<string, Set<number>>()
+      for (let index = 0; index < lod.positions.length; index += 3) {
+        const key = `${lod.positions[index].toFixed(2)}:${lod.positions[index + 2].toFixed(2)}`
+        const heights = elevationsByPlanarPoint.get(key) ?? new Set<number>()
+        heights.add(Math.round(lod.positions[index + 1] * 100))
+        elevationsByPlanarPoint.set(key, heights)
+      }
+      expect(
+        [...elevationsByPlanarPoint.values()].some(
+          (heights) => heights.size > 1,
+        ),
+      ).toBe(true)
     }
-    expect([...elevationsByPlanarPoint.values()].some((heights) => heights.size > 1)).toBe(true)
+  })
+
+  it('retains a localized mesh sculpt in every simplified LOD', () => {
+    const point = { x: 40, y: evaluateHeight(40, 40, 17, []), z: 40 }
+    const stroke = createBrushStroke({
+      point,
+      normal: { x: 1, y: 0, z: 0 },
+      domain: 'mesh',
+      mode: 'raise',
+      radius: 5,
+      strength: 1,
+      falloff: 0.5,
+    })
+    const request = requestFor({ x: 0, z: 0 }, [stroke], 16)
+    request.config.lodResolutions = [16, 8, 4]
+    const compiled = compileTerrainSection(request)
+
+    expect(compiled.lods[2].triangleCount).toBeLessThan(
+      compiled.lods[0].triangleCount,
+    )
+    for (const lod of compiled.lods) {
+      expect(retainsSculptPeak(lod.positions, point.x, point.z)).toBe(true)
+    }
+
+    request.levels = [2]
+    const distantOnly = compileTerrainSection(request)
+    expect(distantOnly.metadata.vertexCount).toBe(17 * 17)
+    expect(distantOnly.lods[0].level).toBe(2)
+    expect(
+      retainsSculptPeak(distantOnly.lods[0].positions, point.x, point.z),
+    ).toBe(true)
+  })
+
+  it('keeps the authoritative border and its shading in every LOD', () => {
+    const request = requestFor({ x: 0, z: 0 }, [], 16)
+    request.config.lodResolutions = [16, 8, 4]
+    const lods = compileTerrainSection(request).lods
+    const authoritative = boundaryVertices(lods[0])
+
+    expect(lods[1].triangleCount).toBeLessThan(lods[0].triangleCount)
+    expect(lods[2].triangleCount).toBeLessThan(lods[1].triangleCount)
+    for (const lod of lods.slice(1)) {
+      expect(boundaryVertices(lod)).toEqual(authoritative)
+    }
+  })
+
+  it('skips hidden fine topology for a procedural single-LOD request', () => {
+    const request = requestFor({ x: 0, z: 0 }, [], 16)
+    request.config.lodResolutions = [16, 8, 4]
+    request.levels = [2]
+    const compiled = compileTerrainSection(request)
+
+    expect(compiled.lods).toHaveLength(1)
+    expect(compiled.lods[0].level).toBe(2)
+    expect(compiled.metadata.vertexCount).toBe(25)
+    expect(compiled.lods[0].triangleCount).toBe(32)
   })
 
   it('keeps heightfield strokes on Y and lets mesh strokes deform XZ', () => {
@@ -179,3 +244,54 @@ describe('section compiler', () => {
     }
   })
 })
+
+function boundaryVertices(lod: {
+  positions: Float32Array
+  normals: Float32Array
+  colors: Float32Array
+  surfaceFields?: readonly Uint16Array[]
+}): Map<string, number[]> {
+  const boundary = new Map<string, number[]>()
+  for (let offset = 0; offset < lod.positions.length; offset += 3) {
+    const x = lod.positions[offset]
+    const z = lod.positions[offset + 2]
+    if (x !== 0 && x !== 128 && z !== 0 && z !== 128) continue
+    const values = [
+      lod.positions[offset + 1],
+      lod.normals[offset],
+      lod.normals[offset + 1],
+      lod.normals[offset + 2],
+      lod.colors[offset],
+      lod.colors[offset + 1],
+      lod.colors[offset + 2],
+    ]
+    const fieldOffset = (offset / 3) * 4
+    for (const field of lod.surfaceFields ?? []) {
+      values.push(
+        field[fieldOffset],
+        field[fieldOffset + 1],
+        field[fieldOffset + 2],
+        field[fieldOffset + 3],
+      )
+    }
+    boundary.set(`${x}:${z}`, values)
+  }
+  return boundary
+}
+
+function retainsSculptPeak(
+  positions: Float32Array,
+  sourceX: number,
+  sourceZ: number,
+): boolean {
+  for (let offset = 0; offset < positions.length; offset += 3) {
+    if (
+      Math.abs(positions[offset + 2] - sourceZ) < 1e-4 &&
+      positions[offset] > sourceX + 2.5 &&
+      positions[offset] < sourceX + 3.1
+    ) {
+      return true
+    }
+  }
+  return false
+}

@@ -64,7 +64,7 @@ Core engine state lives under `src/terrain` and does not depend on React. `Buffe
 
 ## Terrain pipeline
 
-Each resident 128 m section is generated and compiled independently. A build evaluates transformed spatial modifiers, emits adaptive local coordinates for density regions, applies BVH-accelerated volumetric CSG for tunnel topology, validates the indexed mesh, computes normals/colors, and generates five nested LOD buffers. Shared boundary samples and analytical boundary normals keep neighboring sections visually continuous without dark skirt walls.
+Each resident 128 m section is generated and compiled independently. A build evaluates transformed spatial modifiers, emits adaptive local coordinates for density regions, applies BVH-accelerated volumetric CSG for tunnel topology, validates one authoritative indexed mesh, and derives the coarser levels with error-bounded QEM simplification. Borders, sculpted regions, tunnel interiors, normals, colors, and cached material fields are retained from that source mesh, so topology cannot vanish merely because an independently sampled coarse grid missed it.
 
 Streaming is centered on the camera's orbit/fly target rather than the camera's ground position. The resident radius expands with the projected viewport footprint, contracts slowly with hysteresis, and never shrinks because of a transient slow frame. A worker-generated coarse far-field mesh keeps the full world silhouette visible beyond the editable working set and while newly requested sections compile.
 

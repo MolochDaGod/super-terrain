@@ -39,6 +39,40 @@ function falloffRaw(high: any, low: any, value: any): any {
 }
 
 /**
+ * Pixel footprints, in multiples of a feature's size, between which a detail
+ * band fades out. A band is dead once a pixel is `*_FADE_END` times its size.
+ *
+ * These are exported because the branches that skip a band must be placed at
+ * exactly the footprint where the band has already reached zero. Cutting a
+ * branch while its contents still contribute leaves a step in the output, and
+ * the quantity being compared — the screen-space derivative of world position —
+ * is itself noisy from pixel to pixel on a bumpy surface at a grazing angle. So
+ * pixels either side of the threshold interleave, and a step becomes a field of
+ * salt-and-pepper glitter rather than a visible seam. Deriving one from the
+ * other is the only way to keep them from drifting apart.
+ */
+export const LOD_FADE_END = 6.5
+const LOD_FADE_START = 2.2
+export const DETAIL_FADE_END = 5.5
+const DETAIL_FADE_START = 2.0
+
+/** Footprint at which a band-limited fBm or ridge stack has fully faded. */
+export function lodDeadFootprint(wavelength: number): number {
+  return wavelength * LOD_FADE_END
+}
+
+/** Footprint at which a discrete `detailFade` band has fully faded. */
+export function detailDeadFootprint(featureSize: number): number {
+  return featureSize * DETAIL_FADE_END
+}
+
+/**
+ * Mean of the shaped ridge term, used so a fading octave dissolves into its own
+ * average rather than into zero.
+ */
+const RIDGE_MEAN = 0.29
+
+/**
  * Band-limited fBm in [0, 1]. `wavelength` is the world size of the first
  * octave; `footprint` is the world size of one pixel.
  */
@@ -55,8 +89,12 @@ export function fbmLod(
   for (let octave = 0; octave < octaves; octave += 1) {
     const scale = float(frequency).div(wavelength)
     // Nyquist-style fade: an octave is worth sampling only while its
-    // wavelength is comfortably larger than a pixel.
-    const visible = falloffRaw(float(2.6).div(scale), float(0.9).div(scale), footprint)
+    // wavelength is comfortably larger than a pixel. The margin has to be
+    // generous because this field is differentiated to build the normal, and a
+    // derivative needs several times the sample density that a value does — at
+    // three samples per wavelength the value is merely soft, but its gradient
+    // is already noise, which arrives on screen as salt-and-pepper glitter.
+    const visible = falloffRaw(float(LOD_FADE_END).div(scale), float(LOD_FADE_START).div(scale), footprint)
     sum.addAssign(mx_noise_float(position.mul(scale)).mul(amplitude).mul(visible))
     total += amplitude
     amplitude *= 0.52
@@ -85,7 +123,7 @@ export function fbmLodBands(
   let frequency = 1
   for (let octave = 0; octave < octaves; octave += 1) {
     const scale = float(frequency).div(wavelength)
-    const visible = falloffRaw(float(2.6).div(scale), float(0.9).div(scale), footprint)
+    const visible = falloffRaw(float(LOD_FADE_END).div(scale), float(LOD_FADE_START).div(scale), footprint)
     const weighted = mx_noise_float(position.mul(scale)).mul(amplitude).mul(visible)
     sum.addAssign(weighted)
     if (octave >= fineFromOctave) {
@@ -119,14 +157,19 @@ export function ridgedLod(
   const weightCarry = float(1).toVar()
   for (let octave = 0; octave < octaves; octave += 1) {
     const scale = float(frequency).div(wavelength)
-    const visible = falloffRaw(float(2.6).div(scale), float(0.9).div(scale), footprint)
+    const visible = falloffRaw(float(LOD_FADE_END).div(scale), float(LOD_FADE_START).div(scale), footprint)
     const ridge = abs(mx_noise_float(position.mul(scale))).oneMinus()
     const shaped = ridge.mul(ridge).mul(weightCarry)
     // Carrying the previous octave's value forward concentrates the fine
     // detail onto the crests, which is what makes ridge noise read as rock
     // rather than as crumpled foil.
     weightCarry.assign(shaped.mul(2.1).clamp(0, 1))
-    sum.addAssign(shaped.mul(amplitude).mul(visible))
+    // Unlike signed fBm, whose mean is zero, a ridge term averages well above
+    // it. Multiplying by the visibility would therefore fade the field towards
+    // black instead of towards grey, and distant rock would darken as its
+    // cracks dissolved; blending to the mean keeps the average constant across
+    // the whole fade.
+    sum.addAssign(mix(float(RIDGE_MEAN), shaped, visible).mul(amplitude))
     total += amplitude
     amplitude *= 0.55
     frequency *= 2.07
@@ -293,7 +336,7 @@ export const falloff = /*@__PURE__*/ Fn(
  */
 export const detailFade = /*@__PURE__*/ Fn(
   ([footprint, featureSize]: [any, any]) =>
-    falloff(featureSize.mul(2.4), featureSize.mul(0.85), footprint),
+    falloff(featureSize.mul(DETAIL_FADE_END), featureSize.mul(DETAIL_FADE_START), footprint),
 )
 
 /** Blends a detail value towards its mean as the fade drops to zero. */

@@ -19,16 +19,22 @@ import {
 import {
   cells,
   cells2,
+  detailDeadFootprint,
   detailFade,
   fadeToMean,
   falloff,
   fbm1,
   fbmLod,
   fbmLodBands,
+  lodDeadFootprint,
   ridgedLod,
   warp,
   warp2,
 } from './fields'
+import {
+  BED_THICKNESS_MAX,
+  BED_THICKNESS_MIN,
+} from '../../compiler/TerrainMaterialFields'
 
 /**
  * The auto-material.
@@ -60,17 +66,50 @@ export interface SurfaceLayer {
   relief: number
 }
 
+/**
+ * Measured diffuse reflectances, linear.
+ *
+ * These are the real numbers — weathered limestone genuinely reflects about a
+ * third of the light that falls on it, and alpine turf about a twelfth. The
+ * previous values were three to five times darker across the board, which is
+ * survivable in isolation because exposure can be raised to compensate, but not
+ * in a scene with a physical sky: the compensation has to come from somewhere,
+ * and it came from a sun bright enough to blow out the snow and a haze that had
+ * to be thinned until it stopped separating the ridges. Getting the
+ * reflectances right is what lets every other quantity be right as well.
+ */
 export const SURFACE_LAYERS = {
-  grass: { name: 'grass', albedo: [0.043, 0.072, 0.026], roughness: 0.95, relief: 0.11 },
-  meadow: { name: 'meadow', albedo: [0.092, 0.089, 0.041], roughness: 0.93, relief: 0.09 },
-  soil: { name: 'soil', albedo: [0.041, 0.029, 0.019], roughness: 0.9, relief: 0.04 },
-  scree: { name: 'scree', albedo: [0.078, 0.071, 0.062], roughness: 0.85, relief: 0.2 },
-  rock: { name: 'rock', albedo: [0.086, 0.083, 0.078], roughness: 0.76, relief: 0.55 },
-  snow: { name: 'snow', albedo: [0.6, 0.615, 0.64], roughness: 0.72, relief: 0.14 },
+  grass: { name: 'grass', albedo: [0.052, 0.079, 0.031], roughness: 0.94, relief: 0.11 },
+  meadow: { name: 'meadow', albedo: [0.148, 0.126, 0.061], roughness: 0.92, relief: 0.09 },
+  soil: { name: 'soil', albedo: [0.105, 0.082, 0.058], roughness: 0.9, relief: 0.04 },
+  scree: { name: 'scree', albedo: [0.155, 0.148, 0.132], roughness: 0.87, relief: 0.2 },
+  rock: { name: 'rock', albedo: [0.265, 0.258, 0.238], roughness: 0.84, relief: 0.55 },
+  snow: { name: 'snow', albedo: [0.7, 0.73, 0.78], roughness: 0.7, relief: 0.14 },
 } satisfies Record<string, SurfaceLayer>
 
+/**
+ * World sizes of the detail bands, in metres.
+ *
+ * Each is used twice: once to band-limit the effect against the pixel footprint
+ * and once to place the branch that skips it. Both readings come from the same
+ * constant so a change to one cannot silently leave the other behind.
+ */
+const BLOCK_SIZE = 1.8
+const CRACK_WAVELENGTH = 0.9
+const CLUMP_WAVELENGTH = 0.34
+const BLADE_WAVELENGTH = CLUMP_WAVELENGTH / 2.07 ** 2
+const PEBBLE_SIZE = 0.16
+const LOOSE_STONE_SIZE = 0.28
+
 /** Blend sharpness for the height-based layer resolve, in metres. */
-const HEIGHT_BLEND_DEPTH = 0.07
+const HEIGHT_BLEND_DEPTH = 0.14
+/**
+ * How far coverage outranks relief in the layer contest, in metres of relief.
+ * Layers whose coverage differs by more than `HEIGHT_BLEND_DEPTH / COVERAGE_BIAS`
+ * are decided by coverage alone; closer than that, relief decides and the two
+ * interlock.
+ */
+const COVERAGE_BIAS = 0.38
 
 export interface LayerWeights {
   grass: any
@@ -96,21 +135,25 @@ export interface LayerWeights {
  */
 export interface TerrainSlowFields {
   regional: any
-  patch: any
+  /** Regolith depth: where loose material can rest. Replaces a noise mask. */
+  deposition: any
   moisture: any
-  dipAngle: any
-  dipAzimuth: any
+  /** Unit normal of the bedding planes the mesh itself was terraced along. */
+  beddingNormal: any
   bedThickness: any
   bedExposure: any
   jointing: any
   macro: any
   lichen: any
-  outcrop: any
+  /** Signed mean curvature: +1 convex rib, -1 concave hollow. */
+  curvature: any
   bedded: any
   buttress: any
   mottle: any
   regionalTint: any
   occlusion: any
+  /** Proximity to a drainage line, from the carved network. */
+  flow: any
 }
 
 export function terrainSlowFields(position: any): TerrainSlowFields {
@@ -136,32 +179,44 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
   )
   return {
     regional: layer.x.mul(2).sub(1),
-    patch: layer.y,
+    deposition: layer.y,
     moisture: layer.z,
     macro: layer.w,
-    dipAngle: bedding.x,
-    dipAzimuth: bedding.y,
-    bedThickness: bedding.z,
-    bedExposure: bedding.w,
+    // Interpolating the plane normal directly avoids the wrap discontinuity an
+    // interpolated strike azimuth would carry across every 360-degree seam.
+    beddingNormal: normalize(bedding.xyz.mul(2).sub(1)),
+    bedThickness: mix(
+      float(BED_THICKNESS_MIN),
+      float(BED_THICKNESS_MAX),
+      bedding.w,
+    ),
+    bedExposure: relief.w,
     jointing: material.x,
     lichen: material.y,
-    outcrop: material.z,
+    curvature: material.z.mul(2).sub(1),
     mottle: material.w,
     bedded: position.add(warpedAndTint.xyz.mul(2).sub(1).mul(16)),
     regionalTint: warpedAndTint.w,
     buttress: relief.x,
     occlusion: relief.y,
+    flow: relief.z,
   }
 }
 
 /**
- * Geometry-driven layer coverage.
+ * Layer coverage from the physical state of the ground.
  *
- * The thresholds are perturbed at three frequencies, not one. A single
- * low-frequency mask produces the "camouflage decal" look — crisp blobs of flat
- * colour — because the boundary is smooth at every scale it is viewed from.
- * Adding metre-scale perturbation to the *input* of the threshold gives
- * boundaries that stay ragged however close the camera gets.
+ * Nothing here is a noise field pushed through a threshold. Every layer is
+ * decided by whether its material could actually be at that point: whether
+ * loose debris can rest on that gradient, whether the curvature strips the
+ * surface or collects onto it, whether water reaches it, whether it is above
+ * the line where plants stop growing. Those quantities come from the same
+ * height stack the mesh was built from, so the material agrees with the
+ * landform instead of being sprinkled over it.
+ *
+ * The noise that remains does one job: it frays the *edges*. Real boundaries
+ * between turf and scree are ragged at every scale, and a boundary between two
+ * smooth fields is not, however carefully the fields are chosen.
  */
 export function layerWeights(
   position: any,
@@ -169,15 +224,20 @@ export function layerWeights(
   footprint: any,
   slow: TerrainSlowFields,
 ): LayerWeights {
+  // `slope` is 1 - cos(gradient): 0.06 at 20 degrees, 0.18 at 35, 0.29 at 45,
+  // 0.5 at 60. The angle of repose for talus sits near 0.19, and that number
+  // decides most of what follows.
   const slope = clamp(normal.y.oneMinus(), 0, 1).toVar('slope')
   const altitude = position.y
 
   const regional = slow.regional.mul(0.5)
-  const patch = slow.patch.toVar('patchField')
+  const curvature = slow.curvature.toVar('curvature')
+  const flow = slow.flow.toVar('flow')
   const moisture = slow.moisture.toVar('moisture')
-  // One ragged-edge field, reused by every threshold in this function. Three
-  // separate break-up noises at neighbouring frequencies cost three times as
-  // much and are indistinguishable once they are all multiplied into masks.
+
+  // One ragged-edge field, reused by every boundary in this function. Separate
+  // break-up noises at neighbouring frequencies cost several times as much and
+  // are indistinguishable once they are all multiplied into masks.
   const raw = float(0).toVar('rawFray')
   // Coverage fray follows the surface on holdable ground. Sampling a volume
   // there performs a full 3D lattice search even though the material has only
@@ -192,70 +252,84 @@ export function layerWeights(
   })
   const fray = raw.mul(0.22).toVar('fray')
 
-  const slopeNoisy = slope.add(regional.mul(0.1)).add(fray).toVar('slopeNoisy')
-
-  const rock = smoothstep(0.26, 0.5, slopeNoisy)
-    .add(smoothstep(0.55, 0.86, slopeNoisy).mul(0.6))
+  // How much loose material the ground can actually hold. Gradient sets the
+  // ceiling; convexity strips it (a rib nose sheds everything, which is why
+  // ribs are the bare rock on an otherwise grassy slope) and hollows keep it.
+  const regolith = falloff(0.44, 0.1, slope.add(fray.mul(0.6)))
+    .mul(falloff(0.85, 0.12, curvature))
+    .mul(slow.deposition.mul(0.6).add(0.45))
     .clamp(0, 1)
-    .toVar('wRock')
+    .toVar('regolith')
 
-  const exposed = rock.oneMinus().toVar()
+  // Bedrock is simply what is left where nothing can lie on top of it.
+  const rock = regolith.oneMinus().toVar('wRock')
+  const covered = regolith.toVar('covered')
 
-  // Talus collects on the moderate ground under a face: steep enough to be
-  // bare, shallow enough for debris to come to rest. Reference B's cliffs all
-  // stand on a fan of it, and its absence is what makes rock look like it grew
-  // out of the grass.
-  const deposition = smoothstep(0.16, 0.38, slopeNoisy)
-    .mul(falloff(0.62, 0.4, slopeNoisy))
-    .toVar('deposition')
-  const scree = deposition
-    .mul(exposed)
-    .mul(smoothstep(0.24, 0.62, patch.add(fray).add(regional.mul(0.4))))
+  // Talus: angular debris shed by the faces above, resting at its angle of
+  // repose. It needs ground steep enough to be fed and shallow enough to hold —
+  // a narrow band around 30-40 degrees — and it banks up where the slope is
+  // concave, which is exactly the foot of every cliff.
+  const repose = smoothstep(0.075, 0.17, slope.add(fray.mul(0.5)))
+    .mul(falloff(0.46, 0.24, slope))
+    .toVar('repose')
+  const scree = covered
+    .mul(repose)
+    .mul(falloff(0.5, float(-0.3), curvature).mul(0.7).add(0.3))
     .toVar('wScree')
 
-  const remaining = exposed.mul(scree.oneMinus()).toVar()
+  const remaining = covered.mul(scree.oneMinus()).toVar('remaining')
 
-  const soil = remaining
-    .mul(smoothstep(0.58, 0.86, patch.add(regional.mul(0.3)).add(fray)))
-    .mul(falloff(0.55, 0.2, moisture))
-    .toVar('wSoil')
+  // Above the treeline, and on ground too dry or too mobile, the regolith stays
+  // bare mineral soil and gravel.
+  const alpineFade = falloff(
+    412,
+    268,
+    altitude.add(regional.mul(44)).add(fray.mul(26)),
+  ).toVar('alpineFade')
+  const plantable = smoothstep(0.2, 0.52, moisture.add(raw.mul(0.28)))
+    .mul(alpineFade)
+    .mul(falloff(0.38, 0.1, slope.add(fray)))
+    .toVar('plantable')
 
-  // Turf cannot hold on a face; without this it floats as soft blobs on 50°
-  // rock, which is the classic give-away of an alpha-blended splat map.
-  const holdable = falloff(0.42, 0.2, slopeNoisy).toVar('holdable')
-  const vegetated = remaining.mul(soil.oneMinus()).mul(holdable).toVar()
+  const soil = remaining.mul(plantable.oneMinus()).toVar('wSoil')
+  const vegetated = remaining.mul(plantable).toVar('vegetated')
 
-  // Vegetation thins out with altitude the way an alpine treeline does.
-  const alpineFade = falloff(268, 158, altitude.add(regional.mul(38)).add(fray.mul(24)))
-  // Break the lush/dry transition with clump-scale noise so it interlocks in
-  // tongues and worn patches instead of dissolving across tens of metres.
-  const wearing = raw.mul(0.6)
-  const lush = smoothstep(0.3, 0.58, moisture.add(wearing)).mul(alpineFade)
+  // Lush green follows the water: the drainage lines, the seepage below a
+  // snowfield, the flat ground where it pools. Everywhere else the same turf is
+  // a dry straw-coloured sward. That single correlation does more for realism
+  // than any amount of colour noise, because it is the pattern the eye already
+  // knows from every photograph of a mountainside.
+  const lush = smoothstep(
+    0.3,
+    0.66,
+    moisture.mul(0.6).add(flow.mul(0.55)).add(raw.mul(0.3)),
+  ).toVar('lush')
   const grass = vegetated.mul(lush).toVar('wGrass')
   const meadow = vegetated.mul(lush.oneMinus()).toVar('wMeadow')
 
-  // Snow only holds high up and only where the ground is flat enough to keep
-  // it; on faces it slides off and leaves bare rock, as in the references.
-  // The snow line needs metre-scale break-up or it snaps to the mesh triangles
-  // it is evaluated across and the patches come out as polygonal shards.
-  const snowEdge = raw.mul(30).toVar('snowEdge')
-  // The slope term comes from the interpolated vertex normal, which is faceted
-  // at coarse LOD; without its own break-up the snow patches inherit the mesh
-  // triangles as straight edges.
+  // Snow holds high up, on ground flat enough to keep it, and drifts deepest in
+  // the hollows — so the snow line is not a contour but a ragged edge that runs
+  // low in every gully and high on every rib.
+  const snowEdge = raw.mul(30).add(curvature.mul(-46)).toVar('snowEdge')
   // Coverage is deliberately wide-blended in both altitude and slope. A narrow
   // threshold snaps to whatever resolution the underlying quantity has — here
   // the interpolated vertex normal — and the patches come out as flat polygons
   // with aliased straight edges.
   const snow = smoothstep(
-    262,
-    386,
+    286,
+    412,
     altitude.add(regional.mul(44)).add(fray.mul(30)).add(snowEdge),
   )
-    .mul(falloff(0.62, 0.16, slope.add(snowEdge.mul(0.01))))
+    .mul(falloff(0.5, 0.12, slope.add(snowEdge.mul(0.01))))
     .toVar('wSnow')
 
   const snowFree = snow.oneMinus()
-  const lichen = slow.lichen.mul(smoothstep(0.28, 0.72, moisture))
+  // Lichen grows on stable, damp, shaded rock and is absent from freshly
+  // fractured faces and from anything a rockfall keeps scouring.
+  const lichen = slow.lichen
+    .mul(smoothstep(0.26, 0.7, moisture))
+    .mul(falloff(0.6, float(-0.2), curvature))
+    .toVar('lichen')
 
   return {
     grass: grass.mul(snowFree),
@@ -305,6 +379,7 @@ export interface SurfaceDetail {
  */
 export function surfaceDetail(
   position: any,
+  normal: any,
   weights: LayerWeights,
   footprint: any,
   slow: TerrainSlowFields,
@@ -343,29 +418,28 @@ export function surfaceDetail(
   // coverage. Keeping them behind one coherent material branch avoids paying
   // for an entire cliff shader on meadow and snow pixels.
   If(rockyCoverage.greaterThan(0), () => {
-    outcrop.assign(slow.outcrop)
+    // Convex ground erodes fastest and outcrops hardest; the concave ground
+    // beside it is where the products of that erosion end up.
+    outcrop.assign(slow.curvature.mul(0.5).add(0.5))
 
     const bedded = slow.bedded
 
   // Bedding is a stack of *dipping planes* cutting through the rock mass, not a
-  // set of height contours painted on the surface. The distinction is the whole
-  // difference between strata and a topographic map: because the planes are
-  // tilted 15–40 degrees away from horizontal and the topography is not, the
-  // bands cut obliquely across slopes and terminate against faces of a
-  // different orientation, exactly as they do on a real cliff.
-    const dipAngle = mix(float(0.26), float(0.7), slow.dipAngle).toVar('dipAngle')
-    const dipAzimuth = slow.dipAzimuth.mul(6.283).toVar('dipAzimuth')
-    const beddingNormal = vec3(
-      dipAzimuth.sin().mul(dipAngle.sin()),
-      dipAngle.cos(),
-      dipAzimuth.cos().mul(dipAngle.sin()),
-    ).toVar('beddingNormal')
-
-  // Bed thickness drifts regionally so one massif is not a single printed
-  // pattern stretched over everything.
-    const bedThickness = mix(float(4.5), float(13), slow.bedThickness)
-      .toVar('bedThickness')
+  // set of height contours painted on the surface — and it is the very same
+  // stack the mesh was terraced along, so the shaded band and the geometric
+  // ledge are one bed rather than two patterns that happen to overlap.
+    const beddingNormal = slow.beddingNormal.toVar('beddingNormal')
+    const bedThickness = slow.bedThickness.toVar('bedThickness')
     const bandDepth = bedded.dot(beddingNormal).div(bedThickness).toVar('bandDepth')
+
+  // How obliquely this surface cuts the beds. A face square to the bedding
+  // shows a tight, sharp stack; a dip slope lying *along* the bedding is a
+  // single smooth slab with no banding at all. Without this term every surface
+  // in the scene carries the same stripes at the same spacing regardless of
+  // which way it points, which is what makes procedural strata read as a
+  // pattern wrapped around the mountain rather than as rock that was cut.
+    const alignment = dot(normal, beddingNormal).abs().toVar('bedAlignment')
+    const cutAngle = smoothstep(0.12, 0.55, alignment.oneMinus()).toVar('cutAngle')
   // Irregular bed thickness: displacing the band coordinate by noise *of the
   // band coordinate* keeps beds continuous while making no two the same size.
   // The displacement has to stay well below one band per band, or successive
@@ -390,15 +464,22 @@ export function surfaceDetail(
   // Only part of a massif is bedded rock at the surface; elsewhere it is
   // massive, jointed or covered. Gating by slow noise keeps the benches from
   // ringing the whole mountain like contour lines on a map.
-    bedExposure.assign(smoothstep(0.22, 0.58, slow.bedExposure))
+    bedExposure.assign(
+      smoothstep(0.22, 0.58, slow.bedExposure)
+        .mul(cutAngle)
+        // Beds outcrop on rock. On the debris and turf below they are buried,
+        // and printing them there is what turns strata into contour lines drawn
+        // across the whole hillside.
+        .mul(smoothstep(0.25, 0.7, weights.rock)),
+    )
     bedStep.assign(
       smoothstep(0.0, 0.16, strataBand)
         .mul(mix(float(0.45), float(1.15), bedHardness))
         .mul(bedExposure),
     )
     strata.assign(
-      mix(float(0.3), float(1), bedProfile)
-        .mul(mix(float(0.45), float(1), bedHardness))
+      mix(float(0.55), float(1), bedProfile)
+        .mul(mix(float(0.7), float(1), bedHardness))
         // Beds only exist where rock is actually exposed; on turf this term would
         // otherwise print contour lines across the grass.
         .mix(float(0.5), weights.rock.oneMinus().mul(0.85)),
@@ -411,7 +492,7 @@ export function surfaceDetail(
     const jointing = slow.jointing
       .mul(mix(float(0.45), float(1.15), bedHardness))
       .toVar('jointing')
-    If(footprint.lessThan(4.4), () => {
+    If(footprint.lessThan(detailDeadFootprint(BLOCK_SIZE)), () => {
       const blockCell = cells(warp(position, float(0.55), float(0.35)).mul(0.55))
       blocks.assign(
         fadeToMean(
@@ -419,7 +500,7 @@ export function surfaceDetail(
             smoothstep(0.35, 0.75, jointing),
           ),
           float(0.25),
-          detailFade(footprint, float(1.8)),
+          detailFade(footprint, float(BLOCK_SIZE)),
         ),
       )
     })
@@ -435,26 +516,33 @@ export function surfaceDetail(
   // waste, and on a landscape most of the screen is beyond it — so the whole
   // block is skipped rather than computed and then faded. The branch is on view
   // footprint, which varies smoothly across the screen, so it stays coherent.
-  const crack = float(0.5).toVar('crack')
+  // Matching each fallback to the band's own faded mean is what makes the
+  // branch invisible; a fallback of 0.5 against a ridge stack averaging 0.29
+  // leaves a step exactly where the branch is taken.
+  const crack = float(0.29).toVar('crack')
   const pebble = float(0.35).toVar('pebble')
   const pebbleId = float(0.5).toVar('pebbleId')
   const clump = float(0.5).toVar('clump')
   const blade = float(0.5).toVar('blade')
 
-  If(footprint.lessThan(2.4), () => {
+  If(footprint.lessThan(lodDeadFootprint(CRACK_WAVELENGTH)), () => {
     If(rockyCoverage.greaterThan(0), () => {
-      crack.assign(ridgedLod(position, float(0.9), 4, footprint))
+      crack.assign(ridgedLod(position, float(CRACK_WAVELENGTH), 4, footprint))
     })
     If(groundCoverage.greaterThan(0), () => {
+      // The warp displacement has to stay small next to the wavelength it is
+      // perturbing. At an amplitude larger than the feature size the field is
+      // not decorrelated but dragged, and the result is the smeared, ropey
+      // "taffy" look that reads instantly as a warped noise texture.
       const groundClumpBands = fbmLodBands(
-        warp2(position.xz, float(0.4), float(0.9)),
-        float(0.34),
+        warp2(position.xz, float(CLUMP_WAVELENGTH * 0.22), float(1.6)),
+        float(CLUMP_WAVELENGTH),
         5,
         2,
         footprint,
       )
       clump.assign(groundClumpBands.value)
-      If(footprint.lessThan(0.7), () => {
+      If(footprint.lessThan(lodDeadFootprint(BLADE_WAVELENGTH)), () => {
         If(turfCoverage.greaterThan(0), () => {
           blade.assign(groundClumpBands.fine)
         })
@@ -462,8 +550,8 @@ export function surfaceDetail(
     })
     If(weights.rock.greaterThan(0), () => {
       const rockClumpBands = fbmLodBands(
-        warp(position, float(0.4), float(0.9)).mul(vec3(1, 0.45, 1)),
-        float(0.34),
+        warp(position, float(CLUMP_WAVELENGTH * 0.22), float(1.6)).mul(vec3(1, 0.45, 1)),
+        float(CLUMP_WAVELENGTH),
         5,
         2,
         footprint,
@@ -471,7 +559,7 @@ export function surfaceDetail(
       clump.assign(mix(clump, rockClumpBands.value, weights.rock))
     })
 
-    If(footprint.lessThan(0.42), () => {
+    If(footprint.lessThan(detailDeadFootprint(PEBBLE_SIZE)), () => {
       If(weights.scree.greaterThan(0), () => {
         const pebbleCell = cells2(
           warp2(position.xz, float(0.06), float(2.7)).mul(5.5),
@@ -480,7 +568,7 @@ export function surfaceDetail(
           fadeToMean(
             falloff(0.55, 0.06, pebbleCell.x),
             float(0.35),
-            detailFade(footprint, float(0.16)),
+            detailFade(footprint, float(PEBBLE_SIZE)),
           ),
         )
         pebbleId.assign(pebbleCell.y)
@@ -521,18 +609,22 @@ export function surfaceDetail(
   // 0.7 m is where `looseStone`'s own fade has fully dissolved it; branching
   // any earlier cuts the band while it is still contributing, and the cut edge
   // is visible as a dashed line across the slope.
-  If(footprint.lessThan(0.7), () => {
+  If(footprint.lessThan(detailDeadFootprint(LOOSE_STONE_SIZE)), () => {
     If(turfCoverage.greaterThan(0), () => {
       // Sparse: only the cells whose centre falls very close to the sample make a
       // stone, so most of the turf stays clear instead of being cobbled over.
       const looseCell = cells2(
-        warp2(position.xz, float(0.1), float(1.7)).mul(2.4),
+        warp2(position.xz, float(0.05), float(2.4)).mul(1.5),
       )
+      // One stone per cell cobbles the whole sward. Real pasture has a stone
+      // every metre or two, so most cells are given none at all — selected by
+      // the cell's own identity, which keeps the choice stable and free.
+      const stonePresent = smoothstep(0.52, 0.66, looseCell.y)
       looseStone.assign(
         fadeToMean(
-          falloff(0.2, 0.03, looseCell.x),
+          falloff(0.26, 0.05, looseCell.x).mul(stonePresent),
           float(0.04),
-          detailFade(footprint, float(0.28)),
+          detailFade(footprint, float(LOOSE_STONE_SIZE)),
         ),
       )
       If(weights.scree.equal(0), () => {
@@ -551,14 +643,22 @@ export function surfaceDetail(
   // Layer competition uses only the micro band. Mixing metre-scale structure
   // into the contest would let a rock rib win coverage from grass half a metre
   // away, which is a coverage decision, not a surface-height one.
+  // What the contest needs from each layer is *how far its surface departs from
+  // the mean at this point*, not how much relief the material has in general.
+  // Feeding in the absolute amplitudes makes rock stand a quarter of a metre
+  // above soil everywhere, so rock wins every pixel it has any coverage on and
+  // no boundary ever interlocks. Each term is therefore centred on zero, and
+  // the small constants are the one genuinely asymmetric part: a rock ledge
+  // does stand slightly proud of the debris against it, and snow lies on top of
+  // whatever it falls on.
   const microHeights = {
-    grass: clump.mul(SURFACE_LAYERS.grass.relief),
-    meadow: clump.mul(0.7).add(macro.mul(0.3)).mul(SURFACE_LAYERS.meadow.relief),
-    soil: macro.mul(SURFACE_LAYERS.soil.relief),
-    scree: pebble.mul(0.7).add(blocks.mul(0.3)).mul(SURFACE_LAYERS.scree.relief),
-    rock: crack.mul(0.5).add(strata.mul(0.5)).mul(SURFACE_LAYERS.rock.relief),
-    // Snow drifts fill hollows: high, smooth, and it buries what is beneath.
-    snow: macro.mul(0.35).add(0.65).mul(SURFACE_LAYERS.snow.relief).add(0.3),
+    grass: clump.sub(0.5).mul(0.1),
+    meadow: clump.mul(0.7).add(macro.mul(0.3)).sub(0.5).mul(0.08),
+    soil: macro.sub(0.5).mul(0.05).sub(0.01),
+    scree: pebble.sub(0.35).add(blocks.sub(0.25).mul(0.4)).mul(0.14).add(0.015),
+    rock: crack.add(strata).sub(1).mul(0.12).add(0.04),
+    // Snow drifts fill hollows: smooth, and it buries what is beneath.
+    snow: macro.sub(0.5).mul(0.06).add(0.07),
   }
 
   const resolved = resolveByHeight(weights, microHeights)
@@ -624,6 +724,13 @@ export function surfaceDetail(
  * Height-aware weight resolve. Each layer competes with `coverage + relief`;
  * only the layers within `HEIGHT_BLEND_DEPTH` of the winner survive, which
  * produces a narrow, interlocking transition instead of a muddy average.
+ *
+ * The two terms have to stay commensurate. Biasing coverage hard enough to
+ * exclude absent layers — the obvious way to keep grass off a cliff — turns the
+ * contest into an argmax on coverage: relief never gets a vote and every
+ * boundary in the scene collapses to whichever single layer leads, however
+ * slightly. Absent layers are excluded instead by the final multiply by
+ * coverage, which cannot distort the contest because it happens after it.
  */
 function resolveByHeight(
   weights: LayerWeights,
@@ -634,10 +741,14 @@ function resolveByHeight(
   const peak = float(-1000).toVar('peak')
   for (const key of keys) {
     const coverage = (weights as Record<string, any>)[key]
-    // A layer with no coverage must never win, hence the large negative bias.
-    const score = coverage.mul(0.5).add(heights[key]).add(coverage.sub(1).mul(4)).toVar()
+    const score = coverage.mul(COVERAGE_BIAS).add(heights[key]).toVar()
     scores[key] = score
-    peak.assign(max(peak, score))
+    // A layer that is not here at all must not set the bar the others are
+    // measured against — snow lying proud of everything would otherwise
+    // suppress the whole stack on a bare summer hillside. Excluding it from the
+    // peak does that without touching the contest between the layers that are
+    // present.
+    peak.assign(max(peak, mix(float(-1000), score, smoothstep(0, 0.03, coverage))))
   }
 
   const cutoff = peak.sub(HEIGHT_BLEND_DEPTH)
@@ -667,37 +778,72 @@ export function shadeSurface(
   const { detail, resolved } = surface
 
   // --- rock --------------------------------------------------------------
+  // One lithology per region, varying slowly, rather than a different rock type
+  // in every bed. A sequence of beds is deposited in one basin from one source,
+  // so successive beds differ in grain, cement and weathering — a matter of ten
+  // or twenty per cent in value — not in kind. Swinging between a near-black
+  // shale and a white dolomite bed by bed is what turns strata into humbug
+  // stripes, and it is the single loudest tell of a procedural cliff.
   const bedType = detail.bedHardness
-  const paleDolomite = vec3(0.092, 0.086, 0.072)
-  const blueLimestone = vec3(0.044, 0.049, 0.056)
-  const ironMarl = vec3(0.062, 0.040, 0.026)
-  const darkShale = vec3(0.017, 0.016, 0.018)
-  const bedTint = mix(
-    mix(darkShale, ironMarl, smoothstep(0.0, 0.36, bedType)),
-    mix(blueLimestone, paleDolomite, smoothstep(0.62, 1.0, bedType)),
-    smoothstep(0.3, 0.66, bedType),
-  )
+  const carbonate = vec3(0.345, 0.330, 0.292)
+  const silicate = vec3(0.168, 0.163, 0.166)
+  const lithology = mix(
+    silicate,
+    carbonate,
+    smoothstep(0.3, 0.66, slow.regionalTint),
+  ).toVar('lithology')
+
+  // Resistant beds weather pale and clean; weak beds hold more clay, weather
+  // recessively and stay darker and browner in the shelter of the bed above.
+  // The spread is deliberately small. Bedding is read by the eye from the
+  // *shadow line* along each parting and from the ledge profile, not from a
+  // change of colour, and any appreciable colour step turns the sequence into
+  // painted stripes that stay legible from kilometres away — which real beds,
+  // seen through that much air, do not.
+  const bedValue = mix(float(0.88), float(1.07), bedType)
+  const bedWarmth = mix(vec3(1.03, 0.99, 0.94), vec3(0.99, 1.0, 1.01), bedType)
+  const bedTint = lithology.mul(bedValue).mul(bedWarmth)
+
+  // The parting between two beds is a recessed joint that collects shadow and
+  // dirt; it is the line the eye actually reads as bedding.
   const parting = falloff(0.35, 0.0, detail.bedProfile)
     .mul(detail.bedExposure)
-    .mul(0.3)
+    .mul(0.42)
   const mottle = slow.mottle
+  // Limonite staining bleeds downwards from iron-bearing beds and concentrates
+  // where water has run over the face, so it is keyed to flow, not to noise.
   const ironStain = mix(
     vec3(1, 1, 1),
-    vec3(1.28, 0.86, 0.54),
-    smoothstep(0.5, 0.92, mottle.mul(0.6).add(detail.macro.mul(0.4))).mul(0.85),
+    vec3(1.22, 0.82, 0.52),
+    smoothstep(0.45, 0.9, mottle.mul(0.5).add(slow.flow.mul(0.5))).mul(0.7),
   )
-  const blockShade = mix(float(0.66), float(1.1), detail.blocks)
-  const buttressShade = mix(float(0.6), float(1.08), detail.buttress)
+  const blockShade = mix(float(0.78), float(1.08), detail.blocks)
+  const buttressShade = mix(float(0.74), float(1.06), detail.buttress)
+
+  // The variation that actually survives a kilometre of air is none of the
+  // above — every one of those bands is finer than a pixel by then, and their
+  // average is a single flat tone. What remains legible at that range is the
+  // landform's own weathering pattern: ribs and noses stand in the sun and the
+  // wind, lose their lichen and their damp, and bleach; the gullies between
+  // them stay shaded, damp and dark. Keying rock value to curvature is what
+  // gives a distant face light and shade that belong to its shape rather than
+  // to the sun angle alone.
+  const weathering = mix(
+    vec3(0.74, 0.75, 0.79),
+    vec3(1.16, 1.14, 1.1),
+    smoothstep(-0.55, 0.5, slow.curvature),
+  )
   const rockBase = bedTint
     .mul(ironStain)
     .mul(blockShade)
     .mul(buttressShade)
+    .mul(weathering)
     .mul(parting.oneMinus())
-  const crackDarken = falloff(0.55, 0.12, detail.crack).mul(0.55)
-  const rockCracked = rockBase.mul(crackDarken.oneMinus().max(0.35))
+  const crackDarken = falloff(0.55, 0.12, detail.crack).mul(0.5)
+  const rockCracked = rockBase.mul(crackDarken.oneMinus().max(0.4))
   const lichenColour = mix(
-    vec3(0.062, 0.081, 0.038),
-    vec3(0.115, 0.118, 0.072),
+    vec3(0.068, 0.086, 0.042),
+    vec3(0.152, 0.156, 0.104),
     detail.clump,
   )
   const lichenMask = weights.lichen
@@ -708,53 +854,82 @@ export function shadeSurface(
   const rockAlbedo = mix(rockCracked, lichenColour, lichenMask.mul(0.7))
 
   // --- scree -------------------------------------------------------------
-  const pebbleTint = mix(
-    vec3(0.068, 0.060, 0.048),
-    vec3(0.128, 0.118, 0.098),
-    detail.pebbleId,
-  )
+  // Talus is the same rock, freshly broken. It is lighter than the face it fell
+  // from because the fracture surfaces are unweathered, and it is desaturated
+  // by the rock flour between the clasts.
+  const freshRock = mix(lithology, vec3(0.6), float(0.12)).mul(1.05)
+  const pebbleTint = freshRock.mul(mix(float(0.72), float(1.18), detail.pebbleId))
   const screeAlbedo = mix(
-    vec3(0.05, 0.044, 0.035),
+    freshRock.mul(0.62),
     pebbleTint,
     smoothstep(0.15, 0.7, detail.pebble),
-  ).mul(mix(float(0.82), float(1.12), detail.macro))
+  ).mul(mix(float(0.86), float(1.1), detail.macro))
 
   // --- vegetation --------------------------------------------------------
-  const clumpShade = mix(float(0.66), float(1.22), detail.clump)
-  const grassHue = mix(
-    vec3(0.024, 0.055, 0.016),
-    vec3(0.062, 0.094, 0.028),
+  // Sward is not one colour with a brightness ramp over it. At walking distance
+  // it resolves into three things at once: the living crown of each tussock,
+  // the bleached dead litter packed between the crowns, and the bare earth
+  // showing through wherever the mat is thin. Ramping a single hue by a noise
+  // field can reproduce none of that, and a flat expanse of one saturated
+  // colour is what a hillside looks like only in a texture atlas.
+  const tussock = smoothstep(0.34, 0.74, detail.clump).toVar('tussock')
+  const thinning = falloff(0.42, 0.08, detail.clump).toVar('swardThinning')
+  const bladeShade = mix(float(0.86), float(1.1), detail.blade)
+
+  const bareEarth = mix(
+    vec3(0.062, 0.048, 0.035),
+    vec3(0.098, 0.079, 0.058),
     detail.macro,
   )
-  const stoneColour = vec3(0.115, 0.108, 0.096).mul(
-    mix(float(0.78), float(1.2), detail.pebbleId),
+  const litter = mix(
+    vec3(0.112, 0.099, 0.062),
+    vec3(0.156, 0.138, 0.088),
+    detail.macro,
   )
-  const bladeShade = mix(float(0.82), float(1.14), detail.blade)
+  const liveTurf = mix(
+    vec3(0.038, 0.062, 0.024),
+    vec3(0.068, 0.094, 0.038),
+    detail.macro,
+  )
+
+  // Stones sit in the sward, so they carry its shadow at their base and are
+  // never brighter than the rock they broke from.
+  const stoneColour = freshRock
+    .mul(0.48)
+    .mul(mix(float(0.72), float(1.15), detail.pebbleId))
+  const stoneMask = smoothstep(0.3, 0.62, detail.looseStone)
+
   const grassAlbedo = mix(
-    grassHue.mul(clumpShade).mul(bladeShade),
+    mix(
+      mix(litter, liveTurf, tussock).mul(bladeShade),
+      bareEarth,
+      thinning.mul(0.55),
+    ),
     stoneColour,
-    smoothstep(0.25, 0.7, detail.looseStone),
+    stoneMask,
   )
-  const meadowHue = mix(
-    vec3(0.058, 0.062, 0.028),
-    vec3(0.104, 0.098, 0.044),
-    detail.macro,
-  )
+  // Dry sward: the same structure, with the living fraction bleached out. The
+  // contrast between this and green turf along a drainage line is the strongest
+  // vegetation cue a mountainside has.
   const meadowAlbedo = mix(
-    meadowHue.mul(mix(float(0.72), float(1.2), detail.clump)).mul(bladeShade),
+    mix(
+      mix(litter.mul(1.04), mix(litter, liveTurf, float(0.3)), tussock).mul(bladeShade),
+      bareEarth.mul(1.1),
+      thinning.mul(0.6),
+    ),
     stoneColour.mul(1.06),
-    smoothstep(0.35, 0.85, detail.looseStone),
+    stoneMask,
   )
   const soilAlbedo = mix(
-    vec3(0.034, 0.024, 0.016),
-    vec3(0.058, 0.042, 0.028),
+    bareEarth,
+    mix(bareEarth, litter, float(0.45)),
     detail.macro,
   )
 
   // --- snow --------------------------------------------------------------
-  const snowAlbedo = vec3(0.6, 0.615, 0.64)
-    .mul(mix(float(0.86), float(1.06), detail.macro))
-    .mul(mix(float(0.92), float(1.04), detail.clump))
+  const snowAlbedo = vec3(0.7, 0.73, 0.78)
+    .mul(mix(float(0.9), float(1.03), detail.macro))
+    .mul(mix(float(0.94), float(1.02), detail.clump))
 
   const albedo = vec3(0).toVar('albedo')
   albedo.addAssign(grassAlbedo.mul(resolved.grass))
@@ -766,7 +941,22 @@ export function shadeSurface(
 
   // Slow, large-scale value variation over everything: nothing in nature holds
   // one reflectance across a whole hillside.
-  albedo.mulAssign(mix(float(0.78), float(1.1), slow.regionalTint))
+  albedo.mulAssign(mix(float(0.86), float(1.08), slow.regionalTint))
+
+  // Wet rock. A film of water fills the surface pores, so light that would have
+  // scattered back out is instead refracted into the substrate and absorbed:
+  // the albedo drops by roughly half and the reflection sharpens to near
+  // specular. This is why the runnels down a cliff are dark streaks and why the
+  // rock beside a stream looks like a different material. It costs one lerp and
+  // it is worth more than any amount of added noise, because it puts a visible
+  // consequence on the drainage network the terrain was carved with.
+  const wetness: any = float(smoothstep(0.35, 0.9, float(slow.flow)))
+    .mul(smoothstep(0.1, 0.45, weights.moisture).mul(0.6).add(0.4))
+    .mul(resolved.rock.add(resolved.scree).add(resolved.soil).clamp(0, 1))
+    .mul(falloff(0.72, 0.2, weights.slope).mul(0.5).add(0.5))
+    .clamp(0, 1)
+    .toVar('wetness')
+  albedo.mulAssign(mix(vec3(1), vec3(0.48, 0.5, 0.54), wetness))
 
   const roughness = float(0).toVar('roughness')
   roughness.addAssign(float(SURFACE_LAYERS.grass.roughness).mul(resolved.grass))
@@ -781,10 +971,16 @@ export function shadeSurface(
   roughness.addAssign(float(SURFACE_LAYERS.snow.roughness).mul(resolved.snow))
   // Damp rock in the shaded crack bottoms reads as wet stone, and hard beds
   // weather smoother than the soft ones between them.
-  roughness.subAssign(resolved.rock.mul(falloff(0.5, 0.12, detail.crack)).mul(0.2))
+  // Weathered rock is matte. Damp crack bottoms and hard, close-grained beds
+  // are a little smoother than the rest, but only a little: stacking large
+  // subtractions here drives dry stone into a plastic sheen.
+  roughness.subAssign(resolved.rock.mul(falloff(0.5, 0.12, detail.crack)).mul(0.08))
   roughness.subAssign(
-    resolved.rock.mul(smoothstep(0.45, 0.95, detail.bedHardness)).mul(0.22),
+    resolved.rock.mul(smoothstep(0.45, 0.95, detail.bedHardness)).mul(0.1),
   )
+  // The other half of wetness: a water film is optically smooth, so wet rock
+  // carries a broad sheen that dry rock never does.
+  roughness.assign(mix(roughness, float(0.28), wetness.mul(0.75)))
 
   // Cavity occlusion from the relief itself: anything sitting below the local
   // mean height is darkened, which is what sells crack and joint depth.

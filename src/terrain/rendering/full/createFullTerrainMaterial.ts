@@ -161,7 +161,13 @@ export function createFullTerrainMaterial(
       )
     })
 
-    const surface = surfaceDetail(shadedPosition, weights, footprint, slow)
+    const surface = surfaceDetail(
+      shadedPosition,
+      geometricNormal,
+      weights,
+      footprint,
+      slow,
+    )
     const shading = shadeSurface(weights, surface, slow)
 
     // Bump strength falls off with distance so relief never fights the
