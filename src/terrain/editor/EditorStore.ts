@@ -1,5 +1,6 @@
 import { ExternalStore } from '../core/ExternalStore'
 import type { SectionId, Vec3Like } from '../core/types'
+import type { BrushDomain } from '../modifiers/types'
 
 export type EditorTool =
   | 'select'
@@ -19,30 +20,39 @@ export type TerrainOverlay =
 
 export interface EditorSnapshot {
   tool: EditorTool
+  brushDomain: BrushDomain
   brushRadius: number
   brushStrength: number
   brushFalloff: number
   targetEdgeLength: number
+  tunnelRadius: number
+  tunnelDepth: number
   overlay: TerrainOverlay
   showHud: boolean
   showHelp: boolean
   cursorPosition: Vec3Like
+  cursorNormal: Vec3Like
   cursorVisible: boolean
   dragging: boolean
   selectedSection?: SectionId
+  selectedModifierId?: string
   status: string
 }
 
 const INITIAL_EDITOR_STATE: EditorSnapshot = {
   tool: 'select',
+  brushDomain: 'mesh',
   brushRadius: 22,
   brushStrength: 0.38,
   brushFalloff: 0.55,
   targetEdgeLength: 2.5,
-  overlay: 'sections',
+  tunnelRadius: 8,
+  tunnelDepth: 14,
+  overlay: 'none',
   showHud: true,
   showHelp: false,
   cursorPosition: { x: 0, y: 0, z: 0 },
+  cursorNormal: { x: 0, y: 1, z: 0 },
   cursorVisible: false,
   dragging: false,
   status: 'World ready',
@@ -57,9 +67,14 @@ export class EditorStore extends ExternalStore<EditorSnapshot> {
     this.update((current) => ({ ...current, ...values }))
   }
 
-  setCursor(position: Vec3Like, selectedSection?: SectionId): void {
+  setCursor(
+    position: Vec3Like,
+    normal: Vec3Like,
+    selectedSection?: SectionId,
+  ): void {
     this.patch({
       cursorPosition: { ...position },
+      cursorNormal: { ...normal },
       cursorVisible: true,
       selectedSection,
     })

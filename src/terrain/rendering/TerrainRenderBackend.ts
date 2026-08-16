@@ -1,7 +1,11 @@
 import type { Raycaster, Vector3 } from 'three'
-import type { BrushMode } from '../modifiers/types'
+import type {
+  BrushDomain,
+  BrushMode,
+  BrushSample,
+} from '../modifiers/types'
 import type { TerrainOverlay } from '../editor/EditorStore'
-import type { CompiledSection, SectionId, Vec3Like } from '../core/types'
+import type { CompiledSection, SectionId } from '../core/types'
 import type { TerrainSection } from '../partition/MeshPartition'
 
 export interface TerrainRenderStats {
@@ -14,12 +18,14 @@ export interface TerrainRenderStats {
 
 export interface TerrainRaycastHit {
   point: Vector3
+  normal: Vector3
   sectionId: SectionId
 }
 
 export interface PreviewBrush {
   mode: BrushMode
-  point: Vec3Like
+  domain: BrushDomain
+  samples: readonly BrushSample[]
   radius: number
   strength: number
   falloff: number

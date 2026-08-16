@@ -11,6 +11,12 @@ export interface StreamCandidate {
   prefetch: boolean
 }
 
+export interface StreamingView {
+  focus: Vec3Like
+  verticalFovRadians: number
+  aspect: number
+}
+
 interface ResidencyRecord {
   state: ResidencyState
   lastTouched: number
@@ -34,11 +40,13 @@ export function streamingPriority(
   forwardAlignment: number,
   editFocused: boolean,
   visible: boolean,
+  viewAlignment = 0,
 ): number {
   return (
     10_000 -
     distanceInSections * 350 +
     Math.max(0, forwardAlignment) * 900 +
+    clamp(viewAlignment, -1, 1) * 1_200 +
     (visible ? 1_500 : 0) +
     (editFocused ? 10_000 : 0)
   )
@@ -48,11 +56,13 @@ export class TerrainStreamer {
   private readonly config: TerrainConfig
   private residency = new Map<SectionId, ResidencyRecord>()
   private desired = new Set<SectionId>()
+  private visible = new Set<SectionId>()
   private previousPosition?: Vec3Like
   private previousUpdate = performance.now()
   private velocity = { x: 0, y: 0, z: 0 }
   private loadEvents: number[] = []
   private evictionEvents: number[] = []
+  private visibleRadius?: number
 
   constructor(config: TerrainConfig) {
     this.config = config
@@ -63,40 +73,60 @@ export class TerrainStreamer {
     qualityScale: number,
     editFocus?: Vec3Like,
     now = performance.now(),
+    view?: StreamingView,
   ): StreamCandidate[] {
+    const trackingPoint = view?.focus ?? camera
     const deltaSeconds = Math.max((now - this.previousUpdate) / 1000, 1 / 240)
     if (this.previousPosition) {
       const smoothing = 0.18
       this.velocity.x +=
-        ((camera.x - this.previousPosition.x) / deltaSeconds - this.velocity.x) *
+        ((trackingPoint.x - this.previousPosition.x) / deltaSeconds - this.velocity.x) *
         smoothing
       this.velocity.y +=
-        ((camera.y - this.previousPosition.y) / deltaSeconds - this.velocity.y) *
+        ((trackingPoint.y - this.previousPosition.y) / deltaSeconds - this.velocity.y) *
         smoothing
       this.velocity.z +=
-        ((camera.z - this.previousPosition.z) / deltaSeconds - this.velocity.z) *
+        ((trackingPoint.z - this.previousPosition.z) / deltaSeconds - this.velocity.z) *
         smoothing
     }
-    this.previousPosition = { ...camera }
+    this.previousPosition = { ...trackingPoint }
     this.previousUpdate = now
 
-    const center = worldToSection(camera.x, camera.z, this.config.sectionSize)
-    const baseRadius = Math.max(
-      2,
-      Math.round(this.config.renderRadiusSections * clamp(qualityScale, 0.5, 1)),
+    const center = worldToSection(
+      trackingPoint.x,
+      trackingPoint.z,
+      this.config.sectionSize,
     )
+    // The visible working set is centered on the orbit/fly target and expands
+    // with the projected viewport footprint. Frame pressure is absorbed by LOD
+    // and prefetch first; it must never make already-visible terrain disappear.
+    const requiredRadius = requiredViewRadiusSections(this.config, camera, view)
+    this.visibleRadius =
+      this.visibleRadius === undefined || requiredRadius >= this.visibleRadius
+        ? requiredRadius
+        : Math.max(requiredRadius, this.visibleRadius - deltaSeconds * 0.35)
+    const baseRadius = this.visibleRadius
     const prefetch = Math.max(
       0,
       Math.round(this.config.prefetchSections * clamp((qualityScale - 0.45) * 1.8, 0, 1)),
     )
-    const searchRadius = baseRadius + prefetch
+    const visibilityHysteresis = 1.75
+    const searchRadius = Math.ceil(
+      baseRadius + Math.max(prefetch, visibilityHysteresis),
+    )
     const speed = Math.hypot(this.velocity.x, this.velocity.z)
     const forwardX = speed > 1 ? this.velocity.x / speed : 0
     const forwardZ = speed > 1 ? this.velocity.z / speed : 0
+    const viewDirectionX = trackingPoint.x - camera.x
+    const viewDirectionZ = trackingPoint.z - camera.z
+    const viewDirectionLength = Math.hypot(viewDirectionX, viewDirectionZ) || 1
+    const viewForwardX = viewDirectionX / viewDirectionLength
+    const viewForwardZ = viewDirectionZ / viewDirectionLength
     const worldHalf = this.config.worldSize * 0.5
     const minSection = Math.floor(-worldHalf / this.config.sectionSize)
     const maxSection = Math.ceil(worldHalf / this.config.sectionSize) - 1
     const nextDesired = new Set<SectionId>()
+    const nextVisible = new Set<SectionId>()
     const candidates: StreamCandidate[] = []
 
     for (let dz = -searchRadius; dz <= searchRadius; dz += 1) {
@@ -113,9 +143,19 @@ export class TerrainStreamer {
         const distance = Math.hypot(dx, dz)
         if (distance > searchRadius + 0.25) continue
         const alignment = distance > 0 ? (dx * forwardX + dz * forwardZ) / distance : 1
-        const inBaseRadius = distance <= baseRadius + 0.25
-        if (!inBaseRadius && alignment < 0.12) continue
+        const sectionWorldX = (key.x + 0.5) * this.config.sectionSize
+        const sectionWorldZ = (key.z + 0.5) * this.config.sectionSize
+        const viewOffsetX = sectionWorldX - camera.x
+        const viewOffsetZ = sectionWorldZ - camera.z
+        const viewOffsetLength = Math.hypot(viewOffsetX, viewOffsetZ) || 1
+        const viewAlignment =
+          (viewOffsetX * viewForwardX + viewOffsetZ * viewForwardZ) /
+          viewOffsetLength
         const id = sectionId(key)
+        const inBaseRadius =
+          distance <= baseRadius + 0.25 ||
+          (this.visible.has(id) && distance <= baseRadius + visibilityHysteresis)
+        if (!inBaseRadius && alignment < 0.12) continue
         const editSection = editFocus
           ? worldToSection(editFocus.x, editFocus.z, this.config.sectionSize)
           : undefined
@@ -126,13 +166,21 @@ export class TerrainStreamer {
           distance,
           visible: inBaseRadius,
           prefetch: !inBaseRadius,
-          priority: streamingPriority(distance, alignment, editFocused, inBaseRadius),
+          priority: streamingPriority(
+            distance,
+            alignment,
+            editFocused,
+            inBaseRadius,
+            viewAlignment,
+          ),
         })
         nextDesired.add(id)
+        if (inBaseRadius) nextVisible.add(id)
       }
     }
 
     this.desired = nextDesired
+    this.visible = nextVisible
     candidates.sort((a, b) => b.priority - a.priority)
     this.trimEventHistory(now)
     return candidates
@@ -170,6 +218,10 @@ export class TerrainStreamer {
 
   isDesired(key: SectionKey): boolean {
     return this.desired.has(sectionId(key))
+  }
+
+  isVisible(key: SectionKey): boolean {
+    return this.visible.has(sectionId(key))
   }
 
   collectEvictions(now = performance.now()): SectionId[] {
@@ -229,4 +281,31 @@ export class TerrainStreamer {
     this.loadEvents = this.loadEvents.filter((time) => time >= cutoff)
     this.evictionEvents = this.evictionEvents.filter((time) => time >= cutoff)
   }
+}
+
+export function requiredViewRadiusSections(
+  config: Pick<
+    TerrainConfig,
+    | 'sectionSize'
+    | 'renderRadiusSections'
+    | 'maxRenderRadiusSections'
+  >,
+  camera: Vec3Like,
+  view?: StreamingView,
+): number {
+  if (!view) return config.renderRadiusSections
+  const distanceToFocus = Math.hypot(
+    camera.x - view.focus.x,
+    camera.y - view.focus.y,
+    camera.z - view.focus.z,
+  )
+  const halfVertical =
+    distanceToFocus * Math.tan(clamp(view.verticalFovRadians, 0.2, 2.2) * 0.5)
+  const halfViewport = halfVertical * Math.max(1, view.aspect)
+  const footprintRadius = Math.ceil(halfViewport / config.sectionSize) + 2
+  return clamp(
+    footprintRadius,
+    config.renderRadiusSections,
+    config.maxRenderRadiusSections,
+  )
 }

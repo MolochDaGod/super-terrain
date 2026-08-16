@@ -7,6 +7,7 @@ import {
   LineSegments,
   Mesh,
   MeshStandardNodeMaterial,
+  Matrix3,
   Raycaster,
   Vector3,
 } from 'three/webgpu'
@@ -20,6 +21,11 @@ import type {
   TerrainRenderBackend,
   TerrainRenderStats,
 } from './TerrainRenderBackend'
+import {
+  createTerrainMaterial,
+  type TerrainMaterialResources,
+} from './createTerrainMaterial'
+import { addSectionSkirts } from './addSectionSkirts'
 
 interface RuntimeSection {
   section: TerrainSection
@@ -31,15 +37,21 @@ interface RuntimeSection {
   visible: boolean
 }
 
+interface DeferredGeometry {
+  geometry: BufferGeometry
+  framesRemaining: number
+}
+
 const LOD_COLORS = [0x59dca9, 0x89c95a, 0xe5c65f, 0xe58d52, 0xd95f69]
 
 export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private readonly root: Group
   private readonly sectionSize: number
   private runtime = new Map<SectionId, RuntimeSection>()
-  private deferredDisposals: BufferGeometry[] = []
-  private overlay: TerrainOverlay = 'sections'
+  private deferredDisposals: DeferredGeometry[] = []
+  private overlay: TerrainOverlay = 'none'
   private readonly terrainMaterial: MeshStandardNodeMaterial
+  private readonly terrainMaterialResources: TerrainMaterialResources
   private readonly lodMaterials: MeshStandardNodeMaterial[]
   private readonly densityMaterial: MeshStandardNodeMaterial
   private readonly boundaryMaterials = {
@@ -49,16 +61,16 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     failed: new LineBasicMaterial({ color: 0xff5d68, transparent: true, opacity: 1 }),
   }
   private readonly scratchPoint = new Vector3()
+  private readonly scratchNormal = new Vector3()
+  private readonly scratchNormalMatrix = new Matrix3()
+  private readonly pendingPreviewRefresh = new Set<BufferGeometry>()
+  private previewRefreshHandle?: number
 
   constructor(root: Group, sectionSize: number) {
     this.root = root
     this.sectionSize = sectionSize
-    this.terrainMaterial = new MeshStandardNodeMaterial({
-      vertexColors: true,
-      roughness: 0.94,
-      metalness: 0,
-      side: DoubleSide,
-    })
+    this.terrainMaterialResources = createTerrainMaterial()
+    this.terrainMaterial = this.terrainMaterialResources.material
     this.lodMaterials = LOD_COLORS.map(
       (color) =>
         new MeshStandardNodeMaterial({
@@ -77,28 +89,32 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   upload(section: TerrainSection, compiled: CompiledSection): number {
-    const geometries = compiled.lods.map(createGeometry)
+    const geometries = compiled.lods.map((lod) => createGeometry(lod, this.sectionSize))
     let runtime = this.runtime.get(section.id)
     if (runtime) {
-      this.deferredDisposals.push(...runtime.geometries)
+      const previousMesh = runtime.mesh
+      this.deferGeometries(runtime.geometries)
       runtime.geometries = geometries
       runtime.gpuBytes = compiled.cpuBytes
       runtime.section = section
       runtime.lod = Math.min(runtime.lod, geometries.length - 1)
-      runtime.mesh.geometry = geometries[runtime.lod]
+      runtime.mesh = createTerrainMesh(
+        section,
+        geometries[runtime.lod],
+        this.terrainMaterial,
+        this.sectionSize,
+      )
+      runtime.mesh.visible = runtime.visible
+      this.root.remove(previousMesh)
+      this.root.add(runtime.mesh)
       this.updateBoundary(runtime, compiled)
     } else {
-      const mesh = new Mesh(geometries[section.activeLod] ?? geometries.at(-1), this.terrainMaterial)
-      mesh.position.set(
-        section.key.x * this.sectionSize,
-        0,
-        section.key.z * this.sectionSize,
+      const mesh = createTerrainMesh(
+        section,
+        geometries[section.activeLod] ?? geometries.at(-1),
+        this.terrainMaterial,
+        this.sectionSize,
       )
-      mesh.castShadow = false
-      mesh.receiveShadow = true
-      mesh.frustumCulled = true
-      mesh.userData.terrainSectionId = section.id
-      mesh.name = `terrain-section-${section.id}`
       const boundary = createBoundary(
         section,
         compiled,
@@ -169,50 +185,49 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   previewBrush(preview: PreviewBrush): void {
-    const radiusSquared = preview.radius * preview.radius
+    if (preview.samples.length === 0) return
+    const samples = preview.samples.map(preparePreviewSample)
+    const minimumBrushX =
+      Math.min(...samples.map((sample) => sample.x)) - preview.radius
+    const maximumBrushX =
+      Math.max(...samples.map((sample) => sample.x)) + preview.radius
+    const minimumBrushZ =
+      Math.min(...samples.map((sample) => sample.z)) - preview.radius
+    const maximumBrushZ =
+      Math.max(...samples.map((sample) => sample.z)) + preview.radius
+
     for (const runtime of this.runtime.values()) {
       if (!runtime.visible) continue
       const minX = runtime.section.key.x * this.sectionSize
       const minZ = runtime.section.key.z * this.sectionSize
       if (
-        preview.point.x + preview.radius < minX ||
-        preview.point.x - preview.radius > minX + this.sectionSize ||
-        preview.point.z + preview.radius < minZ ||
-        preview.point.z - preview.radius > minZ + this.sectionSize
+        maximumBrushX < minX ||
+        minimumBrushX > minX + this.sectionSize ||
+        maximumBrushZ < minZ ||
+        minimumBrushZ > minZ + this.sectionSize
       ) {
         continue
       }
-      const geometry = runtime.mesh.geometry
-      const attribute = geometry.getAttribute('position') as BufferAttribute
-      const array = attribute.array as Float32Array
-      for (let offset = 0; offset < array.length; offset += 3) {
-        const worldX = minX + array[offset]
-        const worldZ = minZ + array[offset + 2]
-        const dx = worldX - preview.point.x
-        const dz = worldZ - preview.point.z
-        const distanceSquared = dx * dx + dz * dz
-        if (distanceSquared >= radiusSquared) continue
-        const radial = 1 - Math.sqrt(distanceSquared) / preview.radius
-        const weight =
-          smoothstep(0, 1, radial) ** (0.55 + preview.falloff * 2.4) *
-          preview.strength
-        switch (preview.mode) {
-          case 'raise':
-            array[offset + 1] += weight * 2.8
-            break
-          case 'lower':
-            array[offset + 1] -= weight * 2.8
-            break
-          case 'flatten':
-            array[offset + 1] +=
-              ((preview.targetY ?? preview.point.y) - array[offset + 1]) * weight * 0.48
-            break
-          case 'smooth':
-            array[offset + 1] += (preview.point.y - array[offset + 1]) * weight * 0.12
-            break
-        }
+      const sectionSamples = samples.filter(
+        (sample) =>
+          sample.x + preview.radius >= minX &&
+          sample.x - preview.radius <= minX + this.sectionSize &&
+          sample.z + preview.radius >= minZ &&
+          sample.z - preview.radius <= minZ + this.sectionSize,
+      )
+      // Only the displayed LOD needs a speculative mutation. The worker swap
+      // replaces every LOD authoritatively, while keeping pointer events cheap.
+      const maximumDisplacement = applyPreviewToGeometry(
+        runtime.mesh.geometry,
+        minX,
+        minZ,
+        preview,
+        sectionSamples,
+      )
+      if (maximumDisplacement > 0) {
+        expandPreviewBounds(runtime.mesh.geometry, maximumDisplacement)
+        this.queuePreviewRefresh(runtime.mesh.geometry)
       }
-      attribute.needsUpdate = true
     }
   }
 
@@ -222,24 +237,44 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       const id = hit.object.userData.terrainSectionId as SectionId | undefined
       if (!id) continue
       this.scratchPoint.copy(hit.point)
-      return { point: this.scratchPoint.clone(), sectionId: id }
+      if (hit.face) {
+        this.scratchNormalMatrix.getNormalMatrix(hit.object.matrixWorld)
+        this.scratchNormal
+          .copy(hit.face.normal)
+          .applyNormalMatrix(this.scratchNormalMatrix)
+          .normalize()
+      } else {
+        this.scratchNormal.set(0, 1, 0)
+      }
+      return {
+        point: this.scratchPoint.clone(),
+        normal: this.scratchNormal.clone(),
+        sectionId: id,
+      }
     }
     return undefined
   }
 
   flushDeferredDisposals(maxCount: number): void {
-    for (let index = 0; index < maxCount; index += 1) {
-      const geometry = this.deferredDisposals.shift()
-      if (!geometry) break
-      geometry.dispose()
+    let disposed = 0
+    const retained: DeferredGeometry[] = []
+    for (const pending of this.deferredDisposals) {
+      pending.framesRemaining -= 1
+      if (pending.framesRemaining <= 0 && disposed < maxCount) {
+        pending.geometry.dispose()
+        disposed += 1
+      } else {
+        retained.push(pending)
+      }
     }
+    this.deferredDisposals = retained
   }
 
   evict(sectionId: SectionId): void {
     const runtime = this.runtime.get(sectionId)
     if (!runtime) return
     this.root.remove(runtime.mesh, runtime.boundary)
-    this.deferredDisposals.push(...runtime.geometries, runtime.boundary.geometry)
+    this.deferGeometries([...runtime.geometries, runtime.boundary.geometry])
     this.runtime.delete(sectionId)
   }
 
@@ -268,9 +303,18 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   dispose(): void {
+    if (
+      this.previewRefreshHandle !== undefined &&
+      typeof cancelAnimationFrame === 'function'
+    ) {
+      cancelAnimationFrame(this.previewRefreshHandle)
+    }
+    this.previewRefreshHandle = undefined
+    this.pendingPreviewRefresh.clear()
     for (const id of [...this.runtime.keys()]) this.evict(id)
-    this.flushDeferredDisposals(Infinity)
-    this.terrainMaterial.dispose()
+    for (const pending of this.deferredDisposals) pending.geometry.dispose()
+    this.deferredDisposals.length = 0
+    this.terrainMaterialResources.dispose()
     this.densityMaterial.dispose()
     for (const material of this.lodMaterials) material.dispose()
     for (const material of Object.values(this.boundaryMaterials)) material.dispose()
@@ -283,17 +327,201 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   private updateBoundary(runtime: RuntimeSection, compiled: CompiledSection): void {
-    this.deferredDisposals.push(runtime.boundary.geometry)
-    runtime.boundary.geometry = createBoundaryGeometry(runtime.section, compiled)
+    const previous = runtime.boundary
+    const material = previous.material as LineBasicMaterial
+    runtime.boundary = createBoundary(runtime.section, compiled, material)
+    runtime.boundary.visible = runtime.visible && this.overlay !== 'none'
+    this.root.remove(previous)
+    this.root.add(runtime.boundary)
+    this.deferGeometries([previous.geometry])
+  }
+
+  private deferGeometries(geometries: BufferGeometry[]): void {
+    for (const geometry of geometries) {
+      this.pendingPreviewRefresh.delete(geometry)
+      this.deferredDisposals.push({ geometry, framesRemaining: 4 })
+    }
+  }
+
+  private queuePreviewRefresh(geometry: BufferGeometry): void {
+    this.pendingPreviewRefresh.add(geometry)
+    if (this.previewRefreshHandle !== undefined) return
+    if (typeof requestAnimationFrame !== 'function') {
+      this.flushPreviewRefresh()
+      return
+    }
+    this.previewRefreshHandle = requestAnimationFrame(() => {
+      this.previewRefreshHandle = undefined
+      this.flushPreviewRefresh()
+    })
+  }
+
+  private flushPreviewRefresh(): void {
+    for (const geometry of this.pendingPreviewRefresh) {
+      geometry.computeVertexNormals()
+      const normal = geometry.getAttribute('normal') as BufferAttribute | undefined
+      if (normal) normal.needsUpdate = true
+    }
+    this.pendingPreviewRefresh.clear()
   }
 }
 
-function createGeometry(lod: CompiledSection['lods'][number]): BufferGeometry {
+interface PreparedPreviewSample {
+  x: number
+  y: number
+  z: number
+  normalX: number
+  normalY: number
+  normalZ: number
+  weight: number
+}
+
+function preparePreviewSample(
+  sample: PreviewBrush['samples'][number],
+): PreparedPreviewSample {
+  const length = Math.hypot(
+    sample.normal.x,
+    sample.normal.y,
+    sample.normal.z,
+  ) || 1
+  return {
+    x: sample.x,
+    y: sample.y,
+    z: sample.z,
+    normalX: sample.normal.x / length,
+    normalY: sample.normal.y / length,
+    normalZ: sample.normal.z / length,
+    weight: Math.max(0, sample.weight ?? 1),
+  }
+}
+
+function applyPreviewToGeometry(
+  geometry: BufferGeometry,
+  originX: number,
+  originZ: number,
+  preview: PreviewBrush,
+  samples: readonly PreparedPreviewSample[],
+): number {
+  const attribute = geometry.getAttribute('position') as BufferAttribute
+  const positions = attribute.array as Float32Array
+  const radiusSquared = preview.radius * preview.radius
+  let changed = false
+  let maximumDisplacement = 0
+
+  for (let offset = 0; offset < positions.length; offset += 3) {
+    const startX = positions[offset]
+    const startY = positions[offset + 1]
+    const startZ = positions[offset + 2]
+    let vertexChanged = false
+    for (const sample of samples) {
+      const worldX = originX + positions[offset]
+      const worldY = positions[offset + 1]
+      const worldZ = originZ + positions[offset + 2]
+      const dx = worldX - sample.x
+      const dy = worldY - sample.y
+      const dz = worldZ - sample.z
+      const distanceSquared =
+        preview.domain === 'heightfield'
+          ? dx * dx + dz * dz
+          : dx * dx + dy * dy + dz * dz
+      if (distanceSquared >= radiusSquared) continue
+      const radial = 1 - Math.sqrt(distanceSquared) / preview.radius
+      const weight =
+        smoothstep(0, 1, radial) ** (0.55 + preview.falloff * 2.4) *
+        preview.strength *
+        sample.weight
+
+      switch (preview.mode) {
+        case 'raise':
+        case 'lower': {
+          const direction = preview.mode === 'raise' ? 1 : -1
+          const displacement = weight * 2.8 * direction
+          positions[offset] += sample.normalX * displacement
+          positions[offset + 1] += sample.normalY * displacement
+          positions[offset + 2] += sample.normalZ * displacement
+          break
+        }
+        case 'flatten': {
+          const planeDistance =
+            preview.domain === 'heightfield'
+              ? worldY - (preview.targetY ?? sample.y)
+              : dx * sample.normalX +
+                dy * sample.normalY +
+                dz * sample.normalZ
+          const displacement = -planeDistance * weight * 0.48
+          positions[offset] += sample.normalX * displacement
+          positions[offset + 1] += sample.normalY * displacement
+          positions[offset + 2] += sample.normalZ * displacement
+          break
+        }
+        case 'smooth': {
+          const planeDistance =
+            preview.domain === 'heightfield'
+              ? worldY - sample.y
+              : dx * sample.normalX +
+                dy * sample.normalY +
+                dz * sample.normalZ
+          const displacement = -planeDistance * weight * 0.12
+          positions[offset] += sample.normalX * displacement
+          positions[offset + 1] += sample.normalY * displacement
+          positions[offset + 2] += sample.normalZ * displacement
+          break
+        }
+      }
+      changed = true
+      vertexChanged = true
+    }
+    if (vertexChanged) {
+      maximumDisplacement = Math.max(
+        maximumDisplacement,
+        Math.hypot(
+          positions[offset] - startX,
+          positions[offset + 1] - startY,
+          positions[offset + 2] - startZ,
+        ),
+      )
+    }
+  }
+
+  if (!changed) return 0
+  attribute.needsUpdate = true
+  return maximumDisplacement
+}
+
+function expandPreviewBounds(
+  geometry: BufferGeometry,
+  amount: number,
+): void {
+  geometry.boundingBox?.expandByScalar(amount)
+  if (geometry.boundingSphere) geometry.boundingSphere.radius += amount
+}
+
+function createTerrainMesh(
+  section: TerrainSection,
+  geometry: BufferGeometry,
+  material: MeshStandardNodeMaterial,
+  sectionSize: number,
+): Mesh {
+  const mesh = new Mesh(geometry, material)
+  mesh.position.set(section.key.x * sectionSize, 0, section.key.z * sectionSize)
+  mesh.castShadow = false
+  mesh.receiveShadow = true
+  mesh.frustumCulled = true
+  mesh.userData.terrainSectionId = section.id
+  mesh.name = `terrain-section-${section.id}`
+  return mesh
+}
+
+function createGeometry(
+  lod: CompiledSection['lods'][number],
+  sectionSize: number,
+): BufferGeometry {
+  const skirted = addSectionSkirts(lod, sectionSize)
   const geometry = new BufferGeometry()
-  geometry.setAttribute('position', new BufferAttribute(lod.positions, 3))
-  geometry.setAttribute('normal', new BufferAttribute(lod.normals, 3))
-  geometry.setAttribute('color', new BufferAttribute(lod.colors, 3))
-  geometry.setIndex(new BufferAttribute(lod.indices, 1))
+  geometry.setAttribute('position', new BufferAttribute(skirted.positions, 3))
+  geometry.setAttribute('normal', new BufferAttribute(skirted.normals, 3))
+  geometry.setAttribute('color', new BufferAttribute(skirted.colors, 3))
+  geometry.setIndex(new BufferAttribute(skirted.indices, 1))
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()
   return geometry

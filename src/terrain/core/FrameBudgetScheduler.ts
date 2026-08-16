@@ -42,7 +42,7 @@ export class FrameBudgetScheduler {
     if (this.averageFrameMs > target * 1.08) {
       this.qualityScale = clamp(this.qualityScale - 0.018, 0.48, 1)
       this.framesUnderBudget = 0
-    } else if (this.averageFrameMs < target * 0.88) {
+    } else if (this.averageFrameMs < target * 1.01) {
       this.framesUnderBudget += 1
       if (this.framesUnderBudget > 45) {
         this.qualityScale = clamp(this.qualityScale + 0.008, 0.48, 1)
@@ -51,7 +51,9 @@ export class FrameBudgetScheduler {
       this.framesUnderBudget = 0
     }
 
-    const pressure = clamp((target * 1.35 - this.averageFrameMs) / target, 0.2, 1)
+    // Preserve a small progress floor under pressure. Otherwise a ready swap
+    // whose estimate is larger than the reduced allowance can starve forever.
+    const pressure = clamp((target * 1.35 - this.averageFrameMs) / target, 0.35, 1)
     this.remainingCpuMs = this.options.cpuTerrainMs * pressure
     this.remainingUploadBytes = Math.floor(
       this.options.gpuUploadBytes * Math.max(0.35, this.qualityScale),

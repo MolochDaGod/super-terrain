@@ -1,22 +1,37 @@
 import type { AABB, Vec3Like } from '../core/types'
 
 export type BrushMode = 'raise' | 'lower' | 'smooth' | 'flatten'
+export type BrushDomain = 'heightfield' | 'mesh'
+
+export interface ModifierTransform {
+  offset: Vec3Like
+  yaw: number
+  scale: number
+}
+
+export interface BrushSample extends Vec3Like {
+  normal: Vec3Like
+  /** Relative accumulated brush flow for this spatial sample. */
+  weight: number
+}
 
 interface ModifierBase {
   id: string
   enabled: boolean
   priority: number
   bounds: AABB
+  transform: ModifierTransform
 }
 
 export interface BrushStrokeModifier extends ModifierBase {
   type: 'brush-stroke'
   mode: BrushMode
+  domain: BrushDomain
   radius: number
   strength: number
   falloff: number
   targetY?: number
-  points: Vec3Like[]
+  points: BrushSample[]
 }
 
 export interface NoiseModifier extends ModifierBase {
@@ -49,12 +64,17 @@ export interface TessellateModifier extends ModifierBase {
   targetEdgeLength: number
 }
 
+export interface TunnelPortal extends Vec3Like {
+  normal: Vec3Like
+}
+
 export interface BooleanSubtractModifier extends ModifierBase {
   type: 'boolean-subtract'
-  center: Vec3Like
+  shape: 'capsule-path'
+  portals: [TunnelPortal, TunnelPortal]
   radius: number
-  length: number
-  direction: { x: number; z: number }
+  /** Distance each portal travels inward before the two ends are connected. */
+  depth: number
   backend: string
 }
 

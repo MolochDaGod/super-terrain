@@ -2,12 +2,15 @@ import { boundsFromSphere, unionBounds } from '../core/bounds'
 import type { AABB, Vec3Like } from '../core/types'
 import type {
   BooleanSubtractModifier,
+  BrushDomain,
   BrushMode,
   BrushStrokeModifier,
   NoiseModifier,
   RemeshModifier,
   TessellateModifier,
+  TunnelPortal,
 } from './types'
+import { createTunnelPortals, tunnelBounds } from './tunnel'
 
 let fallbackId = 0
 
@@ -21,11 +24,14 @@ export function createModifierId(prefix: string): string {
 
 export function createBrushStroke(options: {
   point: Vec3Like
+  normal?: Vec3Like
+  domain?: BrushDomain
   mode: BrushMode
   radius: number
   strength: number
   falloff: number
   targetY?: number
+  sampleWeight?: number
 }): BrushStrokeModifier {
   return {
     id: createModifierId('stroke'),
@@ -34,19 +40,33 @@ export function createBrushStroke(options: {
     priority: 100,
     bounds: boundsFromSphere(options.point, options.radius),
     mode: options.mode,
+    domain: options.domain ?? 'mesh',
     radius: options.radius,
     strength: options.strength,
     falloff: options.falloff,
     targetY: options.targetY,
-    points: [{ ...options.point }],
+    points: [
+      {
+        ...options.point,
+        normal: normalize3(options.normal ?? { x: 0, y: 1, z: 0 }),
+        weight: options.sampleWeight ?? 1,
+      },
+    ],
+    transform: identityTransform(),
   }
 }
 
 export function appendBrushPoint(
   modifier: BrushStrokeModifier,
   point: Vec3Like,
+  normal: Vec3Like = { x: 0, y: 1, z: 0 },
+  weight = 1,
 ): AABB {
-  modifier.points.push({ ...point })
+  modifier.points.push({
+    ...point,
+    normal: normalize3(normal),
+    weight,
+  })
   const pointBounds = boundsFromSphere(point, modifier.radius)
   modifier.bounds = unionBounds(modifier.bounds, pointBounds)
   return pointBounds
@@ -69,6 +89,7 @@ export function createRemeshModifier(options: {
     minEdgeLength: options.targetEdgeLength * 0.45,
     maxEdgeLength: options.targetEdgeLength * 2.25,
     iterations: 3,
+    transform: identityTransform(),
   }
 }
 
@@ -86,49 +107,47 @@ export function createTessellateModifier(options: {
     center: { ...options.center },
     radius: options.radius,
     targetEdgeLength: options.targetEdgeLength,
+    transform: identityTransform(),
   }
 }
 
 export function createTunnelModifier(options: {
-  center: Vec3Like
+  center?: Vec3Like
+  start?: TunnelPortal
+  end?: TunnelPortal
   radius?: number
+  depth?: number
   length?: number
   direction?: { x: number; z: number }
 }): BooleanSubtractModifier {
   const radius = options.radius ?? 8
-  const length = options.length ?? 58
-  const direction = options.direction ?? { x: 1, z: 0 }
-  const magnitude = Math.hypot(direction.x, direction.z) || 1
-  const normalized = { x: direction.x / magnitude, z: direction.z / magnitude }
-  const halfX = Math.abs(normalized.x) * length * 0.5 + radius
-  const halfZ = Math.abs(normalized.z) * length * 0.5 + radius
-  const center = {
-    x: options.center.x,
-    y: options.center.y - radius * 0.35,
-    z: options.center.z,
-  }
-  return {
+  const modifier: BooleanSubtractModifier = {
     id: createModifierId('tunnel'),
     type: 'boolean-subtract',
+    shape: 'capsule-path',
     enabled: true,
     priority: 200,
-    center,
+    portals: createTunnelPortals(options),
     radius,
-    length,
-    direction: normalized,
-    backend: 'analytic-tunnel-v1',
-    bounds: {
-      min: {
-        x: center.x - halfX,
-        y: center.y - radius * 1.5,
-        z: center.z - halfZ,
-      },
-      max: {
-        x: center.x + halfX,
-        y: center.y + radius * 3.5,
-        z: center.z + halfZ,
-      },
-    },
+    depth: options.depth ?? radius * 1.75,
+    backend: 'bvh-csg-tunnel-v3',
+    transform: identityTransform(),
+    bounds: boundsFromSphere(options.start ?? options.center ?? { x: 0, y: 0, z: 0 }, radius),
+  }
+  modifier.bounds = tunnelBounds(modifier)
+  return modifier
+}
+
+function normalize3(value: Vec3Like): Vec3Like {
+  const length = Math.hypot(value.x, value.y, value.z) || 1
+  return { x: value.x / length, y: value.y / length, z: value.z / length }
+}
+
+function identityTransform() {
+  return {
+    offset: { x: 0, y: 0, z: 0 },
+    yaw: 0,
+    scale: 1,
   }
 }
 
@@ -142,5 +161,6 @@ export function createNoiseModifier(bounds: AABB): NoiseModifier {
     amplitude: 5,
     frequency: 0.035,
     seed: 781,
+    transform: identityTransform(),
   }
 }

@@ -1,16 +1,30 @@
 import { clamp, lerp, smoothstep } from '../core/bounds'
-import type { AABB, CompiledLOD, CompiledSection, SectionKey } from '../core/types'
+import type {
+  AABB,
+  CompiledLOD,
+  CompiledSection,
+  SectionKey,
+} from '../core/types'
 import { validateMeshData } from '../mesh/MeshValidation'
-import { AnalyticTunnelBooleanBackend } from '../modifiers/boolean/MeshBooleanBackend'
+import {
+  BvhCsgTunnelBooleanBackend,
+  type BooleanMeshBuffers,
+} from '../modifiers/boolean/MeshBooleanBackend'
 import type {
   BooleanSubtractModifier,
-  BrushStrokeModifier,
   RemeshModifier,
   TerrainModifier,
   TessellateModifier,
 } from '../modifiers/types'
+import { materializeModifierTransforms } from '../modifiers/transform'
 import type { CompileSectionRequest } from '../workers/protocol'
 import { decodeModifiers } from '../workers/protocol'
+import {
+  evaluateTerrainPoint,
+  hasLateralDisplacement,
+} from './TerrainField'
+
+export { evaluateHeight } from './TerrainField'
 
 interface GeneratedMesh {
   positions: Float32Array
@@ -21,16 +35,22 @@ interface GeneratedMesh {
   hasArbitraryTopology: boolean
 }
 
-const tunnelBackend = new AnalyticTunnelBooleanBackend()
+const tunnelBackend = new BvhCsgTunnelBooleanBackend()
 
 export function compileTerrainSection(
   request: CompileSectionRequest,
 ): CompiledSection {
   const started = performance.now()
-  const modifiers = decodeModifiers(request.modifiers)
+  const modifiers = materializeModifierTransforms(
+    decodeModifiers(request.modifiers),
+  )
   const lods: CompiledLOD[] = []
   let minY = Infinity
   let maxY = -Infinity
+  let minX = Infinity
+  let maxX = -Infinity
+  let minZ = Infinity
+  let maxZ = -Infinity
   let warnings = 0
   let vertexCount = 0
   let triangleCount = 0
@@ -47,9 +67,15 @@ export function compileTerrainSection(
       request.config.seed,
       modifiers,
     )
-    for (let index = 1; index < generated.positions.length; index += 3) {
-      minY = Math.min(minY, generated.positions[index])
-      maxY = Math.max(maxY, generated.positions[index])
+    const originX = request.key.x * request.config.sectionSize
+    const originZ = request.key.z * request.config.sectionSize
+    for (let index = 0; index < generated.positions.length; index += 3) {
+      minX = Math.min(minX, originX + generated.positions[index])
+      maxX = Math.max(maxX, originX + generated.positions[index])
+      minY = Math.min(minY, generated.positions[index + 1])
+      maxY = Math.max(maxY, generated.positions[index + 1])
+      minZ = Math.min(minZ, originZ + generated.positions[index + 2])
+      maxZ = Math.max(maxZ, originZ + generated.positions[index + 2])
     }
     const gpuBytes =
       generated.positions.byteLength +
@@ -59,7 +85,8 @@ export function compileTerrainSection(
     lods.push({
       level,
       geometricError:
-        (request.config.sectionSize / resolution) * (0.32 + level * 0.48),
+        (request.config.sectionSize / (resolution * resolution)) *
+        (0.18 + level * 0.2),
       positions: generated.positions,
       normals: generated.normals,
       colors: generated.colors,
@@ -76,15 +103,9 @@ export function compileTerrainSection(
     }
   }
 
-  const originX = request.key.x * request.config.sectionSize
-  const originZ = request.key.z * request.config.sectionSize
   const bounds: AABB = {
-    min: { x: originX, y: minY, z: originZ },
-    max: {
-      x: originX + request.config.sectionSize,
-      y: maxY,
-      z: originZ + request.config.sectionSize,
-    },
+    min: { x: minX, y: minY, z: minZ },
+    max: { x: maxX, y: maxY, z: maxZ },
   }
 
   return {
@@ -139,15 +160,18 @@ function generateSectionMesh(
     'z',
   )
   const positions: number[] = []
+  const parameters: number[] = []
   const indices: number[] = []
 
   for (const worldZ of zAxis) {
     for (const worldX of xAxis) {
+      const point = evaluateTerrainPoint(worldX, worldZ, seed, modifiers)
       positions.push(
-        worldX - originX,
-        evaluateHeight(worldX, worldZ, seed, modifiers),
-        worldZ - originZ,
+        point.x - originX,
+        point.y,
+        point.z - originZ,
       )
+      parameters.push(worldX, worldZ)
     }
   }
 
@@ -159,47 +183,58 @@ function generateSectionMesh(
       const c = a + width
       const d = c + 1
       if ((x + z) % 2 === 0) {
-        appendSurfaceTriangle(indices, positions, a, c, b, originX, originZ, tunnels)
-        appendSurfaceTriangle(indices, positions, b, c, d, originX, originZ, tunnels)
+        indices.push(a, c, b, b, c, d)
       } else {
-        appendSurfaceTriangle(indices, positions, a, c, d, originX, originZ, tunnels)
-        appendSurfaceTriangle(indices, positions, a, d, b, originX, originZ, tunnels)
+        indices.push(a, c, d, a, d, b)
       }
     }
   }
 
-  appendSkirts(positions, indices, width, zAxis.length, sectionSize, level)
-  const surfaceVertexCount = positions.length / 3
-  const target = { positions, indices, surfaceVertexCount }
-  for (const tunnel of tunnels) {
-    tunnelBackend.appendSubtractionInterior(
-      target,
-      tunnel,
-      originX,
-      originZ,
-      sectionSize,
-      Math.max(0.5, 1 - level * 0.12),
-    )
-  }
-
   const positionArray = Float32Array.from(positions)
   const indexArray = Uint32Array.from(indices)
-  const normals = calculateNormals(positionArray, indexArray)
-  const colors = calculateColors(
-    positionArray,
-    normals,
-    surfaceVertexCount,
-    level,
+  const surfaceNormals = calculateNormals(positionArray, indexArray)
+  stabilizeBoundaryNormals(
+    surfaceNormals,
+    parameters,
+    originX,
+    originZ,
+    sectionSize,
+    seed,
+    modifiers,
   )
-  const validation = validateMeshData(positionArray, indexArray)
+  const baseBuffers: BooleanMeshBuffers = {
+    positions: positionArray,
+    normals: surfaceNormals,
+    indices: indexArray,
+    interiorVertices: new Uint8Array(positionArray.length / 3),
+  }
+  const result =
+    tunnels.length > 0
+      ? tunnelBackend.subtract(
+          baseBuffers,
+          tunnels,
+          originX,
+          originZ,
+          sectionSize,
+          Math.max(0.5, 1 - level * 0.12),
+        )
+      : baseBuffers
+
+  const colors = calculateColors(
+    result.positions,
+    result.normals,
+    result.interiorVertices,
+  )
+  const validation = validateMeshData(result.positions, result.indices)
   if (!validation.valid) throw new Error(validation.errors.join('; '))
   return {
-    positions: positionArray,
-    normals,
+    positions: result.positions,
+    normals: result.normals,
     colors,
-    indices: indexArray,
+    indices: result.indices,
     warnings: validation.warnings.length,
-    hasArbitraryTopology: tunnels.length > 0,
+    hasArbitraryTopology:
+      tunnels.length > 0 || hasLateralDisplacement(modifiers),
   }
 }
 
@@ -220,11 +255,10 @@ function createAdaptiveAxis(
       const center = modifier.center[axis]
       const minimum = Math.max(origin, center - modifier.radius)
       const maximum = Math.min(origin + size, center + modifier.radius)
-      const spacing = clamp(
-        modifier.targetEdgeLength * 2 ** level,
-        size / 96,
-        size / 6,
-      )
+      // Keep modifier-authored boundary samples identical across every LOD.
+      // The nested base grid still becomes coarser, but a density region may
+      // not introduce a different edge tessellation on each side of a seam.
+      const spacing = clamp(modifier.targetEdgeLength, size / 96, size / 6)
       const maxLines = 48
       let lines = 0
       for (let coordinate = minimum; coordinate <= maximum && lines < maxLines; coordinate += spacing) {
@@ -241,211 +275,55 @@ function roundCoordinate(value: number): number {
   return Math.round(value * 10_000) / 10_000
 }
 
-export function evaluateHeight(
-  worldX: number,
-  worldZ: number,
-  seed: number,
-  modifiers: TerrainModifier[],
-): number {
-  const lowFrequency = broadTerrainHeight(worldX, worldZ, seed)
-  let height = lowFrequency + surfaceDetail(worldX, worldZ, seed)
-
-  for (const modifier of modifiers) {
-    if (!modifier.enabled) continue
-    switch (modifier.type) {
-      case 'brush-stroke':
-        height = applyBrush(height, lowFrequency, worldX, worldZ, modifier)
-        break
-      case 'noise': {
-        const noise = valueNoise(
-          worldX * modifier.frequency,
-          worldZ * modifier.frequency,
-          modifier.seed,
-        )
-        height += (noise * 2 - 1) * modifier.amplitude
-        break
-      }
-      case 'field-displacement':
-        height +=
-          Math.sin(worldX * 0.018 + worldZ * 0.011) * modifier.scale * 0.5
-        break
-      case 'boolean-subtract':
-        height += tunnelOverburden(worldX, worldZ, modifier)
-        break
-      case 'remesh':
-      case 'tessellate':
-        break
-    }
-  }
-  return height
-}
-
-function broadTerrainHeight(x: number, z: number, seed: number): number {
-  const phase = seed * 0.00013
-  const rolling =
-    Math.sin(x * 0.0061 + phase) * 8 +
-    Math.cos(z * 0.0053 - phase * 2) * 7 +
-    Math.sin((x + z) * 0.0028) * 10
-  const ridgeDistance = z - (x * 0.28 + 44)
-  const ridge = Math.exp(-(ridgeDistance * ridgeDistance) / (2 * 105 * 105))
-  const ridgeShape = ridge * (34 + Math.sin(x * 0.019) * 9)
-  const cliffBand = Math.exp(-((z + 55) * (z + 55)) / (2 * 250 * 250))
-  const cliff = smoothstep(-85, -24, x + Math.sin(z * 0.017) * 22) * 27 * cliffBand
-  const basin = -18 * Math.exp(-((x - 250) ** 2 + (z - 80) ** 2) / 95_000)
-  return 10 + rolling + ridgeShape + cliff + basin
-}
-
-function surfaceDetail(x: number, z: number, seed: number): number {
-  const first = valueNoise(x * 0.022, z * 0.022, seed)
-  const second = valueNoise(x * 0.061, z * 0.061, seed + 97)
-  return (first - 0.5) * 7 + (second - 0.5) * 2.2
-}
-
-function valueNoise(x: number, z: number, seed: number): number {
-  const x0 = Math.floor(x)
-  const z0 = Math.floor(z)
-  const tx = smoothstep(0, 1, x - x0)
-  const tz = smoothstep(0, 1, z - z0)
-  const a = hash2(x0, z0, seed)
-  const b = hash2(x0 + 1, z0, seed)
-  const c = hash2(x0, z0 + 1, seed)
-  const d = hash2(x0 + 1, z0 + 1, seed)
-  return lerp(lerp(a, b, tx), lerp(c, d, tx), tz)
-}
-
-function hash2(x: number, z: number, seed: number): number {
-  let value = Math.imul(x, 374_761_393) + Math.imul(z, 668_265_263)
-  value = (value ^ (value >>> 13)) + Math.imul(seed, 1_443_053)
-  value = Math.imul(value ^ (value >>> 16), 1_274_126_177)
-  return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295
-}
-
-function applyBrush(
-  height: number,
-  smoothTarget: number,
-  x: number,
-  z: number,
-  modifier: BrushStrokeModifier,
-): number {
-  let next = height
-  for (const point of modifier.points) {
-    const distance = Math.hypot(x - point.x, z - point.z)
-    if (distance >= modifier.radius) continue
-    const radial = 1 - distance / modifier.radius
-    const weight = smoothstep(0, 1, radial) ** (0.55 + modifier.falloff * 2.4)
-    const amount = clamp(modifier.strength, 0.01, 1) * weight
-    switch (modifier.mode) {
-      case 'raise':
-        next += amount * 2.8
-        break
-      case 'lower':
-        next -= amount * 2.8
-        break
-      case 'smooth':
-        next = lerp(next, smoothTarget, amount * 0.34)
-        break
-      case 'flatten':
-        next = lerp(next, modifier.targetY ?? point.y, amount * 0.48)
-        break
-    }
-  }
-  return next
-}
-
-function tunnelOverburden(
-  x: number,
-  z: number,
-  modifier: BooleanSubtractModifier,
-): number {
-  const dx = x - modifier.center.x
-  const dz = z - modifier.center.z
-  const along = dx * modifier.direction.x + dz * modifier.direction.z
-  const perpendicular = Math.abs(-dx * modifier.direction.z + dz * modifier.direction.x)
-  const half = modifier.length * 0.5
-  if (Math.abs(along) > half || perpendicular > modifier.radius * 2.2) return 0
-  const arch = Math.sin(((along + half) / modifier.length) * Math.PI)
-  const lateral = 1 - smoothstep(modifier.radius * 0.8, modifier.radius * 2.2, perpendicular)
-  return arch * lateral * modifier.radius * 2.35
-}
-
-function appendSurfaceTriangle(
-  indices: number[],
-  positions: number[],
-  a: number,
-  b: number,
-  c: number,
+function stabilizeBoundaryNormals(
+  normals: Float32Array,
+  parameters: number[],
   originX: number,
   originZ: number,
-  tunnels: BooleanSubtractModifier[],
-): void {
-  const centroidX =
-    originX + (positions[a * 3] + positions[b * 3] + positions[c * 3]) / 3
-  const centroidY =
-    (positions[a * 3 + 1] + positions[b * 3 + 1] + positions[c * 3 + 1]) / 3
-  const centroidZ =
-    originZ +
-    (positions[a * 3 + 2] + positions[b * 3 + 2] + positions[c * 3 + 2]) / 3
-  for (const tunnel of tunnels) {
-    if (pointInsideTunnel(centroidX, centroidY, centroidZ, tunnel)) return
-  }
-  indices.push(a, b, c)
-}
-
-function pointInsideTunnel(
-  x: number,
-  y: number,
-  z: number,
-  tunnel: BooleanSubtractModifier,
-): boolean {
-  const dx = x - tunnel.center.x
-  const dz = z - tunnel.center.z
-  const half = tunnel.length * 0.5
-  const along = clamp(
-    dx * tunnel.direction.x + dz * tunnel.direction.z,
-    -half,
-    half,
-  )
-  const closestX = tunnel.center.x + tunnel.direction.x * along
-  const closestZ = tunnel.center.z + tunnel.direction.z * along
-  return Math.hypot(x - closestX, y - tunnel.center.y, z - closestZ) < tunnel.radius * 1.04
-}
-
-function appendSkirts(
-  positions: number[],
-  indices: number[],
-  width: number,
-  height: number,
   sectionSize: number,
-  level: number,
+  seed: number,
+  modifiers: TerrainModifier[],
 ): void {
-  const north = Array.from({ length: width }, (_, index) => index)
-  const east = Array.from({ length: height }, (_, index) => index * width + width - 1)
-  const south = Array.from(
-    { length: width },
-    (_, index) => (height - 1) * width + (width - 1 - index),
-  )
-  const west = Array.from(
-    { length: height },
-    (_, index) => (height - 1 - index) * width,
-  )
-  const skirtDepth = Math.max(4, sectionSize * (0.035 + level * 0.012))
-  for (const edge of [north, east, south, west]) {
-    let previousTop = -1
-    let previousBottom = -1
-    for (const top of edge) {
-      const source = top * 3
-      const bottom = positions.length / 3
-      positions.push(
-        positions[source],
-        positions[source + 1] - skirtDepth,
-        positions[source + 2],
-      )
-      if (previousTop !== -1) {
-        indices.push(previousTop, previousBottom, top, top, previousBottom, bottom)
-      }
-      previousTop = top
-      previousBottom = bottom
+  const epsilon = 0.35
+  const maximumX = originX + sectionSize
+  const maximumZ = originZ + sectionSize
+  for (let vertex = 0; vertex < parameters.length / 2; vertex += 1) {
+    const worldX = parameters[vertex * 2]
+    const worldZ = parameters[vertex * 2 + 1]
+    const boundary =
+      Math.abs(worldX - originX) < 1e-4 ||
+      Math.abs(worldX - maximumX) < 1e-4 ||
+      Math.abs(worldZ - originZ) < 1e-4 ||
+      Math.abs(worldZ - maximumZ) < 1e-4
+    if (!boundary) continue
+
+    const left = evaluateTerrainPoint(worldX - epsilon, worldZ, seed, modifiers)
+    const right = evaluateTerrainPoint(worldX + epsilon, worldZ, seed, modifiers)
+    const north = evaluateTerrainPoint(worldX, worldZ - epsilon, seed, modifiers)
+    const south = evaluateTerrainPoint(worldX, worldZ + epsilon, seed, modifiers)
+    const tx = {
+      x: right.x - left.x,
+      y: right.y - left.y,
+      z: right.z - left.z,
     }
+    const tz = {
+      x: south.x - north.x,
+      y: south.y - north.y,
+      z: south.z - north.z,
+    }
+    let nx = tz.y * tx.z - tz.z * tx.y
+    let ny = tz.z * tx.x - tz.x * tx.z
+    let nz = tz.x * tx.y - tz.y * tx.x
+    if (ny < 0) {
+      nx *= -1
+      ny *= -1
+      nz *= -1
+    }
+    const length = Math.hypot(nx, ny, nz) || 1
+    const offset = vertex * 3
+    normals[offset] = nx / length
+    normals[offset + 1] = ny / length
+    normals[offset + 2] = nz / length
   }
 }
 
@@ -489,13 +367,12 @@ function calculateNormals(
 function calculateColors(
   positions: Float32Array,
   normals: Float32Array,
-  surfaceVertexCount: number,
-  level: number,
+  interiorVertices: Uint8Array,
 ): Float32Array {
   const colors = new Float32Array(positions.length)
   for (let vertex = 0; vertex < positions.length / 3; vertex += 1) {
     const offset = vertex * 3
-    if (vertex >= surfaceVertexCount) {
+    if (interiorVertices[vertex] === 1) {
       const variation = 0.82 + Math.sin(positions[offset] * 0.14 + positions[offset + 2] * 0.11) * 0.08
       colors[offset] = 0.23 * variation
       colors[offset + 1] = 0.2 * variation
@@ -504,14 +381,13 @@ function calculateColors(
     }
     const slope = 1 - Math.abs(normals[offset + 1])
     const altitude = smoothstep(20, 78, positions[offset + 1])
-    const detailFade = 1 - level * 0.025
     const grass = { r: 0.23, g: 0.35, b: 0.2 }
     const rock = { r: 0.36, g: 0.32, b: 0.27 }
     const high = { r: 0.48, g: 0.48, b: 0.43 }
     const rockMix = smoothstep(0.2, 0.72, slope)
-    colors[offset] = lerp(lerp(grass.r, rock.r, rockMix), high.r, altitude) * detailFade
-    colors[offset + 1] = lerp(lerp(grass.g, rock.g, rockMix), high.g, altitude) * detailFade
-    colors[offset + 2] = lerp(lerp(grass.b, rock.b, rockMix), high.b, altitude) * detailFade
+    colors[offset] = lerp(lerp(grass.r, rock.r, rockMix), high.r, altitude)
+    colors[offset + 1] = lerp(lerp(grass.g, rock.g, rockMix), high.g, altitude)
+    colors[offset + 2] = lerp(lerp(grass.b, rock.b, rockMix), high.b, altitude)
   }
   return colors
 }

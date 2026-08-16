@@ -1,4 +1,11 @@
-import { expandBounds, parseSectionId } from './core/bounds'
+import {
+  distanceToAabb,
+  expandBounds,
+  intersects,
+  parseSectionId,
+  unionBounds,
+  worldToSection,
+} from './core/bounds'
 import { ExternalStore } from './core/ExternalStore'
 import { FrameBudgetScheduler } from './core/FrameBudgetScheduler'
 import { WorldCoordinates } from './core/WorldCoordinates'
@@ -13,7 +20,7 @@ import {
   type TerrainConfig,
 } from './config'
 import { BenchmarkHistory } from './benchmarks/BenchmarkHistory'
-import { evaluateHeight } from './compiler/compileSection'
+import { evaluateHeight } from './compiler/TerrainField'
 import { TerrainCompiler } from './compiler/TerrainCompiler'
 import type { EditorSnapshot, TerrainOverlay } from './editor/EditorStore'
 import { constrainNeighborLods, selectLod } from './lod/LodSelector'
@@ -24,7 +31,20 @@ import {
   createRemeshModifier,
   createTunnelModifier,
 } from './modifiers/factories'
-import type { BrushStrokeModifier } from './modifiers/types'
+import type {
+  BooleanSubtractModifier,
+  BrushStrokeModifier,
+  ModifierTransform,
+} from './modifiers/types'
+import { sampleStrokeSegment } from './modifiers/strokeSampling'
+import {
+  tunnelPortalDistance,
+  updateTunnelPortal,
+} from './modifiers/tunnel'
+import {
+  modifierWorldBounds,
+  normalizedTransform,
+} from './modifiers/transform'
 import { MeshPartition, type TerrainSection } from './partition/MeshPartition'
 import { IndexedDbTerrainStorage, type TerrainStorage } from './persistence/TerrainStorage'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
@@ -33,12 +53,16 @@ import { TerrainStreamer, type StreamCandidate } from './streaming/TerrainStream
 export interface TerrainUpdateInput {
   camera: Vec3Like
   viewportHeight: number
+  aspect: number
   verticalFovRadians: number
   frameMs: number
   now?: number
 }
 
-export type BenchmarkScenario = 'sculpt-torture' | 'rebuild-torture'
+export type BenchmarkScenario =
+  | 'sculpt-torture'
+  | 'rebuild-torture'
+  | 'streaming-torture'
 
 interface ActiveBenchmark {
   name: BenchmarkScenario
@@ -47,6 +71,12 @@ interface ActiveBenchmark {
   lastStepAt: number
   step: number
 }
+
+const BRUSH_FLOW_PER_SECOND = 2.4
+const SPATIAL_DAB_WEIGHT = 0.08
+const MAX_AUTHORED_DAB_WEIGHT = 0.2
+
+export type StrokeEndResult = 'committed' | 'cancelled' | 'none'
 
 export class WorldTerrain {
   readonly config: TerrainConfig
@@ -61,12 +91,16 @@ export class WorldTerrain {
   private readonly benchmarkHistory = new BenchmarkHistory()
   private renderer?: TerrainRenderBackend
   private activeStroke?: BrushStrokeModifier
+  private activeTunnel?: BooleanSubtractModifier
   private lastStrokePoint?: Vec3Like
+  private lastStrokeNormal?: Vec3Like
+  private liveStrokePoint?: Vec3Like
+  private liveStrokeNormal?: Vec3Like
   private editFocus?: Vec3Like
   private initialized = false
   private initializePromise?: Promise<void>
   private disposed = false
-  private overlay: TerrainOverlay = 'sections'
+  private overlay: TerrainOverlay = 'none'
   private nextSaveAt = Infinity
   private savedModifierRevision = 0
   private saveInFlight = false
@@ -74,6 +108,7 @@ export class WorldTerrain {
   private schedulingMs = 0
   private activeBenchmark?: ActiveBenchmark
   private latestCamera: Vec3Like = { x: 0, y: 0, z: 0 }
+  private viewTarget?: Vec3Like
 
   constructor(
     config: Partial<TerrainConfig> = {},
@@ -122,6 +157,14 @@ export class WorldTerrain {
   attachRenderer(renderer: TerrainRenderBackend): void {
     this.renderer = renderer
     renderer.setOverlay(this.overlay)
+    // A renderer can be recreated during development or device recovery while
+    // the source/compiled world remains alive. Stage existing CPU meshes for
+    // budgeted re-upload instead of forcing every section through a recompile.
+    for (const section of this.partition.values()) {
+      if (section.compiled && !section.pendingCompiled && !renderer.has(section.id)) {
+        section.pendingCompiled = section.compiled
+      }
+    }
   }
 
   detachRenderer(renderer: TerrainRenderBackend): void {
@@ -129,7 +172,7 @@ export class WorldTerrain {
   }
 
   update(input: TerrainUpdateInput): void {
-    if (this.disposed) return
+    if (this.disposed || !this.initialized) return
     const now = input.now ?? performance.now()
     this.latestCamera = { ...input.camera }
     this.scheduler.beginFrame(input.frameMs)
@@ -142,6 +185,13 @@ export class WorldTerrain {
       budget.qualityScale,
       this.editFocus,
       now,
+      this.viewTarget
+        ? {
+            focus: this.viewTarget,
+            verticalFovRadians: input.verticalFovRadians,
+            aspect: input.aspect,
+          }
+        : undefined,
     )
     const candidateMap = new Map(candidates.map((candidate) => [candidate.id, candidate]))
 
@@ -189,15 +239,28 @@ export class WorldTerrain {
     this.updateMetrics(input.frameMs, now, candidateMap)
   }
 
-  beginStroke(point: Vec3Like, editor: EditorSnapshot): void {
+  beginStroke(
+    point: Vec3Like,
+    normal: Vec3Like,
+    editor: EditorSnapshot,
+  ): string | undefined {
+    // A physical press owns exactly one brush-stroke modifier. Treat duplicate
+    // pointer-down delivery as re-entry into the existing authoring session.
+    if (this.activeStroke) return this.activeStroke.id
+    if (this.activeTunnel) return this.activeTunnel.id
     this.editFocus = { ...point }
     if (editor.tool === 'select') return
     if (editor.tool === 'tunnel') {
-      const modifier = createTunnelModifier({ center: point })
+      const portal = { ...point, normal: { ...normal } }
+      const modifier = createTunnelModifier({
+        start: portal,
+        end: portal,
+        radius: editor.tunnelRadius,
+        depth: editor.tunnelDepth,
+      })
       this.modifiers.add(modifier)
-      this.invalidate(modifier.bounds)
-      this.markPersistenceDirty()
-      return
+      this.activeTunnel = modifier
+      return modifier.id
     }
     if (editor.tool === 'remesh') {
       const modifier = createRemeshModifier({
@@ -208,54 +271,194 @@ export class WorldTerrain {
       this.modifiers.add(modifier)
       this.invalidate(modifier.bounds)
       this.markPersistenceDirty()
-      return
+      return modifier.id
     }
+    const strokeNormal =
+      editor.brushDomain === 'mesh' ? normal : { x: 0, y: 1, z: 0 }
     const stroke = createBrushStroke({
       point,
+      normal: strokeNormal,
+      domain: editor.brushDomain,
       mode: editor.tool,
       radius: editor.brushRadius,
       strength: editor.brushStrength,
       falloff: editor.brushFalloff,
       targetY: editor.tool === 'flatten' ? point.y : undefined,
+      sampleWeight: SPATIAL_DAB_WEIGHT,
     })
     this.modifiers.add(stroke)
     this.activeStroke = stroke
     this.lastStrokePoint = { ...point }
+    this.lastStrokeNormal = { ...strokeNormal }
+    this.liveStrokePoint = { ...point }
+    this.liveStrokeNormal = { ...strokeNormal }
     this.invalidate(stroke.bounds)
-    this.schedulePreview(stroke, point)
-    this.markPersistenceDirty()
+    this.forceEditingLod(point, stroke.radius)
+    this.applyPreview(stroke, [stroke.points[0]])
+    return stroke.id
   }
 
-  continueStroke(point: Vec3Like): void {
-    const stroke = this.activeStroke
-    if (!stroke || !this.lastStrokePoint) return
-    const spacing = Math.max(0.75, stroke.radius * 0.14)
-    if (
-      Math.hypot(
-        point.x - this.lastStrokePoint.x,
-        point.y - this.lastStrokePoint.y,
-        point.z - this.lastStrokePoint.z,
-      ) < spacing
-    ) {
+  continueStroke(point: Vec3Like, normal: Vec3Like): void {
+    if (this.activeTunnel) {
+      updateTunnelPortal(this.activeTunnel, 1, point, normal)
+      this.editFocus = { ...point }
+      this.modifiers.touch()
       return
     }
-    const dirtyBounds = appendBrushPoint(stroke, point)
-    this.modifiers.touch()
-    this.lastStrokePoint = { ...point }
+    const stroke = this.activeStroke
+    if (!stroke || !this.lastStrokePoint || !this.lastStrokeNormal) return
+    const spacing = Math.max(0.35, stroke.radius * 0.05)
+    const strokeNormal =
+      stroke.domain === 'mesh' ? normal : { x: 0, y: 1, z: 0 }
+    this.liveStrokePoint = { ...point }
+    this.liveStrokeNormal = { ...strokeNormal }
     this.editFocus = { ...point }
-    this.invalidate(dirtyBounds)
-    this.schedulePreview(stroke, point)
-    this.markPersistenceDirty()
+    this.forceEditingLod(point, stroke.radius)
+    const samples = sampleStrokeSegment(
+      this.lastStrokePoint,
+      point,
+      this.lastStrokeNormal,
+      strokeNormal,
+      spacing,
+      SPATIAL_DAB_WEIGHT,
+    )
+    if (samples.length === 0) return
+    let dirtyBounds: AABB | undefined
+    for (const sample of samples) {
+      dirtyBounds = unionBounds(
+        dirtyBounds,
+        appendBrushPoint(stroke, sample, sample.normal, sample.weight),
+      )
+    }
+    this.modifiers.touch()
+    const latest = samples.at(-1)!
+    this.lastStrokePoint = { x: latest.x, y: latest.y, z: latest.z }
+    this.lastStrokeNormal = { ...latest.normal }
+    this.invalidate(dirtyBounds!)
+    this.applyPreview(stroke, samples)
   }
 
-  endStroke(): void {
+  endStroke(): StrokeEndResult {
+    if (this.activeTunnel) {
+      const tunnel = this.activeTunnel
+      this.activeTunnel = undefined
+      if (tunnelPortalDistance(tunnel) < Math.max(2, tunnel.radius * 1.25)) {
+        this.modifiers.remove(tunnel.id)
+        return 'cancelled'
+      }
+      this.invalidate(tunnel.bounds)
+      this.markPersistenceDirty()
+      return 'committed'
+    }
+    const hadStroke = Boolean(this.activeStroke)
+    if (this.activeStroke) {
+      this.modifiers.touch()
+      this.markPersistenceDirty()
+    }
     this.activeStroke = undefined
     this.lastStrokePoint = undefined
+    this.lastStrokeNormal = undefined
+    this.liveStrokePoint = undefined
+    this.liveStrokeNormal = undefined
+    return hadStroke ? 'committed' : 'none'
+  }
+
+  pauseActiveStroke(): void {
+    this.liveStrokePoint = undefined
+    this.liveStrokeNormal = undefined
+  }
+
+  advanceActiveStroke(deltaSeconds: number): void {
+    const stroke = this.activeStroke
+    const point = this.liveStrokePoint
+    const normal = this.liveStrokeNormal
+    if (!stroke || !point || !normal) return
+    const flowWeight = Math.min(Math.max(deltaSeconds, 0), 1 / 30) * BRUSH_FLOW_PER_SECOND
+    if (flowWeight <= 0) return
+    let remainingWeight = flowWeight
+    const latest = stroke.points.at(-1)
+    if (latest) {
+      const applied = Math.min(
+        remainingWeight,
+        Math.max(0, MAX_AUTHORED_DAB_WEIGHT - latest.weight),
+      )
+      latest.weight += applied
+      remainingWeight -= applied
+    }
+    let appended = false
+    while (remainingWeight > 1e-6) {
+      const weight = Math.min(remainingWeight, MAX_AUTHORED_DAB_WEIGHT)
+      appendBrushPoint(stroke, point, normal, weight)
+      remainingWeight -= weight
+      appended = true
+    }
+    if (appended) {
+      this.lastStrokePoint = { ...point }
+      this.lastStrokeNormal = { ...normal }
+      this.modifiers.touch()
+    }
+    this.applyPreview(stroke, [
+      {
+        ...point,
+        normal: { ...normal },
+        weight: flowWeight,
+      },
+    ])
   }
 
   setOverlay(overlay: TerrainOverlay): void {
     this.overlay = overlay
     this.renderer?.setOverlay(overlay)
+  }
+
+  setViewTarget(target: Vec3Like): void {
+    this.viewTarget = { ...target }
+  }
+
+  updateModifierTransform(id: string, transform: ModifierTransform): boolean {
+    const modifier = this.modifiers.get(id)
+    if (!modifier) return false
+    const previousBounds = modifier.bounds
+    modifier.transform = normalizedTransform(transform)
+    modifier.bounds = modifierWorldBounds(modifier)
+    this.modifiers.touch()
+    this.invalidate(unionBounds(previousBounds, modifier.bounds))
+    this.markPersistenceDirty()
+    return true
+  }
+
+  updateTunnelShape(
+    id: string,
+    values: Partial<Pick<BooleanSubtractModifier, 'radius' | 'depth'>>,
+  ): boolean {
+    const modifier = this.modifiers.get(id)
+    if (!modifier || modifier.type !== 'boolean-subtract') return false
+    const previousBounds = modifier.bounds
+    if (values.radius !== undefined) modifier.radius = Math.max(0.25, values.radius)
+    if (values.depth !== undefined) modifier.depth = Math.max(0.25, values.depth)
+    modifier.bounds = modifierWorldBounds(modifier)
+    this.modifiers.touch()
+    this.invalidate(unionBounds(previousBounds, modifier.bounds))
+    this.markPersistenceDirty()
+    return true
+  }
+
+  setModifierEnabled(id: string, enabled: boolean): boolean {
+    const modifier = this.modifiers.get(id)
+    if (!modifier || modifier.enabled === enabled) return false
+    modifier.enabled = enabled
+    this.modifiers.touch()
+    this.invalidate(modifier.bounds)
+    this.markPersistenceDirty()
+    return true
+  }
+
+  removeModifier(id: string): boolean {
+    const removed = this.modifiers.remove(id)
+    if (!removed) return false
+    this.invalidate(removed.bounds)
+    this.markPersistenceDirty()
+    return true
   }
 
   startBenchmark(name: BenchmarkScenario): void {
@@ -349,6 +552,12 @@ export class WorldTerrain {
     candidate: StreamCandidate,
     now: number,
   ): void {
+    if (
+      ((this.activeStroke && intersects(section.bounds, this.activeStroke.bounds)) ||
+        (this.activeTunnel && intersects(section.bounds, this.activeTunnel.bounds)))
+    ) {
+      return
+    }
     const needsBuild =
       section.buildState === 'queued' ||
       section.buildState === 'failed' ||
@@ -382,10 +591,18 @@ export class WorldTerrain {
       uploadBytes: pending.cpuBytes,
       swaps: 1,
       run: () => {
+        if (
+          this.partition.get(section.key) !== section ||
+          !this.streamer.isDesired(section.key)
+        ) {
+          return
+        }
         const compiled = this.partition.commitPending(section)
         if (!compiled || !this.renderer) return
         this.renderer.upload(section, compiled)
-        section.residency = candidate.visible ? 'VISIBLE' : 'GPU_RESIDENT'
+        const visible = this.streamer.isVisible(section.key)
+        this.renderer.setVisible(section.id, visible)
+        section.residency = visible ? 'VISIBLE' : 'GPU_RESIDENT'
         this.streamer.setState(
           section.key,
           section.residency,
@@ -413,7 +630,7 @@ export class WorldTerrain {
         input.camera.y - centerY,
         input.camera.z - centerZ,
       )
-      const lod = selectLod({
+      let lod = selectLod({
         lods: section.compiled.lods,
         distance,
         viewportHeight: input.viewportHeight,
@@ -422,6 +639,13 @@ export class WorldTerrain {
           this.config.baseLodErrorPixels / Math.max(0.48, this.scheduler.snapshot().qualityScale),
         currentLod: section.activeLod,
       })
+      const activeBrushTouchesSection = Boolean(
+        this.activeStroke &&
+        this.liveStrokePoint &&
+        distanceToAabb(this.liveStrokePoint, section.bounds) <=
+          this.activeStroke.radius,
+      )
+      if (activeBrushTouchesSection || section.dirtyRegion) lod = 0
       section.requestedLod = lod
       nodes.push({ id: section.id, x: section.key.x, z: section.key.z, lod })
       this.renderer.setVisible(section.id, candidate.visible)
@@ -437,6 +661,26 @@ export class WorldTerrain {
     for (const [id, lod] of constrained) this.renderer.setLod(id, lod)
   }
 
+  private forceEditingLod(point: Vec3Like, radius: number): void {
+    if (!this.renderer) return
+    const minimum = worldToSection(
+      point.x - radius,
+      point.z - radius,
+      this.config.sectionSize,
+    )
+    const maximum = worldToSection(
+      point.x + radius,
+      point.z + radius,
+      this.config.sectionSize,
+    )
+    for (let z = minimum.z; z <= maximum.z; z += 1) {
+      for (let x = minimum.x; x <= maximum.x; x += 1) {
+        const section = this.partition.get({ x, z })
+        if (section) this.renderer.setLod(section.id, 0)
+      }
+    }
+  }
+
   private scheduleEvictions(now: number): void {
     const evictions = this.streamer.collectEvictions(now)
     for (let index = 0; index < Math.min(2, evictions.length); index += 1) {
@@ -448,6 +692,7 @@ export class WorldTerrain {
         estimatedCpuMs: 0.12,
         run: () => {
           const key = parseSectionId(id)
+          if (this.streamer.isDesired(key)) return
           this.compiler.cancel(key)
           this.renderer?.evict(id)
           this.partition.remove(key)
@@ -457,21 +702,20 @@ export class WorldTerrain {
     }
   }
 
-  private schedulePreview(stroke: BrushStrokeModifier, point: Vec3Like): void {
-    this.scheduler.enqueue({
-      id: `preview:${stroke.id}`,
-      kind: 'maintenance',
-      priority: 40_000,
-      estimatedCpuMs: 0.35,
-      run: () =>
-        this.renderer?.previewBrush({
-          mode: stroke.mode,
-          point,
-          radius: stroke.radius,
-          strength: stroke.strength,
-          falloff: stroke.falloff,
-          targetY: stroke.targetY,
-        }),
+  private applyPreview(
+    stroke: BrushStrokeModifier,
+    samples: readonly BrushStrokeModifier['points'][number][],
+  ): void {
+    // This mutates only small resident render buffers and must be visible in
+    // the very next frame. Authoritative evaluation remains worker-only.
+    this.renderer?.previewBrush({
+      mode: stroke.mode,
+      domain: stroke.domain,
+      samples,
+      radius: stroke.radius,
+      strength: stroke.strength,
+      falloff: stroke.falloff,
+      targetY: stroke.targetY,
     })
   }
 
@@ -516,6 +760,7 @@ export class WorldTerrain {
       this.activeBenchmark = undefined
       return
     }
+    if (benchmark.name === 'streaming-torture') return
     if (now - benchmark.lastStepAt < 120) return
     benchmark.lastStepAt = now
     const focus = this.editFocus ?? {
@@ -531,6 +776,7 @@ export class WorldTerrain {
     }
     const stroke = createBrushStroke({
       point,
+      normal: { x: 0, y: 1, z: 0 },
       mode: benchmark.step % 4 === 0 ? 'lower' : 'raise',
       radius: benchmark.name === 'rebuild-torture' ? 26 : 17,
       strength: 0.22,
@@ -538,7 +784,7 @@ export class WorldTerrain {
     })
     this.modifiers.add(stroke)
     this.invalidate(stroke.bounds)
-    this.schedulePreview(stroke, point)
+    this.applyPreview(stroke, [stroke.points[0]])
     this.markPersistenceDirty()
     benchmark.step += 1
   }

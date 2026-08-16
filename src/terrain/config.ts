@@ -7,6 +7,7 @@ export interface TerrainConfig {
   targetFps: number
   baseLodErrorPixels: number
   renderRadiusSections: number
+  maxRenderRadiusSections: number
   prefetchSections: number
   maxGpuBytes: number
   maxCpuCompiledBytes: number
@@ -25,12 +26,15 @@ const availableWorkers =
 export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   worldSize: 16_384,
   sectionSize: 128,
-  lodResolutions: [24, 17, 12, 8, 4],
+  // Power-of-two nesting keeps every coarser boundary sample present in the
+  // next finer LOD, avoiding the non-matching edge polylines that exposed skirts.
+  lodResolutions: [32, 16, 8, 4, 2],
   operationHalo: 12,
   workerCount: Math.max(2, Math.min(4, availableWorkers - 2)),
   targetFps: 60,
   baseLodErrorPixels: 2.2,
-  renderRadiusSections: 5,
+  renderRadiusSections: 10,
+  maxRenderRadiusSections: 22,
   prefetchSections: 2,
   maxGpuBytes: 256 * 1024 * 1024,
   maxCpuCompiledBytes: 384 * 1024 * 1024,
@@ -39,6 +43,6 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   maxUploadBytesPerFrame: 6 * 1024 * 1024,
   maxSectionSwapsPerFrame: 2,
   terrainCpuBudgetMs: 1.5,
-  sectionRetentionMs: 6_000,
+  sectionRetentionMs: 12_000,
   seed: 13_371,
 }

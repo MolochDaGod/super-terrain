@@ -1,6 +1,11 @@
 import type { AABB, CompiledSection, SectionKey } from '../core/types'
 import type { TerrainConfig } from '../config'
-import type { BrushMode, TerrainModifier } from '../modifiers/types'
+import type {
+  BrushDomain,
+  BrushMode,
+  ModifierTransform,
+  TerrainModifier,
+} from '../modifiers/types'
 
 export interface BrushModifierDescriptor {
   id: string
@@ -9,6 +14,8 @@ export interface BrushModifierDescriptor {
   priority: number
   bounds: AABB
   mode: BrushMode
+  domain: BrushDomain
+  transform: ModifierTransform
   radius: number
   strength: number
   falloff: number
@@ -63,7 +70,7 @@ export function encodeModifiers(modifiers: TerrainModifier[]): ModifierPacket {
     if (modifier.type === 'brush-stroke') pointCount += modifier.points.length
   }
 
-  const brushPoints = new Float32Array(pointCount * 3)
+  const brushPoints = new Float32Array(pointCount * 7)
   const descriptors: WorkerModifierDescriptor[] = []
   let pointCursor = 0
 
@@ -74,10 +81,14 @@ export function encodeModifiers(modifiers: TerrainModifier[]): ModifierPacket {
     }
     const pointOffset = pointCursor
     for (const point of modifier.points) {
-      const offset = pointCursor * 3
+      const offset = pointCursor * 7
       brushPoints[offset] = point.x
       brushPoints[offset + 1] = point.y
       brushPoints[offset + 2] = point.z
+      brushPoints[offset + 3] = point.normal?.x ?? 0
+      brushPoints[offset + 4] = point.normal?.y ?? 1
+      brushPoints[offset + 5] = point.normal?.z ?? 0
+      brushPoints[offset + 6] = point.weight ?? 1
       pointCursor += 1
     }
     descriptors.push({
@@ -87,6 +98,8 @@ export function encodeModifiers(modifiers: TerrainModifier[]): ModifierPacket {
       priority: modifier.priority,
       bounds: modifier.bounds,
       mode: modifier.mode,
+      domain: modifier.domain,
+      transform: modifier.transform,
       radius: modifier.radius,
       strength: modifier.strength,
       falloff: modifier.falloff,
@@ -101,17 +114,24 @@ export function encodeModifiers(modifiers: TerrainModifier[]): ModifierPacket {
 export function decodeModifiers(packet: ModifierPacket): TerrainModifier[] {
   return packet.descriptors.map((descriptor) => {
     if (descriptor.type !== 'brush-stroke') return descriptor
+    const { pointOffset, pointCount, ...brush } = descriptor
     const points = []
-    for (let point = 0; point < descriptor.pointCount; point += 1) {
-      const offset = (descriptor.pointOffset + point) * 3
+    for (let point = 0; point < pointCount; point += 1) {
+      const offset = (pointOffset + point) * 7
       points.push({
         x: packet.brushPoints[offset],
         y: packet.brushPoints[offset + 1],
         z: packet.brushPoints[offset + 2],
+        normal: {
+          x: packet.brushPoints[offset + 3],
+          y: packet.brushPoints[offset + 4],
+          z: packet.brushPoints[offset + 5],
+        },
+        weight: packet.brushPoints[offset + 6],
       })
     }
     return {
-      ...descriptor,
+      ...brush,
       points,
     }
   })
