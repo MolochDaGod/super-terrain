@@ -12,6 +12,12 @@ export function createSectionGeometry(
   geometry.setAttribute('position', new BufferAttribute(skirted.positions, 3))
   geometry.setAttribute('normal', new BufferAttribute(skirted.normals, 3))
   geometry.setAttribute('color', new BufferAttribute(skirted.colors, 3))
+  for (let field = 0; field < skirted.surfaceFields.length; field += 1) {
+    geometry.setAttribute(
+      `terrainSurface${field}`,
+      new BufferAttribute(skirted.surfaceFields[field], 4, true),
+    )
+  }
   geometry.setIndex(new BufferAttribute(skirted.indices, 1))
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()

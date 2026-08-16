@@ -28,6 +28,7 @@ import {
 } from './createTerrainMaterialForMode'
 import type { TerrainRenderMode } from './renderModes'
 import { createSectionGeometry } from './createSectionGeometry'
+import { invalidateTerrainShadows } from './environment/terrainShadowInvalidation'
 
 interface RuntimeSection {
   section: TerrainSection
@@ -48,6 +49,7 @@ const LOD_COLORS = [0x59dca9, 0x89c95a, 0xe5c65f, 0xe58d52, 0xd95f69]
 
 export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private readonly root: Group
+  private readonly surfaceRoot: Group
   private readonly sectionSize: number
   private runtime = new Map<SectionId, RuntimeSection>()
   private deferredDisposals: DeferredGeometry[] = []
@@ -70,6 +72,9 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
 
   constructor(root: Group, sectionSize: number) {
     this.root = root
+    this.surfaceRoot = new Group()
+    this.surfaceRoot.name = 'terrain-static-surfaces'
+    this.root.add(this.surfaceRoot)
     this.sectionSize = sectionSize
     this.terrainMaterial = createTerrainMaterialForMode(this.renderMode)
     this.lodMaterials = LOD_COLORS.map(
@@ -106,8 +111,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
         this.sectionSize,
       )
       runtime.mesh.visible = runtime.visible
-      this.root.remove(previousMesh)
-      this.root.add(runtime.mesh)
+      this.surfaceRoot.remove(previousMesh)
+      this.surfaceRoot.add(runtime.mesh)
       this.updateBoundary(runtime, compiled)
     } else {
       const mesh = createTerrainMesh(
@@ -121,7 +126,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
         compiled,
         this.boundaryMaterials.clean,
       )
-      this.root.add(mesh, boundary)
+      this.surfaceRoot.add(mesh)
+      this.root.add(boundary)
       runtime = {
         section,
         mesh,
@@ -135,6 +141,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     }
     this.applyMaterial(runtime)
     this.setSectionState(section)
+    invalidateTerrainShadows()
     return compiled.cpuBytes
   }
 
@@ -151,6 +158,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     runtime.section.activeLod = next
     runtime.mesh.geometry = runtime.geometries[next]
     this.applyMaterial(runtime)
+    invalidateTerrainShadows()
   }
 
   setVisible(sectionId: SectionId, visible: boolean): void {
@@ -159,6 +167,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     runtime.visible = visible
     runtime.mesh.visible = visible
     runtime.boundary.visible = visible && this.overlay !== 'none'
+    invalidateTerrainShadows()
   }
 
   setSectionState(section: TerrainSection): void {
@@ -192,6 +201,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       this.applyMaterial(runtime)
     }
     previous.dispose()
+    invalidateTerrainShadows()
   }
 
   setOverlay(overlay: TerrainOverlay): void {
@@ -201,6 +211,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       this.applyMaterial(runtime)
       runtime.boundary.visible = runtime.visible && overlay !== 'none'
     }
+    invalidateTerrainShadows()
   }
 
   previewBrush(preview: PreviewBrush): void {
@@ -292,9 +303,11 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   evict(sectionId: SectionId): void {
     const runtime = this.runtime.get(sectionId)
     if (!runtime) return
-    this.root.remove(runtime.mesh, runtime.boundary)
+    this.surfaceRoot.remove(runtime.mesh)
+    this.root.remove(runtime.boundary)
     this.deferGeometries([...runtime.geometries, runtime.boundary.geometry])
     this.runtime.delete(sectionId)
+    invalidateTerrainShadows()
   }
 
   stats(): TerrainRenderStats {
@@ -333,6 +346,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const id of [...this.runtime.keys()]) this.evict(id)
     for (const pending of this.deferredDisposals) pending.geometry.dispose()
     this.deferredDisposals.length = 0
+    this.root.remove(this.surfaceRoot)
     this.terrainMaterial.dispose()
     this.densityMaterial.dispose()
     for (const material of this.lodMaterials) material.dispose()
@@ -364,6 +378,9 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
 
   private queuePreviewRefresh(geometry: BufferGeometry): void {
     this.pendingPreviewRefresh.add(geometry)
+    // Positions have already changed; the next frame must not reuse a shadow
+    // cast by their old shape while normal rebuilding waits for its RAF batch.
+    invalidateTerrainShadows()
     if (this.previewRefreshHandle !== undefined) return
     if (typeof requestAnimationFrame !== 'function') {
       this.flushPreviewRefresh()
@@ -376,6 +393,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   private flushPreviewRefresh(): void {
+    if (this.pendingPreviewRefresh.size === 0) return
     for (const geometry of this.pendingPreviewRefresh) {
       geometry.computeVertexNormals()
       const normal = geometry.getAttribute('normal') as BufferAttribute | undefined

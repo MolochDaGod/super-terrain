@@ -36,6 +36,7 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
       <HorizonProxy
         worldSize={terrain.config.worldSize}
         seed={terrain.config.seed}
+        mode={renderMode}
       />
       <TerrainView terrain={terrain} editor={editor} />
       <ModifierBounds terrain={terrain} editor={editor} />

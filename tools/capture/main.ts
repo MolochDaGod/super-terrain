@@ -89,11 +89,11 @@ async function main(): Promise<void> {
     if (options.frames > 0) {
       // One warm-up frame so pipeline creation is not counted.
       await headless.timeFrame(() => rendering.pipeline.renderAsync())
-      const steadyStart = Date.now()
-      for (let frame = 0; frame < options.frames; frame += 1) {
-        await headless.timeFrame(() => rendering.pipeline.renderAsync())
-      }
-      steadyMs = (Date.now() - steadyStart) / options.frames
+      steadyMs =
+        (await headless.timeFrames(
+          () => rendering.pipeline.renderAsync(),
+          options.frames,
+        )) / options.frames
     }
     const file = resolve(
       options.outputDirectory,

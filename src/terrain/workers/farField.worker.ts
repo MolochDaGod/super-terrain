@@ -10,6 +10,7 @@ workerScope.onmessage = (event: MessageEvent<{ worldSize: number; seed: number }
     mesh.positions.buffer,
     mesh.normals.buffer,
     mesh.colors.buffer,
+    mesh.fullColors.buffer,
     mesh.indices.buffer,
   ])
 }

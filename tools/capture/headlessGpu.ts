@@ -18,6 +18,12 @@ export interface HeadlessRenderer {
    * around it measure the transfer rather than the renderer.
    */
   timeFrame(render: () => Promise<void>): Promise<void>
+  /**
+   * Times a submitted batch with one queue synchronization. Dawn polls queue
+   * callbacks at a coarse interval, so synchronizing every frame adds a fixed
+   * host-side delay that can dwarf the GPU work being measured.
+   */
+  timeFrames(render: () => Promise<void>, frames: number): Promise<number>
   dispose(): void
 }
 
@@ -145,6 +151,14 @@ export async function createHeadlessRenderer(
       await render()
       renderer.setRenderTarget(null)
       await device.queue.onSubmittedWorkDone()
+    },
+    async timeFrames(render, frames) {
+      renderer.setRenderTarget(target)
+      const started = performance.now()
+      for (let frame = 0; frame < frames; frame += 1) await render()
+      renderer.setRenderTarget(null)
+      await device.queue.onSubmittedWorkDone()
+      return performance.now() - started
     },
     dispose() {
       target.dispose()

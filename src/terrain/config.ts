@@ -34,7 +34,7 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   lodResolutions: [96, 48, 24, 12, 6],
   operationHalo: 12,
   workerCount: Math.max(2, Math.min(4, availableWorkers - 2)),
-  targetFps: 60,
+  targetFps: 30,
   baseLodErrorPixels: 2.2,
   renderRadiusSections: 10,
   maxRenderRadiusSections: 22,

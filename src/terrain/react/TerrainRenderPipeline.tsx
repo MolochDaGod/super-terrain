@@ -54,19 +54,22 @@ export function TerrainRenderPipeline({
     let cancelled = false
     setReadyMode(null)
     onCompilingChange?.(true)
-    const renderer = gl as unknown as Renderer
-    void renderer
-      .compileAsync(scene as unknown as Scene, camera)
-      .catch(() => undefined)
+    void rendering
+      .warmup()
       .then(() => {
         if (cancelled) return
         setReadyMode(mode)
         onCompilingChange?.(false)
       })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        console.error('Terrain pipeline warm-up failed', error)
+        onCompilingChange?.(false)
+      })
     return () => {
       cancelled = true
     }
-  }, [camera, gl, mode, onCompilingChange, scene])
+  }, [mode, onCompilingChange, rendering])
 
   useEffect(() => () => rendering.dispose(), [rendering])
 

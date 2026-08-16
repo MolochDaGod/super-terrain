@@ -63,6 +63,7 @@ export class TerrainStreamer {
   private loadEvents: number[] = []
   private evictionEvents: number[] = []
   private visibleRadius?: number
+  private targetVisibleRadius?: number
 
   constructor(config: TerrainConfig) {
     this.config = config
@@ -101,6 +102,7 @@ export class TerrainStreamer {
     // with the projected viewport footprint. Frame pressure is absorbed by LOD
     // and prefetch first; it must never make already-visible terrain disappear.
     const requiredRadius = requiredViewRadiusSections(this.config, camera, view)
+    this.targetVisibleRadius = requiredRadius
     this.visibleRadius =
       this.visibleRadius === undefined || requiredRadius >= this.visibleRadius
         ? requiredRadius
@@ -184,6 +186,19 @@ export class TerrainStreamer {
     candidates.sort((a, b) => b.priority - a.priority)
     this.trimEventHistory(now)
     return candidates
+  }
+
+  /**
+   * True once camera velocity and the hysteretic visible radius have converged.
+   * Until then update() must keep running even for identical camera inputs.
+   */
+  get isSettled(): boolean {
+    return (
+      Math.hypot(this.velocity.x, this.velocity.y, this.velocity.z) < 0.1 &&
+      this.visibleRadius !== undefined &&
+      this.targetVisibleRadius !== undefined &&
+      Math.abs(this.visibleRadius - this.targetVisibleRadius) < 0.01
+    )
   }
 
   touch(

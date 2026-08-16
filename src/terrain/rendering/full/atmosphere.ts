@@ -1,4 +1,17 @@
-import { clamp, dot, exp, float, mix, pow, smoothstep, uniform, vec3 } from 'three/tsl'
+import {
+  Fn,
+  If,
+  clamp,
+  dot,
+  exp,
+  float,
+  mix,
+  pow,
+  smoothstep,
+  uniform,
+  vec3,
+  vec4,
+} from 'three/tsl'
 import { falloff } from './fields'
 import { DEFAULT_SUN } from '../environment/sunPosition'
 
@@ -57,24 +70,17 @@ export function skyColour(direction: any): any {
  * Returns `{ colour, amount }` for the haze between the camera and a surface.
  * `amount` is applied as a lerp on the shaded colour after lighting.
  */
-export function aerialPerspective(
-  viewDistance: any,
-  viewDirection: any,
-  surfaceHeight: any,
-  cameraHeight: any,
-): { colour: any; amount: any } {
+const evaluateAerialPerspective = /*@__PURE__*/ Fn(
+  ([viewDistance, viewDirection, surfaceHeight, cameraHeight]: [
+    any,
+    any,
+    any,
+    any,
+  ]) => {
   // Analytic integral of an exponentially decaying density along the segment
   // between the two endpoints, which keeps the falloff correct whether the ray
   // climbs a peak or runs along a valley floor.
   const meanHeight = surfaceHeight.add(cameraHeight).mul(0.5).toVar('meanHeight')
-  const lowest = surfaceHeight.min(cameraHeight).max(-200)
-  const highest = surfaceHeight.max(cameraHeight).max(-200)
-  const rise = highest.sub(lowest).max(0.001)
-  const meanDensity = exp(lowest.mul(HAZE_HEIGHT_FALLOFF).negate())
-    .sub(exp(highest.mul(HAZE_HEIGHT_FALLOFF).negate()))
-    .div(rise.mul(HAZE_HEIGHT_FALLOFF))
-    .toVar('meanDensity')
-
   // Start offset: the first couple of hundred metres of air are effectively
   // clear, and veiling them is what makes near rock read as milk.
   const hazed = viewDistance.sub(HAZE_START).max(0)
@@ -85,16 +91,40 @@ export function aerialPerspective(
   const mistDepth = falloff(MIST_CEILING, float(-40), meanHeight)
     .mul(viewDistance)
     .mul(MIST_DENSITY)
-  const optical = hazed
-    .mul(HAZE_DENSITY)
-    .mul(meanDensity)
-    .add(mistDepth)
-    .toVar('opticalDepth')
+  const optical = float(mistDepth as any).toVar('opticalDepth')
+  If(hazed.greaterThan(0), () => {
+    const lowest = surfaceHeight.min(cameraHeight).max(-200)
+    const highest = surfaceHeight.max(cameraHeight).max(-200)
+    const rise = highest.sub(lowest).max(0.001)
+    const meanDensity = exp(lowest.mul(HAZE_HEIGHT_FALLOFF).negate())
+      .sub(exp(highest.mul(HAZE_HEIGHT_FALLOFF).negate()))
+      .div(rise.mul(HAZE_HEIGHT_FALLOFF))
+    optical.addAssign(hazed.mul(HAZE_DENSITY).mul(meanDensity))
+  })
   const amount = optical.negate().exp().oneMinus().clamp(0, 1).toVar('hazeAmount')
 
   // `viewDirection` points from the surface back to the camera, so the ray
   // travelling away from the eye is its negation.
-  const colour = skyColour(viewDirection.negate())
+  const colour = vec3(HORIZON_COLOUR).toVar('hazeColour')
+  If(amount.greaterThan(0), () => {
+    colour.assign(skyColour(viewDirection.negate()))
+  })
 
-  return { colour, amount }
+    return vec4(colour, amount)
+  },
+)
+
+export function aerialPerspective(
+  viewDistance: any,
+  viewDirection: any,
+  surfaceHeight: any,
+  cameraHeight: any,
+): { colour: any; amount: any } {
+  const result = evaluateAerialPerspective(
+    viewDistance,
+    viewDirection,
+    surfaceHeight,
+    cameraHeight,
+  ) as any
+  return { colour: result.xyz, amount: result.w }
 }

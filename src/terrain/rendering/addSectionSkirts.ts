@@ -4,6 +4,13 @@ export interface SkirtedGeometryData {
   positions: Float32Array
   normals: Float32Array
   colors: Float32Array
+  surfaceFields: readonly [
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+  ]
   indices: Uint32Array
 }
 
@@ -19,20 +26,34 @@ interface EdgeUse {
  * topology or adding skirts around intentional tunnel portals.
  */
 export function addSectionSkirts(
-  lod: Pick<CompiledLOD, 'positions' | 'normals' | 'colors' | 'indices'>,
+  lod: Pick<
+    CompiledLOD,
+    'positions' | 'normals' | 'colors' | 'surfaceFields' | 'indices'
+  >,
   sectionSize: number,
 ): SkirtedGeometryData {
+  const sourceSurfaceFields =
+    lod.surfaceFields ?? createDefaultSurfaceFields(lod.positions.length / 3)
   const edges = collectOpenEdges(lod.indices)
   const candidates = edges
     .map((edge) => ({ edge, normal: ownershipPlaneNormal(lod.positions, edge, sectionSize) }))
     .filter((candidate): candidate is { edge: EdgeUse; normal: readonly [number, number, number] } =>
       candidate.normal !== undefined,
     )
-  if (candidates.length === 0) return lod
+  if (candidates.length === 0) {
+    return { ...lod, surfaceFields: sourceSurfaceFields }
+  }
 
   const positions = Array.from(lod.positions)
   const normals = Array.from(lod.normals)
   const colors = Array.from(lod.colors)
+  const surfaceFields = sourceSurfaceFields.map((field) => Array.from(field)) as [
+    number[],
+    number[],
+    number[],
+    number[],
+    number[],
+  ]
   const indices = Array.from(lod.indices)
   const skirtDepth = Math.max(1.5, sectionSize / 32)
 
@@ -40,10 +61,10 @@ export function addSectionSkirts(
     const first = edge.a * 3
     const second = edge.b * 3
     const base = positions.length / 3
-    appendVertex(positions, normals, colors, lod, first, normal, 0)
-    appendVertex(positions, normals, colors, lod, first, normal, -skirtDepth)
-    appendVertex(positions, normals, colors, lod, second, normal, 0)
-    appendVertex(positions, normals, colors, lod, second, normal, -skirtDepth)
+    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, first, normal, 0)
+    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, first, normal, -skirtDepth)
+    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, second, normal, 0)
+    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, second, normal, -skirtDepth)
     indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3)
   }
 
@@ -51,6 +72,13 @@ export function addSectionSkirts(
     positions: Float32Array.from(positions),
     normals: Float32Array.from(normals),
     colors: Float32Array.from(colors),
+    surfaceFields: surfaceFields.map((field) => Uint16Array.from(field)) as [
+      Uint16Array,
+      Uint16Array,
+      Uint16Array,
+      Uint16Array,
+      Uint16Array,
+    ],
     indices: Uint32Array.from(indices),
   }
 }
@@ -59,7 +87,15 @@ function appendVertex(
   positions: number[],
   normals: number[],
   colors: number[],
+  surfaceFields: [number[], number[], number[], number[], number[]],
   source: Pick<CompiledLOD, 'positions' | 'colors'>,
+  sourceSurfaceFields: readonly [
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+  ],
   offset: number,
   normal: readonly [number, number, number],
   yOffset: number,
@@ -75,6 +111,43 @@ function appendVertex(
     source.colors[offset + 1],
     source.colors[offset + 2],
   )
+  const vertex = offset / 3
+  const fieldOffset = vertex * 4
+  for (let field = 0; field < surfaceFields.length; field += 1) {
+    surfaceFields[field].push(
+      sourceSurfaceFields[field][fieldOffset],
+      sourceSurfaceFields[field][fieldOffset + 1],
+      sourceSurfaceFields[field][fieldOffset + 2],
+      sourceSurfaceFields[field][fieldOffset + 3],
+    )
+  }
+}
+
+function createDefaultSurfaceFields(vertexCount: number): readonly [
+  Uint16Array,
+  Uint16Array,
+  Uint16Array,
+  Uint16Array,
+  Uint16Array,
+] {
+  const fields: [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] = [
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+  ]
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const offset = vertex * 4
+    for (let field = 0; field < fields.length; field += 1) {
+      fields[field][offset] = 32_768
+      fields[field][offset + 1] = 32_768
+      fields[field][offset + 2] = 32_768
+      fields[field][offset + 3] = 32_768
+    }
+    fields[4][offset + 1] = 65_535
+  }
+  return fields
 }
 
 function collectOpenEdges(indices: Uint32Array): EdgeUse[] {

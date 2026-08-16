@@ -27,9 +27,11 @@ export function TerrainEnvironment({
     return () => environment.dispose()
   }, [environment, scene])
 
+  // Camera controls run at the default priority and the post pipeline renders
+  // at priority 1. Refresh camera-dependent shadows between those two phases.
   useFrame((state) => {
     environment.update(state.camera)
-  })
+  }, 0.5)
 
   return <primitive object={environment.group} />
 }

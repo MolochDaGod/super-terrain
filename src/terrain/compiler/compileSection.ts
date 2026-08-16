@@ -23,6 +23,10 @@ import {
   evaluateTerrainPoint,
   hasLateralDisplacement,
 } from './TerrainField'
+import {
+  evaluateTerrainMaterialFields,
+  type TerrainMaterialFields,
+} from './TerrainMaterialFields'
 
 export { evaluateHeight } from './TerrainField'
 
@@ -30,6 +34,13 @@ interface GeneratedMesh {
   positions: Float32Array
   normals: Float32Array
   colors: Float32Array
+  surfaceFields: readonly [
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+  ]
   indices: Uint32Array
   warnings: number
   hasArbitraryTopology: boolean
@@ -56,6 +67,7 @@ export function compileTerrainSection(
   let triangleCount = 0
   let hasArbitraryTopology = false
   let cpuBytes = 0
+  const materialFieldCache = new Map<string, TerrainMaterialFields>()
 
   for (let level = 0; level < request.config.lodResolutions.length; level += 1) {
     if (request.levels && !request.levels.includes(level)) continue
@@ -67,6 +79,7 @@ export function compileTerrainSection(
       level,
       request.config.seed,
       modifiers,
+      materialFieldCache,
     )
     const originX = request.key.x * request.config.sectionSize
     const originZ = request.key.z * request.config.sectionSize
@@ -82,6 +95,7 @@ export function compileTerrainSection(
       generated.positions.byteLength +
       generated.normals.byteLength +
       generated.colors.byteLength +
+      generated.surfaceFields.reduce((bytes, field) => bytes + field.byteLength, 0) +
       generated.indices.byteLength
     lods.push({
       level,
@@ -91,6 +105,7 @@ export function compileTerrainSection(
       positions: generated.positions,
       normals: generated.normals,
       colors: generated.colors,
+      surfaceFields: generated.surfaceFields,
       indices: generated.indices,
       triangleCount: generated.indices.length / 3,
       gpuBytes,
@@ -133,6 +148,7 @@ function generateSectionMesh(
   level: number,
   seed: number,
   modifiers: TerrainModifier[],
+  materialFieldCache: Map<string, TerrainMaterialFields>,
 ): GeneratedMesh {
   const originX = key.x * sectionSize
   const originZ = key.z * sectionSize
@@ -226,17 +242,194 @@ function generateSectionMesh(
     result.normals,
     result.interiorVertices,
   )
+  const surfaceFields = calculateSurfaceFields(
+    result.positions,
+    result.normals,
+    result.indices,
+    result.interiorVertices,
+    originX,
+    originZ,
+    materialFieldCache,
+  )
   const validation = validateMeshData(result.positions, result.indices)
   if (!validation.valid) throw new Error(validation.errors.join('; '))
   return {
     positions: result.positions,
     normals: result.normals,
     colors,
+    surfaceFields,
     indices: result.indices,
     warnings: validation.warnings.length,
     hasArbitraryTopology:
       tunnels.length > 0 || hasLateralDisplacement(modifiers),
   }
+}
+
+const PACKED_UNIT_MAX = 65_535
+const BEDDED_OFFSET_RANGE = 16
+
+function calculateSurfaceFields(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: Uint32Array,
+  interiorVertices: Uint8Array,
+  originX: number,
+  originZ: number,
+  cache: Map<string, TerrainMaterialFields>,
+): readonly [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] {
+  const vertexCount = positions.length / 3
+  const packed: [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] = [
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+    new Uint16Array(vertexCount * 4),
+  ]
+  const occlusion = calculateMeshOcclusion(
+    positions,
+    normals,
+    indices,
+    interiorVertices,
+  )
+
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const source = vertex * 3
+    const target = vertex * 4
+    const x = originX + positions[source]
+    const y = positions[source + 1]
+    const z = originZ + positions[source + 2]
+    const key = `${x}:${y}:${z}`
+    let fields = cache.get(key)
+    if (!fields) {
+      fields = evaluateTerrainMaterialFields(x, y, z)
+      cache.set(key, fields)
+    }
+
+    packed[0].set([
+      packUnit(fields.regional * 0.5 + 0.5),
+      packUnit(fields.patch),
+      packUnit(fields.moisture),
+      packUnit(fields.macro),
+    ], target)
+    packed[1].set([
+      packUnit(fields.dipAngle),
+      packUnit(fields.dipAzimuth),
+      packUnit(fields.bedThickness),
+      packUnit(fields.bedExposure),
+    ], target)
+    packed[2].set([
+      packUnit(fields.jointing),
+      packUnit(fields.lichen),
+      packUnit(fields.outcrop),
+      packUnit(fields.mottle),
+    ], target)
+    packed[3].set([
+      packSigned(fields.beddedOffsetX, BEDDED_OFFSET_RANGE),
+      packSigned(fields.beddedOffsetY, BEDDED_OFFSET_RANGE),
+      packSigned(fields.beddedOffsetZ, BEDDED_OFFSET_RANGE),
+      packUnit(fields.regionalTint),
+    ], target)
+    packed[4][target] = packUnit(fields.buttress)
+    packed[4][target + 1] = packUnit(occlusion[vertex])
+    packed[4][target + 2] = 0
+    packed[4][target + 3] = 0
+  }
+  return packed
+}
+
+/**
+ * Multiscale object-space cavity. Unlike GTAO this is tied to the compiled
+ * surface, so it is paid once and remains stable as the camera moves. Repeated
+ * cotangent-like neighbourhood relaxation measures how far a point sits below
+ * its surroundings at progressively wider radii; tunnel interiors additionally
+ * retain the low ambient visibility that their enclosing geometry implies.
+ */
+function calculateMeshOcclusion(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: Uint32Array,
+  interiorVertices: Uint8Array,
+): Float32Array {
+  const vertexCount = positions.length / 3
+  let smoothed = new Float32Array(positions)
+  const cavity = new Float32Array(vertexCount)
+  const accumulation = new Float32Array(positions.length)
+  const counts = new Uint32Array(vertexCount)
+
+  for (let iteration = 0; iteration < 8; iteration += 1) {
+    accumulation.fill(0)
+    counts.fill(0)
+    for (let offset = 0; offset < indices.length; offset += 3) {
+      const a = indices[offset]
+      const b = indices[offset + 1]
+      const c = indices[offset + 2]
+      accumulateNeighbours(accumulation, counts, smoothed, a, b, c)
+      accumulateNeighbours(accumulation, counts, smoothed, b, c, a)
+      accumulateNeighbours(accumulation, counts, smoothed, c, a, b)
+    }
+
+    const next = new Float32Array(smoothed.length)
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      const target = vertex * 3
+      const count = Math.max(1, counts[vertex])
+      const meanX = accumulation[target] / count
+      const meanY = accumulation[target + 1] / count
+      const meanZ = accumulation[target + 2] / count
+      next[target] = smoothed[target] * 0.38 + meanX * 0.62
+      next[target + 1] = smoothed[target + 1] * 0.38 + meanY * 0.62
+      next[target + 2] = smoothed[target + 2] * 0.38 + meanZ * 0.62
+
+      if (iteration === 0 || iteration === 1 || iteration === 3 || iteration === 7) {
+        const dx = next[target] - positions[target]
+        const dy = next[target + 1] - positions[target + 1]
+        const dz = next[target + 2] - positions[target + 2]
+        const inward =
+          dx * normals[target] +
+          dy * normals[target + 1] +
+          dz * normals[target + 2]
+        cavity[vertex] = Math.max(cavity[vertex], inward)
+      }
+    }
+    smoothed = next
+  }
+
+  const occlusion = new Float32Array(vertexCount)
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const broadCavity = 1 - smoothstepNumber(0.015, 4.5, cavity[vertex]) * 0.58
+    const interiorVisibility = interiorVertices[vertex] === 1 ? 0.52 : 1
+    occlusion[vertex] = clamp(broadCavity * interiorVisibility, 0.32, 1)
+  }
+  return occlusion
+}
+
+function accumulateNeighbours(
+  accumulation: Float32Array,
+  counts: Uint32Array,
+  positions: Float32Array,
+  targetVertex: number,
+  firstNeighbour: number,
+  secondNeighbour: number,
+): void {
+  const target = targetVertex * 3
+  const first = firstNeighbour * 3
+  const second = secondNeighbour * 3
+  accumulation[target] += positions[first] + positions[second]
+  accumulation[target + 1] += positions[first + 1] + positions[second + 1]
+  accumulation[target + 2] += positions[first + 2] + positions[second + 2]
+  counts[targetVertex] += 2
+}
+
+function smoothstepNumber(low: number, high: number, value: number): number {
+  const amount = clamp((value - low) / (high - low), 0, 1)
+  return amount * amount * (3 - 2 * amount)
+}
+
+function packUnit(value: number): number {
+  return Math.round(clamp(value, 0, 1) * PACKED_UNIT_MAX)
+}
+
+function packSigned(value: number, range: number): number {
+  return packUnit(value / (range * 2) + 0.5)
 }
 
 function createAdaptiveAxis(

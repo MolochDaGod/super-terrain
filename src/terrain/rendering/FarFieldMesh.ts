@@ -4,48 +4,60 @@ import { evaluateHeight } from '../compiler/TerrainField'
 export interface FarFieldMeshData {
   positions: Float32Array
   normals: Float32Array
+  /** Preview-mode colours, matched to the compiled section vertex palette. */
   colors: Float32Array
+  /** Cheap distant approximation of the full procedural material's albedo. */
+  fullColors: Float32Array
   indices: Uint32Array
 }
 
-const FAR_FIELD_SEGMENTS = 96
-const FAR_FIELD_DEPTH_OFFSET = 34
+/**
+ * The proxy must follow the base terrain closely enough to preserve the
+ * distant silhouette. At the previous 96 x 96 resolution each edge covered
+ * roughly 171 m of the default world, turning narrow valleys and ridges into
+ * long flat chords. Visibility against streamed terrain is handled separately
+ * by the backdrop depth in HorizonProxy, without falsifying world elevation.
+ */
+const FAR_FIELD_TARGET_EDGE_LENGTH = 64
+const FAR_FIELD_MIN_SEGMENTS = 96
+const FAR_FIELD_MAX_SEGMENTS = 512
 
 export function generateFarFieldMesh(
   worldSize: number,
   seed: number,
 ): FarFieldMeshData {
-  const width = FAR_FIELD_SEGMENTS + 1
+  const segments = clamp(
+    Math.ceil(worldSize / FAR_FIELD_TARGET_EDGE_LENGTH),
+    FAR_FIELD_MIN_SEGMENTS,
+    FAR_FIELD_MAX_SEGMENTS,
+  )
+  const width = segments + 1
   const vertexCount = width * width
   const positions = new Float32Array(vertexCount * 3)
   const normals = new Float32Array(vertexCount * 3)
   const colors = new Float32Array(vertexCount * 3)
-  const indices = new Uint32Array(FAR_FIELD_SEGMENTS * FAR_FIELD_SEGMENTS * 6)
+  const fullColors = new Float32Array(vertexCount * 3)
+  const indices = new Uint32Array(segments * segments * 6)
   const half = worldSize * 0.5
 
   for (let z = 0; z < width; z += 1) {
-    const worldZ = -half + (z / FAR_FIELD_SEGMENTS) * worldSize
+    const worldZ = -half + (z / segments) * worldSize
     for (let x = 0; x < width; x += 1) {
-      const worldX = -half + (x / FAR_FIELD_SEGMENTS) * worldSize
+      const worldX = -half + (x / segments) * worldSize
       const vertex = z * width + x
       const offset = vertex * 3
-      const height = evaluateHeight(worldX, worldZ, seed, []) - FAR_FIELD_DEPTH_OFFSET
+      const height = evaluateHeight(worldX, worldZ, seed, [])
       positions[offset] = worldX
       positions[offset + 1] = height
       positions[offset + 2] = worldZ
-
-      const altitude = smoothstep(-28, 52, height)
-      const variation = 0.92 + hashVariation(x, z, seed) * 0.08
-      colors[offset] = lerp(0.12, 0.22, altitude) * variation
-      colors[offset + 1] = lerp(0.2, 0.28, altitude) * variation
-      colors[offset + 2] = lerp(0.16, 0.22, altitude) * variation
     }
   }
 
   calculateGridNormals(positions, normals, width)
+  calculateFarFieldColors(positions, normals, colors, fullColors, width, seed)
   let cursor = 0
-  for (let z = 0; z < FAR_FIELD_SEGMENTS; z += 1) {
-    for (let x = 0; x < FAR_FIELD_SEGMENTS; x += 1) {
+  for (let z = 0; z < segments; z += 1) {
+    for (let x = 0; x < segments; x += 1) {
       const a = z * width + x
       const b = a + 1
       const c = a + width
@@ -59,7 +71,68 @@ export function generateFarFieldMesh(
     }
   }
 
-  return { positions, normals, colors, indices }
+  return { positions, normals, colors, fullColors, indices }
+}
+
+function calculateFarFieldColors(
+  positions: Float32Array,
+  normals: Float32Array,
+  previewColors: Float32Array,
+  fullColors: Float32Array,
+  width: number,
+  seed: number,
+): void {
+  const previewGrass = [0.23, 0.35, 0.2] as const
+  const previewRock = [0.36, 0.32, 0.27] as const
+  const previewHigh = [0.48, 0.48, 0.43] as const
+  const fullGrass = [0.043, 0.072, 0.026] as const
+  const fullMeadow = [0.092, 0.089, 0.041] as const
+  const fullRock = [0.078, 0.073, 0.066] as const
+  const fullSnow = [0.6, 0.615, 0.64] as const
+
+  for (let z = 0; z < width; z += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (z * width + x) * 3
+      const height = positions[offset + 1]
+      const slope = clamp(1 - Math.abs(normals[offset + 1]), 0, 1)
+
+      // Preview uses the same broad grass/rock/high blend as compiled sections,
+      // so crossing the residency boundary does not introduce a new palette.
+      const previewRockMix = smoothstep(0.2, 0.72, slope)
+      const previewAltitude = smoothstep(20, 78, height)
+      const previewVariation = 0.96 + hashVariation(x, z, seed) * 0.06
+      for (let channel = 0; channel < 3; channel += 1) {
+        previewColors[offset + channel] = lerp(
+          lerp(previewGrass[channel], previewRock[channel], previewRockMix),
+          previewHigh[channel],
+          previewAltitude,
+        ) * previewVariation
+      }
+
+      // At this distance the full shader's micro/meso bands have already
+      // filtered to their means. Preserve its material families and broad
+      // variation without running the expensive fragment synthesis over the
+      // world-sized fallback mesh.
+      const macro = hashVariation(x, z, seed + 431)
+      const regional = hashVariation(x + 173, z - 89, seed + 977)
+      const alpine = smoothstep(150, 340, height)
+      const fullRockMix = Math.max(smoothstep(0.18, 0.54, slope), alpine * 0.5)
+      const meadowMix = clamp(macro * 0.72 + alpine * 0.28, 0, 1)
+      const snowMix =
+        smoothstep(285, 395, height) *
+        (1 - smoothstep(0.14, 0.52, slope))
+      const fullVariation = 0.86 + regional * 0.2
+      for (let channel = 0; channel < 3; channel += 1) {
+        const ground = lerp(fullGrass[channel], fullMeadow[channel], meadowMix)
+        const exposed = lerp(ground, fullRock[channel], fullRockMix)
+        fullColors[offset + channel] = lerp(
+          exposed,
+          fullSnow[channel],
+          snowMix,
+        ) * fullVariation
+      }
+    }
+  }
 }
 
 function calculateGridNormals(

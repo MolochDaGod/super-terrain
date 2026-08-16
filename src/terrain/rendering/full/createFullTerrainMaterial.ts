@@ -31,6 +31,7 @@ import {
   reliefNormal,
   shadeSurface,
   surfaceDetail,
+  terrainSlowFields,
 } from './surface'
 
 /**
@@ -97,10 +98,9 @@ const TerrainSurface = struct(
 /**
  * The `full` terrain material.
  *
- * Everything is synthesised on the GPU from world position and the geometric
- * normal — no textures, no UVs, no per-frame CPU work — so the material is
- * immune to LOD swaps, section boundaries and mesh editing. The pipeline per
- * pixel is:
+ * View-independent broad fields and terrain-scale cavity are cached with each
+ * compiled section. Centimetre-scale relief remains procedural per pixel so it
+ * stays sharper than the mesh vertex spacing. The pipeline per pixel is:
  *
  *   1. estimate the pixel's world footprint (drives every anti-alias fade)
  *   2. pick layer coverage from slope / altitude / macro noise
@@ -115,6 +115,7 @@ export function createFullTerrainMaterial(
   options: FullTerrainMaterialOptions = {},
 ) {
   const detailScale = options.detailScale ?? 1
+  const debug = options.debug ?? 'none'
   const material = new MeshStandardNodeMaterial({
     metalness: 0,
     side: DoubleSide,
@@ -139,7 +140,8 @@ export function createFullTerrainMaterial(
       .max(0.0005)
       .toVar('pixelFootprint')
 
-    const weights = layerWeights(position, geometricNormal, footprint)
+    const slow = terrainSlowFields(position)
+    const weights = layerWeights(position, geometricNormal, footprint, slow)
     const facing = clamp(dot(geometricNormal, view), 0, 1).toVar('surfaceFacing')
 
     const parallaxAmount = parallaxStrength(viewDistance, facing)
@@ -159,8 +161,8 @@ export function createFullTerrainMaterial(
       )
     })
 
-    const surface = surfaceDetail(shadedPosition, weights, footprint)
-    const shading = shadeSurface(shadedPosition, weights, surface, footprint)
+    const surface = surfaceDetail(shadedPosition, weights, footprint, slow)
+    const shading = shadeSurface(weights, surface, slow)
 
     // Bump strength falls off with distance so relief never fights the
     // silhouette at range and distant terrain stays smooth.
@@ -172,8 +174,7 @@ export function createFullTerrainMaterial(
     const shadedNormal = reliefNormal(
       shadedPosition,
       geometricNormal,
-      weights,
-      footprint,
+      surface.normalHeight,
       bumpStrength,
     )
 
@@ -194,29 +195,32 @@ export function createFullTerrainMaterial(
       )
     })
 
-    // Red = rock, green = vegetation, blue = scree/soil, white = snow.
-    const layerDebug = vec3(
-      surface.resolved.rock,
-      surface.resolved.grass.add(surface.resolved.meadow),
-      surface.resolved.scree.add(surface.resolved.soil),
-    ).add(vec3(surface.resolved.snow))
+    // Debug outputs are separate material variants. Do not make the normal
+    // renderer carry their arithmetic merely because the struct can expose it.
+    const layerDebug =
+      debug === 'layers'
+        ? vec3(
+            surface.resolved.rock,
+            surface.resolved.grass.add(surface.resolved.meadow),
+            surface.resolved.scree.add(surface.resolved.soil),
+          ).add(vec3(surface.resolved.snow))
+        : vec3(0)
 
     return TerrainSurface(
       shading.albedo,
       shading.roughness,
       shadedNormal,
-      clamp(shading.cavity.mul(microShadow), 0.18, 1),
-      surface.height,
+      clamp(shading.cavity.mul(microShadow).mul(slow.occlusion), 0.18, 1),
+      debug === 'relief' ? surface.height : float(0),
       layerDebug,
-      surface.detail.strata,
-      surface.detail.crack,
-      surface.detail.blocks,
-      surface.detail.buttress,
+      debug === 'strata' ? surface.detail.strata : float(0),
+      debug === 'crack' ? surface.detail.crack : float(0),
+      debug === 'blocks' ? surface.detail.blocks : float(0),
+      debug === 'buttress' ? surface.detail.buttress : float(0),
     )
   })()
 
   const surface = evaluate as any
-  const debug = options.debug ?? 'none'
   if (debug !== 'none') {
     // Unlit: whatever is inspected must not be modulated by the lighting that
     // is under investigation.

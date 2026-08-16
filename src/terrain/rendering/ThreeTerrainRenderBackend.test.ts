@@ -35,9 +35,7 @@ describe('Three terrain render preview', () => {
       falloff: 0.5,
     })
 
-    const mesh = root.children.find(
-      (child) => child.userData.terrainSectionId === section.id,
-    ) as Mesh
+    const mesh = root.getObjectByName(`terrain-section-${section.id}`) as Mesh
     const positions = mesh.geometry.getAttribute('position') as BufferAttribute
     expect(positions.getY(4)).toBeCloseTo(2.8, 5)
     expect(mesh.geometry.boundingBox?.max.y).toBeGreaterThan(2.7)

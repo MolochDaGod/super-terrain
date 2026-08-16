@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -22,16 +22,16 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
   const metrics = useTerrainMetrics(terrain)
   const editorSnapshot = useEditorSnapshot(editor)
   const historyRef = useRef<number[]>(Array.from({ length: 36 }, () => 16.67))
-  const [, redraw] = useState(0)
-
-  useEffect(() => {
+  const previousAverageRef = useRef<number | undefined>(undefined)
+  if (previousAverageRef.current !== metrics.averageFrameMs) {
+    previousAverageRef.current = metrics.averageFrameMs
     historyRef.current.push(metrics.averageFrameMs)
     historyRef.current.shift()
-    redraw((value) => value + 1)
-  }, [metrics.averageFrameMs])
+  }
 
   if (!editorSnapshot.showHud) return null
-  const violated = metrics.averageFrameMs > 18.2
+  const targetFrameMs = 1000 / terrain.config.targetFps
+  const violated = metrics.averageFrameMs > targetFrameMs * 1.08
   return (
     <section className="pointer-events-none absolute bottom-10 left-[68px] z-20 w-[252px] overflow-hidden rounded-xl border border-white/[0.09] bg-[#08110f]/88 shadow-2xl shadow-black/25 backdrop-blur-xl sm:w-[286px]">
       <div className="flex items-center justify-between border-b border-white/[0.07] px-3.5 py-2.5">
@@ -47,11 +47,11 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
 
       <div className="flex h-12 items-end gap-px border-b border-white/[0.07] px-3.5 pb-2 pt-2">
         {historyRef.current.map((frame, index) => {
-          const height = Math.min(100, Math.max(5, (frame / 33.34) * 100))
+          const height = Math.min(100, Math.max(5, (frame / targetFrameMs) * 100))
           return (
             <span
               key={index}
-              className={`min-w-0 flex-1 rounded-t-[1px] ${frame > 18.2 ? 'bg-[#ff886f]/70' : 'bg-[#77e8be]/55'}`}
+              className={`min-w-0 flex-1 rounded-t-[1px] ${frame > targetFrameMs * 1.08 ? 'bg-[#ff886f]/70' : 'bg-[#77e8be]/55'}`}
               style={{ height: `${height}%` }}
             />
           )

@@ -9,6 +9,7 @@ import {
   mix,
   mx_noise_float,
   smoothstep,
+  vec2,
   vec3,
 } from 'three/tsl'
 
@@ -48,19 +49,57 @@ export function fbmLod(
   footprint: any,
 ): any {
   const sum = float(0).toVar()
-  const total = float(0.0001).toVar()
-  const amplitude = float(1).toVar()
-  const scale = float(1).div(wavelength).toVar()
+  let total = 0.0001
+  let amplitude = 1
+  let frequency = 1
   for (let octave = 0; octave < octaves; octave += 1) {
+    const scale = float(frequency).div(wavelength)
     // Nyquist-style fade: an octave is worth sampling only while its
     // wavelength is comfortably larger than a pixel.
     const visible = falloffRaw(float(2.6).div(scale), float(0.9).div(scale), footprint)
     sum.addAssign(mx_noise_float(position.mul(scale)).mul(amplitude).mul(visible))
-    total.addAssign(amplitude)
-    amplitude.mulAssign(0.52)
-    scale.mulAssign(2.07)
+    total += amplitude
+    amplitude *= 0.52
+    frequency *= 2.07
   }
   return sum.div(total).mul(0.5).add(0.5).clamp(0, 1)
+}
+
+/**
+ * Evaluates one fBm stack and exposes both the complete signal and its fine
+ * octaves. Callers that need macro variation plus a finer material band can
+ * reuse the same taps instead of evaluating an overlapping second stack.
+ */
+export function fbmLodBands(
+  position: any,
+  wavelength: any,
+  octaves: number,
+  fineFromOctave: number,
+  footprint: any,
+): { value: any; fine: any } {
+  const sum = float(0).toVar()
+  const fineSum = float(0).toVar()
+  let total = 0.0001
+  let fineTotal = 0.0001
+  let amplitude = 1
+  let frequency = 1
+  for (let octave = 0; octave < octaves; octave += 1) {
+    const scale = float(frequency).div(wavelength)
+    const visible = falloffRaw(float(2.6).div(scale), float(0.9).div(scale), footprint)
+    const weighted = mx_noise_float(position.mul(scale)).mul(amplitude).mul(visible)
+    sum.addAssign(weighted)
+    if (octave >= fineFromOctave) {
+      fineSum.addAssign(weighted)
+      fineTotal += amplitude
+    }
+    total += amplitude
+    amplitude *= 0.52
+    frequency *= 2.07
+  }
+  return {
+    value: sum.div(total).mul(0.5).add(0.5).clamp(0, 1),
+    fine: fineSum.div(fineTotal).mul(0.5).add(0.5).clamp(0, 1),
+  }
 }
 
 /**
@@ -74,11 +113,12 @@ export function ridgedLod(
   footprint: any,
 ): any {
   const sum = float(0).toVar()
-  const total = float(0.0001).toVar()
-  const amplitude = float(1).toVar()
-  const scale = float(1).div(wavelength).toVar()
+  let total = 0.0001
+  let amplitude = 1
+  let frequency = 1
   const weightCarry = float(1).toVar()
   for (let octave = 0; octave < octaves; octave += 1) {
+    const scale = float(frequency).div(wavelength)
     const visible = falloffRaw(float(2.6).div(scale), float(0.9).div(scale), footprint)
     const ridge = abs(mx_noise_float(position.mul(scale))).oneMinus()
     const shaped = ridge.mul(ridge).mul(weightCarry)
@@ -87,9 +127,9 @@ export function ridgedLod(
     // rather than as crumpled foil.
     weightCarry.assign(shaped.mul(2.1).clamp(0, 1))
     sum.addAssign(shaped.mul(amplitude).mul(visible))
-    total.addAssign(amplitude)
-    amplitude.mulAssign(0.55)
-    scale.mulAssign(2.07)
+    total += amplitude
+    amplitude *= 0.55
+    frequency *= 2.07
   }
   return sum.div(total).clamp(0, 1)
 }
@@ -133,6 +173,45 @@ export const cells = /*@__PURE__*/ Fn(([position]: [any]) => {
   return vec3(nearest, identifier, second)
 })
 
+/**
+ * Horizontal cellular field for materials that only occur on holdable ground.
+ * It retains the same world-space cell construction as `cells`, but a 2x2
+ * search replaces the 2x2x2 volume search when the surface is known to be
+ * ground-facing.
+ */
+export const cells2 = /*@__PURE__*/ Fn(([position]: [any]) => {
+  const base = vec2(floor(position)).toVar()
+  const local = vec2(fract(position)).toVar()
+  const nearest = float(8).toVar()
+  const second = float(8).toVar()
+  const identifier = float(0).toVar()
+  const corner = vec2(
+    local.x.greaterThan(0.5).select(float(0), float(-1)),
+    local.y.greaterThan(0.5).select(float(0), float(-1)),
+  ).toVar()
+
+  for (let y = 0; y <= 1; y += 1) {
+    for (let x = 0; x <= 1; x += 1) {
+      const offset = corner.add(vec2(float(x), float(y)))
+      const cell = base.add(offset)
+      const random = hash22(cell)
+      const centre = offset.add(random)
+      const distance = centre.sub(local).length()
+      identifier.assign(distance.lessThan(nearest).select(random.x, identifier))
+      second.assign(min(second, max(distance, nearest)))
+      nearest.assign(min(nearest, distance))
+    }
+  }
+  return vec3(nearest, identifier, second)
+})
+
+/** Two decorrelated hashes of a 2D lattice point in one pass. */
+export const hash22 = /*@__PURE__*/ Fn(([cell]: [any]) => {
+  const value = fract(vec3(cell.x, cell.y, cell.x).mul(vec3(0.1031, 0.103, 0.0973))).toVar()
+  value.addAssign(value.dot(value.yzx.add(33.33)))
+  return fract(value.xx.add(value.yz).mul(value.zy))
+})
+
 /** Three decorrelated hashes of a lattice point in one pass. */
 export const hash33 = /*@__PURE__*/ Fn(([cell]: [any]) => {
   const value = fract(vec3(cell).mul(vec3(0.1031, 0.103, 0.0973))).toVar()
@@ -147,6 +226,34 @@ export const hash13 = /*@__PURE__*/ Fn(([cell]: [any]) => {
   return fract(dotted.x.add(dotted.y).mul(dotted.z))
 })
 
+/** Smooth signed value noise for fields whose domain has only one dimension. */
+export const noise1 = /*@__PURE__*/ Fn(([position]: [any]) => {
+  const base = floor(position).toVar()
+  const local = fract(position).toVar()
+  const eased = local
+    .mul(local)
+    .mul(local)
+    .mul(local.mul(local.mul(6).sub(15)).add(10))
+  const lower = hash13(vec3(base, 0, 0))
+  const upper = hash13(vec3(base.add(1), 0, 0))
+  return mix(lower, upper, eased).mul(2).sub(1)
+})
+
+/** Band-limited fBm for scalar coordinates; used by stratigraphic sequences. */
+export function fbm1(position: any, octaves: number): any {
+  const sum = float(0).toVar()
+  let total = 0.0001
+  let amplitude = 1
+  let frequency = 1
+  for (let octave = 0; octave < octaves; octave += 1) {
+    sum.addAssign(noise1(position.mul(frequency)).mul(amplitude))
+    total += amplitude
+    amplitude *= 0.52
+    frequency *= 2.07
+  }
+  return sum.div(total).mul(0.5).add(0.5).clamp(0, 1)
+}
+
 /**
  * Domain warp. Warping before sampling is what turns obviously-synthetic noise
  * into geology: it produces the flowing, folded banding visible on real cliffs.
@@ -160,6 +267,14 @@ export const warp = /*@__PURE__*/ Fn(([position, amount, frequency]: [any, any, 
   const a = mx_noise_float(scaled).toVar()
   const b = mx_noise_float(scaled.yzx.mul(-1.13).add(19.7)).toVar()
   return position.add(vec3(a, b, a.mul(0.7).sub(b.mul(0.7))).mul(amount))
+})
+
+/** Surface-domain counterpart of `warp` for holdable-ground materials. */
+export const warp2 = /*@__PURE__*/ Fn(([position, amount, frequency]: [any, any, any]) => {
+  const scaled = position.mul(frequency)
+  const a = mx_noise_float(scaled).toVar()
+  const b = mx_noise_float(scaled.yx.mul(-1.13).add(19.7)).toVar()
+  return position.add(vec2(a, b).mul(amount))
 })
 
 /**

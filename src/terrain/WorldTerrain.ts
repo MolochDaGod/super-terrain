@@ -72,9 +72,39 @@ interface ActiveBenchmark {
   step: number
 }
 
+interface TerrainViewSignature {
+  cameraX: number
+  cameraY: number
+  cameraZ: number
+  focusX: number
+  focusY: number
+  focusZ: number
+  viewportHeight: number
+  aspect: number
+  verticalFovRadians: number
+}
+
 const BRUSH_FLOW_PER_SECOND = 2.4
 const SPATIAL_DAB_WEIGHT = 0.08
 const MAX_AUTHORED_DAB_WEIGHT = 0.2
+
+function sameViewSignature(
+  previous: TerrainViewSignature | undefined,
+  next: TerrainViewSignature,
+): boolean {
+  return Boolean(
+    previous &&
+      previous.cameraX === next.cameraX &&
+      previous.cameraY === next.cameraY &&
+      previous.cameraZ === next.cameraZ &&
+      previous.focusX === next.focusX &&
+      previous.focusY === next.focusY &&
+      previous.focusZ === next.focusZ &&
+      previous.viewportHeight === next.viewportHeight &&
+      previous.aspect === next.aspect &&
+      previous.verticalFovRadians === next.verticalFovRadians,
+  )
+}
 
 export type StrokeEndResult = 'committed' | 'cancelled' | 'none'
 
@@ -109,6 +139,12 @@ export class WorldTerrain {
   private activeBenchmark?: ActiveBenchmark
   private latestCamera: Vec3Like = { x: 0, y: 0, z: 0 }
   private viewTarget?: Vec3Like
+  private viewSignature?: TerrainViewSignature
+  private cachedCandidateMap = new Map<string, StreamCandidate>()
+  private terrainStateRevision = 0
+  private processedTerrainStateRevision = -1
+  private hasPendingTerrainWork = true
+  private lastIdleMaintenanceAt = 0
 
   constructor(
     config: Partial<TerrainConfig> = {},
@@ -131,6 +167,8 @@ export class WorldTerrain {
     this.streamer = new TerrainStreamer(this.config)
     this.compiler = new TerrainCompiler(this.config)
     this.compiler.onResult = (result) => {
+      this.terrainStateRevision += 1
+      this.hasPendingTerrainWork = true
       const section = this.partition.get(result.key)
       if (!section) return
       if (result.compiled) {
@@ -165,6 +203,8 @@ export class WorldTerrain {
         section.pendingCompiled = section.compiled
       }
     }
+    this.terrainStateRevision += 1
+    this.hasPendingTerrainWork = true
   }
 
   detachRenderer(renderer: TerrainRenderBackend): void {
@@ -174,10 +214,48 @@ export class WorldTerrain {
   update(input: TerrainUpdateInput): void {
     if (this.disposed || !this.initialized) return
     const now = input.now ?? performance.now()
-    this.latestCamera = { ...input.camera }
+    this.latestCamera.x = input.camera.x
+    this.latestCamera.y = input.camera.y
+    this.latestCamera.z = input.camera.z
     this.scheduler.beginFrame(input.frameMs)
     const scheduleStart = performance.now()
     this.updateBenchmark(now)
+
+    const signature = this.createViewSignature(input)
+    const viewUnchanged = sameViewSignature(this.viewSignature, signature)
+    this.viewSignature = signature
+    const canReuseTerrainState =
+      viewUnchanged &&
+      this.streamer.isSettled &&
+      !this.hasPendingTerrainWork &&
+      this.processedTerrainStateRevision === this.terrainStateRevision &&
+      !this.activeStroke &&
+      !this.activeTunnel &&
+      !this.activeBenchmark
+
+    if (canReuseTerrainState) {
+      // Static terrain has no per-frame decisions to make. Timed maintenance
+      // still wakes independently, while rendering reuses the compiled meshes,
+      // material fields, visibility, LODs and shadow maps verbatim.
+      if (now - this.lastIdleMaintenanceAt >= 250) {
+        this.lastIdleMaintenanceAt = now
+        this.scheduleEvictions(now)
+        if (this.renderer) {
+          this.scheduler.enqueue({
+            id: 'dispose:geometry',
+            kind: 'maintenance',
+            priority: -100,
+            estimatedCpuMs: 0.08,
+            run: () => this.renderer?.flushDeferredDisposals(2),
+          })
+        }
+      }
+      this.scheduleAutosave(now)
+      this.schedulingMs = performance.now() - scheduleStart
+      this.scheduler.runFrame()
+      this.updateMetrics(input.frameMs, now, this.cachedCandidateMap)
+      return
+    }
 
     const budget = this.scheduler.snapshot()
     const candidates = this.streamer.update(
@@ -194,10 +272,20 @@ export class WorldTerrain {
         : undefined,
     )
     const candidateMap = new Map(candidates.map((candidate) => [candidate.id, candidate]))
+    this.cachedCandidateMap = candidateMap
 
     if (this.renderer) {
       for (const section of this.partition.values()) {
-        if (this.renderer.has(section.id)) this.renderer.setVisible(section.id, false)
+        // Preserve stable visibility. The old hide-all/show-desired cycle
+        // toggled every resident mesh twice per frame even when the camera had
+        // not moved, invalidating cached shadows and scene state for no visual
+        // change. Only sections that actually left the visible set are hidden.
+        if (
+          this.renderer.has(section.id) &&
+          candidateMap.get(section.id)?.visible !== true
+        ) {
+          this.renderer.setVisible(section.id, false)
+        }
       }
     }
 
@@ -236,6 +324,8 @@ export class WorldTerrain {
 
     this.schedulingMs = performance.now() - scheduleStart
     this.scheduler.runFrame()
+    this.processedTerrainStateRevision = this.terrainStateRevision
+    this.hasPendingTerrainWork = this.detectPendingTerrainWork()
     this.updateMetrics(input.frameMs, now, candidateMap)
   }
 
@@ -412,7 +502,21 @@ export class WorldTerrain {
   }
 
   setViewTarget(target: Vec3Like): void {
-    this.viewTarget = { ...target }
+    if (
+      this.viewTarget &&
+      this.viewTarget.x === target.x &&
+      this.viewTarget.y === target.y &&
+      this.viewTarget.z === target.z
+    ) {
+      return
+    }
+    if (this.viewTarget) {
+      this.viewTarget.x = target.x
+      this.viewTarget.y = target.y
+      this.viewTarget.z = target.z
+    } else {
+      this.viewTarget = { ...target }
+    }
   }
 
   updateModifierTransform(id: string, transform: ModifierTransform): boolean {
@@ -486,6 +590,8 @@ export class WorldTerrain {
     for (const section of this.partition.values()) {
       this.partition.markDirty(section, section.bounds, now)
     }
+    this.terrainStateRevision += 1
+    this.hasPendingTerrainWork = true
     this.savedModifierRevision = this.modifiers.sourceRevision
     this.nextSaveAt = Infinity
   }
@@ -545,6 +651,37 @@ export class WorldTerrain {
 
   private invalidate(bounds: AABB): void {
     this.partition.invalidateBounds(bounds, this.config.operationHalo)
+    this.terrainStateRevision += 1
+    this.hasPendingTerrainWork = true
+  }
+
+  private createViewSignature(input: TerrainUpdateInput): TerrainViewSignature {
+    const focus = this.viewTarget ?? input.camera
+    return {
+      cameraX: input.camera.x,
+      cameraY: input.camera.y,
+      cameraZ: input.camera.z,
+      focusX: focus.x,
+      focusY: focus.y,
+      focusZ: focus.z,
+      viewportHeight: input.viewportHeight,
+      aspect: input.aspect,
+      verticalFovRadians: input.verticalFovRadians,
+    }
+  }
+
+  private detectPendingTerrainWork(): boolean {
+    for (const section of this.partition.values()) {
+      if (
+        section.buildState === 'queued' ||
+        section.buildState === 'building' ||
+        section.buildState === 'failed' ||
+        section.pendingCompiled
+      ) {
+        return true
+      }
+    }
+    return false
   }
 
   private maybeQueueBuild(

@@ -150,6 +150,7 @@ export function compiledTransferables(compiled: CompiledSection): Transferable[]
       lod.positions.buffer,
       lod.normals.buffer,
       lod.colors.buffer,
+      ...(lod.surfaceFields?.map((field) => field.buffer) ?? []),
       lod.indices.buffer,
     )
   }

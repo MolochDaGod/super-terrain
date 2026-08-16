@@ -31,6 +31,14 @@ export interface CompiledLOD {
   positions: Float32Array
   normals: Float32Array
   colors: Float32Array
+  /** Five normalized u16 vec4 streams containing cached broad material fields. */
+  surfaceFields?: readonly [
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+    Uint16Array,
+  ]
   indices: Uint32Array
   triangleCount: number
   gpuBytes: number

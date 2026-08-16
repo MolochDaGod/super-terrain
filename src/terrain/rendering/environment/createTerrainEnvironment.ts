@@ -6,6 +6,7 @@ import {
   FogExp2,
   Group,
   HemisphereLight,
+  Matrix4,
   Scene,
   Vector3,
 } from 'three/webgpu'
@@ -16,6 +17,7 @@ import { aerialPerspective, syncSunDirection } from '../full/atmosphere'
 import type { TerrainConfig } from '../../config'
 import type { TerrainRenderMode } from '../renderModes'
 import { DEFAULT_SUN } from './sunPosition'
+import { getTerrainShadowRevision } from './terrainShadowInvalidation'
 
 export interface TerrainEnvironment {
   group: Group
@@ -88,6 +90,11 @@ function createFullEnvironment(
   sun.shadow.mapSize.set(2048, 2048)
   sun.shadow.bias = -0.0004
   sun.shadow.normalBias = 0.35
+  // The terrain, sun and camera are persistent. Redrawing four 2048² maps
+  // when none of them changed only repeats the exact same depth pass. Start
+  // dirty, then let update() invalidate the maps from their real dependencies.
+  sun.shadow.autoUpdate = false
+  sun.shadow.needsUpdate = true
   group.add(sun, sun.target)
 
   // Sky bounce. Ground colour is the average of the dry-grass and rock albedo
@@ -123,11 +130,75 @@ function createFullEnvironment(
   }
 
   const anchor = new Vector3()
+  const previousCameraWorld = new Matrix4()
+  const previousCameraProjection = new Matrix4()
+  let hasCameraSnapshot = false
+  let shadowRevision = -1
+  let configuredCascadeCount = 0
+  const shadowDebug = {
+    frames: 0,
+    cameraChanges: 0,
+    terrainChanges: 0,
+    cascadeChanges: 0,
+  }
+  ;(globalThis as Record<string, unknown>).__terrainShadowDebug = () => ({
+    ...shadowDebug,
+    revision: shadowRevision,
+    shadows: cascades?.lights.map((light) => ({
+      autoUpdate: light.shadow?.autoUpdate,
+      needsUpdate: light.shadow?.needsUpdate,
+    })),
+  })
+
+  const invalidateShadowMaps = (): void => {
+    const lights = cascades?.lights ?? []
+    if (lights.length === 0) {
+      // CSM creates its private lights lazily during async material setup. The
+      // source shadow is cloned, so this also dirties their first render.
+      sun.shadow.needsUpdate = true
+      return
+    }
+    for (const light of lights) {
+      const shadow = light.shadow
+      if (!shadow) continue
+      shadow.autoUpdate = false
+      shadow.needsUpdate = true
+    }
+  }
+
   return {
     group,
     sun,
     sky,
     update(camera) {
+      shadowDebug.frames += 1
+      const projectionChanged =
+        !hasCameraSnapshot ||
+        !previousCameraProjection.equals(camera.projectionMatrix)
+      const cameraChanged =
+        projectionChanged ||
+        !hasCameraSnapshot ||
+        !previousCameraWorld.equals(camera.matrixWorld)
+      const nextShadowRevision = getTerrainShadowRevision()
+      const terrainChanged = nextShadowRevision !== shadowRevision
+      const cascadeCount = cascades?.lights.length ?? 0
+      const cascadesCreated = cascadeCount !== configuredCascadeCount
+
+      if (cameraChanged) shadowDebug.cameraChanges += 1
+      if (terrainChanged) shadowDebug.terrainChanges += 1
+      if (cascadesCreated) shadowDebug.cascadeChanges += 1
+
+      if (projectionChanged && cascades?.camera) cascades.updateFrustums()
+      if (cameraChanged || terrainChanged || cascadesCreated) {
+        invalidateShadowMaps()
+      }
+
+      previousCameraWorld.copy(camera.matrixWorld)
+      previousCameraProjection.copy(camera.projectionMatrix)
+      hasCameraSnapshot = true
+      shadowRevision = nextShadowRevision
+      configuredCascadeCount = cascadeCount
+
       camera.getWorldPosition(anchor)
       sky.position.set(anchor.x, 0, anchor.z)
       sun.target.position.set(anchor.x, 0, anchor.z)

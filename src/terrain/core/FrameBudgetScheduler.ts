@@ -20,7 +20,7 @@ export interface SchedulerOptions extends FrameBudget {
 export class FrameBudgetScheduler {
   private readonly options: SchedulerOptions
   private queue = new Map<string, TerrainTask>()
-  private qualityScale = 1
+  private readonly qualityScale = 1
   private averageFrameMs = 16.67
   private remainingCpuMs = 0
   private remainingUploadBytes = 0
@@ -29,7 +29,6 @@ export class FrameBudgetScheduler {
   private uploadBytes = 0
   private swaps = 0
   private violations = 0
-  private framesUnderBudget = 0
 
   constructor(options: SchedulerOptions) {
     this.options = options
@@ -38,18 +37,6 @@ export class FrameBudgetScheduler {
   beginFrame(frameMs: number): void {
     const target = this.options.targetFrameMs ?? 16.67
     this.averageFrameMs = lerp(this.averageFrameMs, frameMs, 0.04)
-
-    if (this.averageFrameMs > target * 1.08) {
-      this.qualityScale = clamp(this.qualityScale - 0.018, 0.48, 1)
-      this.framesUnderBudget = 0
-    } else if (this.averageFrameMs < target * 1.01) {
-      this.framesUnderBudget += 1
-      if (this.framesUnderBudget > 45) {
-        this.qualityScale = clamp(this.qualityScale + 0.008, 0.48, 1)
-      }
-    } else {
-      this.framesUnderBudget = 0
-    }
 
     // Preserve a small progress floor under pressure. Otherwise a ready swap
     // whose estimate is larger than the reduced allowance can starve forever.

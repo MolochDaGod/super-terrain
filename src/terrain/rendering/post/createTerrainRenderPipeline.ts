@@ -1,13 +1,16 @@
-import { RenderPipeline } from 'three/webgpu'
-import type { Camera, Renderer, Scene } from 'three/webgpu'
+import { QuadMesh, RenderPipeline } from 'three/webgpu'
+import type {
+  Camera,
+  Material,
+  RenderTarget,
+  Renderer,
+  Scene,
+} from 'three/webgpu'
 import {
   Fn,
   float,
   luminance,
   mix,
-  mrt,
-  normalView,
-  output,
   pass,
   renderOutput,
   smoothstep,
@@ -15,42 +18,36 @@ import {
   vec4,
 } from 'three/tsl'
 import { bloom } from 'three/addons/tsl/display/BloomNode.js'
-import { ao } from 'three/addons/tsl/display/GTAONode.js'
-import { denoise } from 'three/addons/tsl/display/DenoiseNode.js'
-import { fxaa } from 'three/addons/tsl/display/FXAANode.js'
 import type { TerrainRenderMode } from '../renderModes'
 
 export interface TerrainRenderPipeline {
   pipeline: RenderPipeline
+  /** Prepares the scene and every internal fullscreen pipeline asynchronously. */
+  warmup(): Promise<void>
+  dispose(): void
+}
+
+interface InternalRenderPipeline extends RenderPipeline {
+  _update(): void
+  _quadMesh: QuadMesh
+}
+
+interface InternalBloomNode {
+  _renderTargetBright: RenderTarget
+  _highPassFilterMaterial: Material | null
+  _separableBlurMaterials: Material[]
+  _compositeMaterial: Material | null
   dispose(): void
 }
 
 /**
- * Output chain.
- *
- * Tone mapping and the sRGB transfer are applied by the pipeline's output
- * transform, so the scene renders in linear HDR and the highlight roll-off does
- * real work instead of clipping.
- *
- * `full` adds two passes the material cannot do for itself:
- *
- *   - **GTAO**, which darkens gullies, crevices and the ground under an
- *     overhang. Cavity occlusion baked into the material only knows about the
- *     micro-relief at that pixel; screen-space AO is what puts a whole ravine
- *     into shade.
- *   - **A narrow bloom**, so sunlit snow and rock edges read as bright rather
- *     than merely light-coloured.
- */
-/**
  * Display-space grade. AgX deliberately lands everything in the midtones so
  * nothing clips; that protects the sky but leaves the frame flat, so the
- * contrast and the saturation that the curve gave up are put back here, after
- * tone mapping, where an S-curve cannot reintroduce clipping in the scene
- * referred data.
+ * contrast and saturation that the curve gave up are put back after tone
+ * mapping, where an S-curve cannot reintroduce scene-referred clipping.
  */
 const grade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   const rgb = colour.rgb
-  // Pivoted S-curve: darks fall away, highlights hold.
   const contrasted = mix(
     rgb.mul(rgb).mul(3).sub(rgb.mul(rgb).mul(rgb).mul(2)),
     rgb,
@@ -58,7 +55,6 @@ const grade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   )
   const grey = luminance(contrasted)
   const saturated = mix(vec3(grey), contrasted, float(1.14))
-  // Lift the deepest shadows a touch so they read as air, not as holes.
   const lifted = saturated.add(smoothstep(0.12, 0, grey).mul(0.012))
   return vec4(lifted.clamp(0, 1), colour.a)
 })
@@ -74,54 +70,95 @@ export function createTerrainRenderPipeline(
 
   if (mode !== 'full' || !effects) {
     const pipeline = new RenderPipeline(renderer, scenePass)
-    return { pipeline, dispose: () => pipeline.dispose() }
+    return {
+      pipeline,
+      warmup: () => warmRenderPipeline(renderer, scenePass, pipeline),
+      dispose: () => pipeline.dispose(),
+    }
   }
 
-  scenePass.setMRT(mrt({ output, normal: normalView }))
+  // Terrain-scale occlusion is stored in each compiled section. The scene pass
+  // therefore needs only its HDR colour attachment: no per-frame normal MRT,
+  // no 48-tap screen kernel and no denoise pass for unchanged geometry.
   const colour = scenePass.getTextureNode('output')
-  const depth = scenePass.getTextureNode('depth')
-  const normals = scenePass.getTextureNode('normal')
-  const occlusion = ao(depth, normals, camera)
-  // Radius is in world units: on a landscape, sub-metre sampling finds nothing
-  // to occlude with. Gullies and the base of a face are metres across, so the
-  // radius has to be too.
-  occlusion.radius.value = 7
-  occlusion.thickness.value = 4
-  occlusion.distanceExponent.value = 1.5
-  occlusion.distanceFallOff.value = 0.7
-  occlusion.scale.value = 1.5
-  occlusion.samples.value = 24
-
-  // GTAO dithers its sample directions with a fixed screen-space pattern; on a
-  // large smooth surface that pattern is plainly visible as a dot lattice.
-  // Without temporal accumulation the only fix is an edge-aware denoise.
-  const smoothedOcclusion = denoise(
-    occlusion.getTextureNode(),
-    depth,
-    normals,
-    camera,
-  )
-
-  const occluded = colour.mul(vec4(vec3((smoothedOcclusion as any).r), 1))
-  const glow = bloom(occluded, 0.09, 0.75, 1.5)
-
-  // Ridge silhouettes against a bright sky are the worst case for aliasing, and
-  // MSAA is not guaranteed on the WebGPU path, so edges are resolved in post.
-  // FXAA has to see tone-mapped, display-referred pixels to find those edges,
-  // which means doing the output transform here rather than letting the
-  // pipeline apply it afterwards.
+  const glow = bloom(colour, 0.09, 0.75, 1.5)
   const graded = renderOutput(
-    occluded.add(glow),
+    colour.add(glow),
     renderer.toneMapping,
     renderer.outputColorSpace,
   )
-  const pipeline = new RenderPipeline(renderer, fxaa(grade(graded)))
+  // The renderer and this PassNode use 4x MSAA. A second FXAA pass here would
+  // re-filter already-resolved edges, softening the centimetre relief and
+  // forcing an otherwise unnecessary full-resolution RTT.
+  const pipeline = new RenderPipeline(renderer, grade(graded))
   pipeline.outputColorTransform = false
 
   return {
     pipeline,
+    warmup: () => warmRenderPipeline(renderer, scenePass, pipeline, glow),
     dispose() {
       pipeline.dispose()
+      ;(glow as unknown as InternalBloomNode).dispose()
     },
+  }
+}
+
+async function warmRenderPipeline(
+  renderer: Renderer,
+  scenePass: any,
+  pipeline: RenderPipeline,
+  bloomNode?: unknown,
+): Promise<void> {
+  // PassNode knows its real attachment formats and sample count, which makes
+  // this more complete than compiling the scene against the swap chain.
+  await scenePass.compileAsync(renderer)
+
+  const internalPipeline = pipeline as InternalRenderPipeline
+  internalPipeline._update()
+  await compileQuad(renderer, internalPipeline._quadMesh)
+
+  // Bloom owns a high-pass, five separable blur variants and a composite quad.
+  // Its setup runs while the final quad is built; compile every resulting
+  // material now, against the same half-float attachment used at runtime.
+  const internalBloom = bloomNode as InternalBloomNode | undefined
+  if (internalBloom?._highPassFilterMaterial) {
+    const materials = [
+      internalBloom._highPassFilterMaterial,
+      ...internalBloom._separableBlurMaterials,
+      internalBloom._compositeMaterial,
+    ].filter((material): material is Material => material !== null)
+    for (const material of materials) {
+      await compileMaterialQuad(
+        renderer,
+        material,
+        internalBloom._renderTargetBright,
+      )
+    }
+  }
+}
+
+async function compileMaterialQuad(
+  renderer: Renderer,
+  material: Material,
+  renderTarget: RenderTarget,
+): Promise<void> {
+  const quad = new QuadMesh(material)
+  await compileQuad(renderer, quad, renderTarget)
+}
+
+async function compileQuad(
+  renderer: Renderer,
+  quad: QuadMesh,
+  renderTarget: RenderTarget | null = null,
+): Promise<void> {
+  const previousTarget = renderer.getRenderTarget()
+  const previousMrt = renderer.getMRT()
+  try {
+    renderer.setMRT(null)
+    renderer.setRenderTarget(renderTarget)
+    await renderer.compileAsync(quad, quad.camera)
+  } finally {
+    renderer.setRenderTarget(previousTarget)
+    renderer.setMRT(previousMrt)
   }
 }

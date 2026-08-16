@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import {
   Eye,
   EyeOff,
@@ -21,7 +22,7 @@ interface ModifierStackPanelProps {
   editor: EditorStore
 }
 
-export function ModifierStackPanel({ terrain, editor }: ModifierStackPanelProps) {
+function ModifierStackPanelView({ terrain, editor }: ModifierStackPanelProps) {
   useModifierRevision(terrain)
   const editorSnapshot = useEditorSnapshot(editor)
   const modifiers = terrain.modifiers.snapshot().reverse()
@@ -89,6 +90,15 @@ export function ModifierStackPanel({ terrain, editor }: ModifierStackPanelProps)
       )}
     </section>
   )
+}
+
+// The inspector also subscribes to 10 Hz renderer telemetry. This subtree has
+// its own modifier/editor subscriptions, so reconciling every row again for an
+// unrelated FPS update only creates garbage and periodic main-thread stalls.
+const MemoizedModifierStackPanel = memo(ModifierStackPanelView)
+
+export function ModifierStackPanel(props: ModifierStackPanelProps) {
+  return <MemoizedModifierStackPanel {...props} />
 }
 
 function ModifierRow({
