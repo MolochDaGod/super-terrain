@@ -8,7 +8,8 @@ import type {
   SectionId,
   SectionKey,
 } from '../core/types'
-import { EditableMeshSection } from '../mesh/EditableMesh'
+import { EditableMesh, EditableMeshSection } from '../mesh/EditableMesh'
+import { validateMeshData } from '../mesh/MeshValidation'
 
 export interface TerrainSection {
   key: SectionKey
@@ -90,6 +91,35 @@ export class MeshPartition {
     return section
   }
 
+  /** Takes ownership of a section-local authoritative mesh and invalidates output. */
+  replaceSourceMesh(
+    key: SectionKey,
+    mesh: EditableMesh,
+    now = performance.now(),
+  ): TerrainSection {
+    assertMeshInsideSection(mesh, this.options.sectionSize)
+    const section = this.getOrCreate(key, now)
+    this.markDirty(section, section.bounds, now)
+    section.source.replaceMesh(mesh, section.revision)
+    return section
+  }
+
+  restoreProceduralSource(
+    key: SectionKey,
+    now = performance.now(),
+  ): TerrainSection {
+    const section = this.getOrCreate(key, now)
+    this.markDirty(section, section.bounds, now)
+    section.source.restoreProcedural(section.revision)
+    return section
+  }
+
+  get editableMeshBytes(): number {
+    let bytes = 0
+    for (const section of this.sections.values()) bytes += section.source.byteLength
+    return bytes
+  }
+
   invalidateBounds(bounds: AABB, halo: number, now = performance.now()): TerrainSection[] {
     const dirtyBounds = expandBounds(bounds, halo)
     const min = worldToSection(dirtyBounds.min.x, dirtyBounds.min.z, this.options.sectionSize)
@@ -157,5 +187,31 @@ export class MeshPartition {
 
   values(): IterableIterator<TerrainSection> {
     return this.sections.values()
+  }
+}
+
+function assertMeshInsideSection(mesh: EditableMesh, sectionSize: number): void {
+  const epsilon = Math.max(1e-4, sectionSize * 1e-5)
+  for (let offset = 0; offset < mesh.positions.length; offset += 3) {
+    const x = mesh.positions[offset]
+    const z = mesh.positions[offset + 2]
+    if (
+      x < -epsilon ||
+      x > sectionSize + epsilon ||
+      z < -epsilon ||
+      z > sectionSize + epsilon
+    ) {
+      throw new Error(
+        `Editable source vertex ${offset / 3} lies outside its section-local X/Z bounds`,
+      )
+    }
+  }
+  const validation = validateMeshData(mesh.positions, mesh.triangles, {
+    boundaryMode: mesh.boundaryMode,
+    sectionSize,
+    rejectDegenerateTriangles: true,
+  })
+  if (!validation.valid) {
+    throw new Error(`Invalid editable section source: ${validation.errors.join('; ')}`)
   }
 }

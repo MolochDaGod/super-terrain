@@ -1,5 +1,6 @@
 import type { AABB, CompiledSection, SectionKey } from '../core/types'
 import type { TerrainConfig } from '../config'
+import type { TerrainSectionSourceSnapshot } from '../mesh/EditableMesh'
 import type {
   BrushDomain,
   BrushMode,
@@ -48,6 +49,8 @@ export interface CompileSectionRequest {
    * brush strokes still simplify from LOD0 so a small edit cannot disappear.
    */
   levels?: readonly number[]
+  /** Omitted requests retain backwards-compatible procedural generation. */
+  source?: TerrainSectionSourceSnapshot
   modifiers: ModifierPacket
 }
 
@@ -148,6 +151,7 @@ export function compiledTransferables(compiled: CompiledSection): Transferable[]
   for (const lod of compiled.lods) {
     transferables.push(
       lod.positions.buffer,
+      ...(lod.stableVertexIds ? [lod.stableVertexIds.buffer] : []),
       lod.normals.buffer,
       lod.colors.buffer,
       ...(lod.surfaceFields?.map((field) => field.buffer) ?? []),
@@ -155,4 +159,22 @@ export function compiledTransferables(compiled: CompiledSection): Transferable[]
     )
   }
   return transferables
+}
+
+export function sourceTransferables(
+  source: TerrainSectionSourceSnapshot | undefined,
+): Transferable[] {
+  if (!source || source.kind === 'procedural') return []
+  const buffers = new Set<ArrayBuffer>()
+  const add = (view: ArrayBufferView) => buffers.add(view.buffer as ArrayBuffer)
+  add(source.positions)
+  add(source.triangles)
+  add(source.vertexIds)
+  add(source.triangleIds)
+  add(source.boundaryEdgeMasks)
+  add(source.ownedBoundaryEdgeMasks)
+  add(source.boundaryWeldKeys)
+  for (const attribute of source.vertexAttributes) add(attribute.values)
+  for (const attribute of source.triangleAttributes) add(attribute.values)
+  return [...buffers]
 }

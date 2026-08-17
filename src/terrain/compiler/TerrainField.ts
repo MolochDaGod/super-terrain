@@ -61,6 +61,58 @@ export function evaluateTerrainPoint(
   return point
 }
 
+/** Applies the same non-destructive field stack to an arbitrary source point. */
+export function evaluateEditableTerrainPoint(
+  sourcePoint: Vec3Like,
+  sourceNormal: Vec3Like,
+  modifiers: TerrainModifier[],
+): Vec3Like {
+  const base = { ...sourcePoint }
+  const point = { ...sourcePoint }
+  const normalLength = Math.hypot(
+    sourceNormal.x,
+    sourceNormal.y,
+    sourceNormal.z,
+  ) || 1
+  const normal = {
+    x: sourceNormal.x / normalLength,
+    y: sourceNormal.y / normalLength,
+    z: sourceNormal.z / normalLength,
+  }
+
+  for (const modifier of modifiers) {
+    if (!modifier.enabled) continue
+    switch (modifier.type) {
+      case 'noise': {
+        const noise = valueNoise(
+          sourcePoint.x * modifier.frequency,
+          sourcePoint.z * modifier.frequency,
+          modifier.seed,
+        )
+        displaceAlongNormal(point, normal, (noise * 2 - 1) * modifier.amplitude)
+        break
+      }
+      case 'field-displacement': {
+        const displacement =
+          Math.sin(sourcePoint.x * 0.018 + sourcePoint.z * 0.011) *
+          modifier.scale *
+          0.5
+        displaceAlongNormal(point, normal, displacement)
+        break
+      }
+      case 'brush-stroke':
+        applyBrushToPoint(point, base, modifier)
+        break
+      case 'boolean-subtract':
+      case 'boolean-volume':
+      case 'remesh':
+      case 'tessellate':
+        break
+    }
+  }
+  return point
+}
+
 export function hasLateralDisplacement(
   modifiers: TerrainModifier[],
 ): boolean {
@@ -125,6 +177,16 @@ function applyBrushToPoint(
       }
     }
   }
+}
+
+function displaceAlongNormal(
+  point: Vec3Like,
+  normal: Vec3Like,
+  distance: number,
+): void {
+  point.x += normal.x * distance
+  point.y += normal.y * distance
+  point.z += normal.z * distance
 }
 
 function valueNoise(x: number, z: number, seed: number): number {

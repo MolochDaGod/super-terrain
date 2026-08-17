@@ -62,9 +62,31 @@ React / R3F
 
 Core engine state lives under `src/terrain` and does not depend on React. `BufferGeometry` is a compiled render output, not authoring data. Section builds carry monotonic revisions; stale worker results cannot replace newer source data. Existing meshes stay visible while replacements compile, and retired GPU geometry is disposed through a delayed queue.
 
+### Authoritative mesh sources
+
+A section can now use either the lightweight procedural recipe or an arbitrary
+`EditableMesh` as its authoritative source. Editable sources carry stable
+vertex/triangle IDs, arbitrary float attributes, compact adjacency, a lazy
+triangle AABB tree, and deterministic boundary ownership/weld keys. Worker
+builds consume that source directly; they do not project it back onto an X/Z
+height grid. LODs retain stable vertex identity, and exact CSG supports both
+open terrain shells and closed meshes.
+
+Install a section-local mesh through `WorldTerrain.replaceSectionMesh()`. X/Z
+coordinates are local to the section and Y remains in world elevation space.
+The world takes ownership, enforces the editable-source memory budget, retains
+authored source through streaming eviction, and exposes defensive copies through
+`getSectionMesh()`. `restoreProceduralSection()` switches the section back to
+its deterministic recipe.
+
+This source contract is intentionally internal while the editor is a prototype.
+The current IndexedDB record still stores only modifiers; project/document
+persistence and interchange import belong to the later document workflow, so
+this phase does not freeze or migrate a public mesh file format.
+
 ## Terrain pipeline
 
-Each resident 128 m section is generated and compiled independently. A build evaluates transformed spatial modifiers, emits adaptive local coordinates for density regions, applies BVH-accelerated volumetric CSG for tunnel topology, validates one authoritative indexed mesh, and derives the coarser levels with error-bounded QEM simplification. Borders, sculpted regions, tunnel interiors, normals, colors, and cached material fields are retained from that source mesh, so topology cannot vanish merely because an independently sampled coarse grid missed it.
+Each resident 128 m section is generated and compiled independently. Procedural sections evaluate their deterministic terrain recipe, while editable sections begin from their supplied indexed source topology. A build evaluates transformed spatial modifiers, emits adaptive local coordinates for procedural density regions, applies BVH-accelerated volumetric CSG for tunnel topology, validates one authoritative indexed mesh, and derives the coarser levels with error-bounded QEM simplification. Borders, stable IDs, sculpted regions, tunnel interiors, normals, colors, and cached material fields are retained from that source mesh, so topology cannot vanish merely because an independently sampled coarse grid missed it.
 
 Streaming is centered on the camera's orbit/fly target rather than the camera's ground position. The resident radius expands with the projected viewport footprint, contracts slowly with hysteresis, and never shrinks because of a transient slow frame. A worker-generated coarse far-field mesh keeps the full world silhouette visible beyond the editable working set and while newly requested sections compile.
 

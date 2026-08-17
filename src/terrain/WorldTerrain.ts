@@ -12,6 +12,8 @@ import { WorldCoordinates } from './core/WorldCoordinates'
 import {
   EMPTY_METRICS,
   type AABB,
+  type CompiledSection,
+  type SectionKey,
   type TerrainMetrics,
   type Vec3Like,
 } from './core/types'
@@ -33,6 +35,7 @@ import {
   selectSourceLod,
 } from './lod/LodSelector'
 import { ModifierStack } from './modifiers/ModifierStack'
+import { EditableMesh } from './mesh/EditableMesh'
 import {
   appendBrushPoint,
   createBrushStroke,
@@ -95,6 +98,13 @@ interface TerrainViewSignature {
 const BRUSH_FLOW_PER_SECOND = 2.4
 const SPATIAL_DAB_WEIGHT = 0.08
 const MAX_AUTHORED_DAB_WEIGHT = 0.2
+
+function compiledGpuBytes(compiled: CompiledSection | undefined): number {
+  return compiled?.gpuBytes ?? compiled?.lods.reduce(
+    (bytes, lod) => bytes + lod.gpuBytes,
+    0,
+  ) ?? 0
+}
 
 function requestedLevels(minimum: number, count: number): number[] {
   const first = Math.max(0, Math.min(count - 1, Math.round(minimum)))
@@ -320,7 +330,7 @@ export class WorldTerrain {
           section.key,
           section.residency,
           section.compiled?.cpuBytes ?? 0,
-          this.renderer?.has(section.id) ? section.compiled?.cpuBytes ?? 0 : 0,
+          this.renderer?.has(section.id) ? compiledGpuBytes(section.compiled) : 0,
           now,
         )
       }
@@ -632,6 +642,43 @@ export class WorldTerrain {
     )
   }
 
+  /**
+   * Installs a section-local arbitrary mesh as authoritative source topology.
+   * Ownership transfers to WorldTerrain; use getSectionMesh() for a safe copy.
+   */
+  replaceSectionMesh(key: SectionKey, mesh: EditableMesh): number {
+    const current = this.partition.get(key)
+    const projectedBytes =
+      this.partition.editableMeshBytes -
+      (current?.source.byteLength ?? 0) +
+      mesh.byteLength
+    if (projectedBytes > this.config.maxEditableMeshBytes) {
+      throw new Error(
+        `Editable mesh budget exceeded (${projectedBytes} > ${this.config.maxEditableMeshBytes} bytes)`,
+      )
+    }
+    if (current?.buildState === 'building') this.cancelBuild(current)
+    const section = this.partition.replaceSourceMesh(key, mesh)
+    section.buildState = 'queued'
+    this.terrainStateRevision += 1
+    this.hasPendingTerrainWork = true
+    return section.revision
+  }
+
+  restoreProceduralSection(key: SectionKey): number {
+    const current = this.partition.get(key)
+    if (current?.buildState === 'building') this.cancelBuild(current)
+    const section = this.partition.restoreProceduralSource(key)
+    section.buildState = 'queued'
+    this.terrainStateRevision += 1
+    this.hasPendingTerrainWork = true
+    return section.revision
+  }
+
+  getSectionMesh(key: SectionKey): EditableMesh | undefined {
+    return this.partition.get(key)?.source.cloneMesh()
+  }
+
   get logicalSectionCount(): number {
     const width = Math.ceil(this.config.worldSize / this.config.sectionSize)
     return width * width
@@ -768,6 +815,14 @@ export class WorldTerrain {
       candidate.priority,
       modifiers,
       requestedLevels(minimumLod, this.config.lodResolutions.length),
+      section.source.createCompileSnapshot(
+        section.key,
+        this.config.sectionSize,
+        {
+          minSection: this.partition.minSection,
+          maxSection: this.partition.maxSection,
+        },
+      ),
     )
     this.partition.markBuilding(section, jobId, minimumLod)
   }
@@ -832,7 +887,7 @@ export class WorldTerrain {
       kind: 'swap',
       priority: candidate.priority + 3_000,
       estimatedCpuMs: 0.42,
-      uploadBytes: pending.cpuBytes,
+      uploadBytes: compiledGpuBytes(pending),
       swaps: 1,
       run: () => {
         if (
@@ -851,7 +906,7 @@ export class WorldTerrain {
           section.key,
           section.residency,
           compiled.cpuBytes,
-          compiled.cpuBytes,
+          compiledGpuBytes(compiled),
         )
       },
     })
@@ -898,7 +953,7 @@ export class WorldTerrain {
         section.key,
         section.residency,
         section.compiled.cpuBytes,
-        section.compiled.cpuBytes,
+        compiledGpuBytes(section.compiled),
       )
     }
     const constrained = constrainNeighborLods(nodes)
@@ -939,7 +994,20 @@ export class WorldTerrain {
           if (this.streamer.isDesired(key)) return
           this.compiler.cancel(key)
           this.renderer?.evict(id)
-          this.partition.remove(key)
+          const section = this.partition.get(key)
+          if (section && !section.source.procedural) {
+            // Authored source has no durable document store yet. Evict derived
+            // CPU/GPU data but retain the authoritative mesh in its budget.
+            section.compiled = undefined
+            section.pendingCompiled = undefined
+            section.buildState = 'queued'
+            section.residency = 'SOURCE_RESIDENT'
+            section.buildJobId = undefined
+            section.buildingRevision = undefined
+            section.buildingLod = undefined
+          } else {
+            this.partition.remove(key)
+          }
           this.streamer.evicted(id)
         },
       })
@@ -1079,7 +1147,7 @@ export class WorldTerrain {
       sectionsSwapped: this.scheduler.swapsThisFrame,
       gpuUploadBytes: this.scheduler.uploadedBytesThisFrame,
       gpuBytes: rendering.gpuBytes,
-      cpuBytes: streaming.cpuBytes,
+      cpuBytes: streaming.cpuBytes + this.partition.editableMeshBytes,
       streamLoadsPerSecond: streaming.loadsPerSecond,
       streamEvictionsPerSecond: streaming.evictionsPerSecond,
       qualityScale: scheduler.qualityScale,
@@ -1090,5 +1158,12 @@ export class WorldTerrain {
     })
     void candidates
     void this.initialized
+  }
+
+  private cancelBuild(section: TerrainSection): void {
+    this.compiler.cancel(section.key, section.buildingRevision)
+    section.buildJobId = undefined
+    section.buildingRevision = undefined
+    section.buildingLod = undefined
   }
 }

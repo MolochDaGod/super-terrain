@@ -29,6 +29,8 @@ export interface CompiledLOD {
   level: number
   geometricError: number
   positions: Float32Array
+  /** Two u32 words per vertex; compiler-stable and renderer-neutral. */
+  stableVertexIds?: Uint32Array
   normals: Float32Array
   colors: Float32Array
   /** Five normalized u16 vec4 streams containing cached broad material fields. */
@@ -60,6 +62,8 @@ export interface CompiledSection {
   lods: CompiledLOD[]
   metadata: CompiledTerrainMetadata
   cpuBytes: number
+  /** Resident render buffers only; excludes editor/source identity metadata. */
+  gpuBytes?: number
 }
 
 export interface FrameBudget {

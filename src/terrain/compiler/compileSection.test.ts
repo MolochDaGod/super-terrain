@@ -6,6 +6,7 @@ import {
   createTunnelModifier,
 } from '../modifiers/factories'
 import type { TerrainModifier } from '../modifiers/types'
+import { EditableMesh, EditableMeshSection } from '../mesh/EditableMesh'
 import { encodeModifiers, type CompileSectionRequest } from '../workers/protocol'
 import { compileTerrainSection, evaluateHeight } from './compileSection'
 
@@ -62,6 +63,80 @@ describe('section compiler', () => {
     expect(first.lods.map((lod) => lod.indices)).toEqual(
       second.lods.map((lod) => lod.indices),
     )
+  })
+
+  it('compiles an authoritative closed mesh instead of regenerating a height grid', () => {
+    const source = editableCubeSource()
+    const request = requestFor({ x: 0, z: 0 }, [], 16)
+    request.config.lodResolutions = [16, 8, 4]
+    request.source = source
+    const first = compileTerrainSection(request)
+    const second = compileTerrainSection(request)
+
+    expect(first.metadata.hasArbitraryTopology).toBe(true)
+    expect(first.metadata.vertexCount).toBe(8)
+    expect(first.metadata.triangleCount).toBe(12)
+    expect(first.lods[0].positions).toEqual(source.positions)
+    expect(first.lods[0].indices).toEqual(source.triangles)
+    expect(first.lods[0].stableVertexIds).toEqual(
+      second.lods[0].stableVertexIds,
+    )
+    expect(
+      [...first.lods[0].stableVertexIds!].filter((_, index) => index % 2 === 1),
+    ).toEqual([...source.vertexIds])
+    expect(first.lods[0].colors.slice(0, 3)).toEqual(
+      new Float32Array([0.9, 0.2, 0.1]),
+    )
+    expect(first.bounds).toEqual({
+      min: { x: 48, y: 10, z: 48 },
+      max: { x: 80, y: 42, z: 80 },
+    })
+  })
+
+  it('sculpts an arbitrary mesh in full XYZ while preserving its source topology IDs', () => {
+    const source = editableCubeSource()
+    const stroke = createBrushStroke({
+      point: { x: 48, y: 10, z: 48 },
+      normal: { x: 0, y: -1, z: 0 },
+      domain: 'mesh',
+      mode: 'raise',
+      radius: 20,
+      strength: 1,
+      falloff: 0.5,
+    })
+    const request = requestFor({ x: 0, z: 0 }, [stroke], 16)
+    request.source = source
+    const compiled = compileTerrainSection(request)
+
+    expect(compiled.metadata.vertexCount).toBe(8)
+    expect(compiled.lods[0].indices).toEqual(source.triangles)
+    expect(compiled.lods[0].positions[1]).toBeLessThan(8)
+    expect(
+      [...compiled.lods[0].stableVertexIds!].filter((_, index) => index % 2 === 1),
+    ).toEqual([...source.vertexIds])
+  })
+
+  it('subtracts exact volume topology directly from a closed editable mesh', () => {
+    const source = editableCubeSource()
+    const volume = createBooleanVolumeModifier({
+      volumes: [
+        {
+          kind: 'ellipsoid',
+          center: { x: 64, y: 26, z: 64 },
+          radii: { x: 9, y: 9, z: 9 },
+          forward: { x: 1, y: 0, z: 0 },
+          surface: 'cave',
+        },
+      ],
+    })
+    const request = requestFor({ x: 0, z: 0 }, [volume], 16)
+    request.source = source
+    const compiled = compileTerrainSection(request)
+
+    expect(compiled.metadata.hasArbitraryTopology).toBe(true)
+    expect(compiled.metadata.vertexCount).toBeGreaterThan(source.positions.length / 3)
+    expect(compiled.metadata.validationWarnings).toBe(0)
+    expect(compiled.lods[0].triangleCount).toBeGreaterThan(source.triangles.length / 3)
   })
 
   it('emits genuine non-heightfield tunnel topology', () => {
@@ -244,6 +319,13 @@ describe('section compiler', () => {
           5,
         )
       }
+      const westId = (westVertex / 3) * 2
+      const eastId = (eastVertex / 3) * 2
+      expect(
+        west.lods[0].stableVertexIds?.slice(westId, westId + 2),
+      ).toEqual(
+        east.lods[0].stableVertexIds?.slice(eastId, eastId + 2),
+      )
     }
   })
 
@@ -287,6 +369,44 @@ describe('section compiler', () => {
     }
   })
 })
+
+function editableCubeSource() {
+  const minimum = 48
+  const maximum = 80
+  const bottom = 10
+  const top = 42
+  const mesh = new EditableMesh(
+    new Float32Array([
+      minimum, bottom, minimum,
+      maximum, bottom, minimum,
+      maximum, top, minimum,
+      minimum, top, minimum,
+      minimum, bottom, maximum,
+      maximum, bottom, maximum,
+      maximum, top, maximum,
+      minimum, top, maximum,
+    ]),
+    new Uint32Array([
+      0, 2, 1, 0, 3, 2,
+      4, 5, 6, 4, 6, 7,
+      0, 1, 5, 0, 5, 4,
+      3, 7, 6, 3, 6, 2,
+      0, 4, 7, 0, 7, 3,
+      1, 2, 6, 1, 6, 5,
+    ]),
+    { sourceId: 'closed-cube', boundaryMode: 'closed' },
+  )
+  const colors = new Float32Array(mesh.vertexCount * 3)
+  for (let vertex = 0; vertex < mesh.vertexCount; vertex += 1) {
+    colors.set([0.9, 0.2, 0.1], vertex * 3)
+  }
+  mesh.setVertexAttribute('color', colors)
+  const section = new EditableMeshSection(17)
+  section.replaceMesh(mesh, 1)
+  const snapshot = section.createCompileSnapshot({ x: 0, z: 0 }, 128)
+  if (snapshot.kind !== 'editable-mesh') throw new Error('Expected editable mesh')
+  return snapshot
+}
 
 function boundaryVertices(lod: {
   positions: Float32Array

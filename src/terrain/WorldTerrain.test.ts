@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EditorStore } from './editor/EditorStore'
+import { EditableMesh } from './mesh/EditableMesh'
 import type { TerrainStorage } from './persistence/TerrainStorage'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
 import { WorldTerrain } from './WorldTerrain'
@@ -153,7 +154,42 @@ describe('world terrain brush sessions', () => {
     expect(terrain.modifiers.count).toBe(0)
     terrain.dispose()
   })
+
+  it('owns arbitrary section source meshes without exposing mutable internals', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    const mesh = triangleSource('owned-source')
+    expect(terrain.replaceSectionMesh({ x: 0, z: 0 }, mesh)).toBe(1)
+    expect(terrain.partition.get({ x: 0, z: 0 })?.source.procedural).toBe(false)
+
+    const firstRead = terrain.getSectionMesh({ x: 0, z: 0 })!
+    firstRead.positions[0] = 99
+    expect(terrain.getSectionMesh({ x: 0, z: 0 })!.positions[0]).toBe(10)
+
+    expect(terrain.restoreProceduralSection({ x: 0, z: 0 })).toBe(2)
+    expect(terrain.getSectionMesh({ x: 0, z: 0 })).toBeUndefined()
+    terrain.dispose()
+  })
+
+  it('enforces the editable source memory budget before taking ownership', () => {
+    const terrain = new WorldTerrain(
+      { workerCount: 1, maxEditableMeshBytes: 8 },
+      memoryStorage,
+    )
+    expect(() =>
+      terrain.replaceSectionMesh({ x: 0, z: 0 }, triangleSource('too-large')),
+    ).toThrow(/budget exceeded/)
+    expect(terrain.partition.get({ x: 0, z: 0 })).toBeUndefined()
+    terrain.dispose()
+  })
 })
+
+function triangleSource(sourceId: string): EditableMesh {
+  return new EditableMesh(
+    new Float32Array([10, 0, 10, 20, 0, 10, 10, 0, 20]),
+    new Uint32Array([0, 2, 1]),
+    { sourceId },
+  )
+}
 
 function fakeRenderer(
   previewBrush: TerrainRenderBackend['previewBrush'],

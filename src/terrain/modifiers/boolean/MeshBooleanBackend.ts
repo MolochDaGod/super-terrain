@@ -182,6 +182,10 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     sectionSize: number,
     cutters: readonly BufferGeometry[] = [],
   ): Brush {
+    const boundaryEdges = findBoundaryEdges(target.indices)
+    if (boundaryEdges.length === 0) {
+      return this.createClosedTerrainSolid(target)
+    }
     const vertexCount = target.positions.length / 3
     let minimumY = Infinity
     for (let offset = 1; offset < target.positions.length; offset += 3) {
@@ -226,7 +230,7 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
       const c = target.indices[index + 2] + vertexCount
       closureIndices.push(a, c, b)
     }
-    for (const edge of findBoundaryEdges(target.indices)) {
+    for (const edge of boundaryEdges) {
       const bottomA = edge.a + vertexCount
       const bottomB = edge.b + vertexCount
       closureIndices.push(
@@ -246,6 +250,26 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     geometry.setIndex(new BufferAttribute(indices, 1))
     geometry.addGroup(0, topIndices.length, 0)
     geometry.addGroup(topIndices.length, closureIndices.length, 1)
+    const brush = new Brush(geometry, [
+      this.surfaceMaterial,
+      this.closureMaterial,
+    ])
+    brush.updateMatrixWorld(true)
+    return brush
+  }
+
+  private createClosedTerrainSolid(target: BooleanMeshBuffers): Brush {
+    const geometry = new BufferGeometry()
+    geometry.setAttribute(
+      'position',
+      new BufferAttribute(target.positions.slice(), 3),
+    )
+    geometry.setAttribute(
+      'normal',
+      new BufferAttribute(target.normals.slice(), 3),
+    )
+    geometry.setIndex(new BufferAttribute(target.indices.slice(), 1))
+    geometry.addGroup(0, target.indices.length, 0)
     const brush = new Brush(geometry, [
       this.surfaceMaterial,
       this.closureMaterial,

@@ -95,6 +95,10 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   upload(section: TerrainSection, compiled: CompiledSection): number {
+    const gpuBytes = compiled.gpuBytes ?? compiled.lods.reduce(
+      (bytes, lod) => bytes + lod.gpuBytes,
+      0,
+    )
     const geometries = new Map(
       compiled.lods.map((lod) => [
         lod.level,
@@ -106,7 +110,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       const previousMesh = runtime.mesh
       this.deferGeometries([...runtime.geometries.values()])
       runtime.geometries = geometries
-      runtime.gpuBytes = compiled.cpuBytes
+      runtime.gpuBytes = gpuBytes
       runtime.section = section
       runtime.lod = closestAvailableLod(geometries, runtime.lod)
       runtime.mesh = createTerrainMesh(
@@ -134,6 +138,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
         section,
         compiled,
         this.boundaryMaterials.clean,
+        this.sectionSize,
       )
       this.surfaceRoot.add(mesh)
       this.root.add(boundary)
@@ -142,7 +147,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
         mesh,
         geometries,
         boundary,
-        gpuBytes: compiled.cpuBytes,
+        gpuBytes,
         lod: initialLod,
         visible: true,
       }
@@ -151,7 +156,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     this.applyMaterial(runtime)
     this.setSectionState(section)
     invalidateTerrainShadows()
-    return compiled.cpuBytes
+    return gpuBytes
   }
 
   has(sectionId: SectionId): boolean {
@@ -377,7 +382,12 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private updateBoundary(runtime: RuntimeSection, compiled: CompiledSection): void {
     const previous = runtime.boundary
     const material = previous.material as LineBasicMaterial
-    runtime.boundary = createBoundary(runtime.section, compiled, material)
+    runtime.boundary = createBoundary(
+      runtime.section,
+      compiled,
+      material,
+      this.sectionSize,
+    )
     runtime.boundary.visible = runtime.visible && this.overlay !== 'none'
     this.root.remove(previous)
     this.root.add(runtime.boundary)
@@ -584,15 +594,16 @@ function createBoundary(
   section: TerrainSection,
   compiled: CompiledSection,
   material: LineBasicMaterial,
+  sectionSize: number,
 ): LineSegments {
   const line = new LineSegments(
-    createBoundaryGeometry(section, compiled),
+    createBoundaryGeometry(section, compiled, sectionSize),
     material,
   )
   line.position.set(
-    section.key.x * (compiled.bounds.max.x - compiled.bounds.min.x),
+    section.key.x * sectionSize,
     0,
-    section.key.z * (compiled.bounds.max.z - compiled.bounds.min.z),
+    section.key.z * sectionSize,
   )
   line.frustumCulled = true
   line.name = `section-boundary-${section.id}`
@@ -602,8 +613,9 @@ function createBoundary(
 function createBoundaryGeometry(
   section: TerrainSection,
   compiled: CompiledSection,
+  sectionSize: number,
 ): BufferGeometry {
-  const size = compiled.bounds.max.x - compiled.bounds.min.x
+  const size = sectionSize
   const y = compiled.bounds.max.y + 1.4
   const positions = new Float32Array([
     0, y, 0, size, y, 0,

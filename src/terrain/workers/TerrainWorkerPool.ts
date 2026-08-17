@@ -1,12 +1,13 @@
 import { sectionId } from '../core/bounds'
 import type { TerrainConfig } from '../config'
 import type { CompiledSection, SectionKey } from '../core/types'
+import type { TerrainSectionSourceSnapshot } from '../mesh/EditableMesh'
 import type { TerrainModifier } from '../modifiers/types'
 import type {
   CompileSectionRequest,
   TerrainWorkerResponse,
 } from './protocol'
-import { encodeModifiers } from './protocol'
+import { encodeModifiers, sourceTransferables } from './protocol'
 
 interface WorkerSlot {
   index: number
@@ -62,6 +63,7 @@ export class TerrainWorkerPool {
     priority: number,
     modifiers: TerrainModifier[],
     levels?: readonly number[],
+    source?: TerrainSectionSourceSnapshot,
   ): number {
     const id = sectionId(key)
     this.latestRevision.set(id, revision)
@@ -88,6 +90,7 @@ export class TerrainWorkerPool {
           operationHalo: this.config.operationHalo,
         },
         levels: levels ? [...levels] : undefined,
+        source,
         modifiers: encodeModifiers(modifiers),
       },
       submittedAt: performance.now(),
@@ -177,7 +180,10 @@ export class TerrainWorkerPool {
       const job = this.queue.shift()
       if (!job) break
       slot.request = job.request
-      slot.worker.postMessage(job.request, [job.request.modifiers.brushPoints.buffer])
+      slot.worker.postMessage(job.request, [
+        job.request.modifiers.brushPoints.buffer,
+        ...sourceTransferables(job.request.source),
+      ])
     }
   }
 

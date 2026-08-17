@@ -6,6 +6,8 @@ import type {
   CompiledSection,
   SectionKey,
 } from '../core/types'
+import type { EditableSectionSourceSnapshot } from '../mesh/EditableMesh'
+import { boundaryWeldKey } from '../partition/boundary'
 import { validateMeshData } from '../mesh/MeshValidation'
 import type { CutterVolume } from '../modifiers/boolean/CutterVolume'
 import {
@@ -25,6 +27,7 @@ import { materializeModifierTransforms } from '../modifiers/transform'
 import type { CompileSectionRequest } from '../workers/protocol'
 import { decodeModifiers } from '../workers/protocol'
 import {
+  evaluateEditableTerrainPoint,
   evaluateTerrainPoint,
   hasLateralDisplacement,
 } from './TerrainField'
@@ -37,6 +40,8 @@ export { evaluateHeight } from './TerrainField'
 
 interface GeneratedMesh {
   positions: Float32Array
+  /** Two u32 words per vertex. */
+  stableVertexIds: Uint32Array
   normals: Float32Array
   colors: Float32Array
   surfaceFields: readonly [
@@ -81,7 +86,7 @@ export function compileTerrainSection(
     (modifier) =>
       modifier.enabled &&
       modifier.type === 'brush-stroke',
-  )
+  ) || request.source?.kind === 'editable-mesh'
   // A brush can fall between coarse grid samples, so it must simplify from the
   // authoritative source. Exact CSG intersects triangle faces directly and is
   // safe to evaluate on the requested screen-error grid, then refine later.
@@ -94,6 +99,7 @@ export function compileTerrainSection(
     request.config.seed,
     modifiers,
     new Map<string, TerrainMaterialFields>(),
+    request.source,
   )
   const lods: CompiledLOD[] = []
   let minY = Infinity
@@ -104,6 +110,7 @@ export function compileTerrainSection(
   let maxZ = -Infinity
   let warnings = source.warnings
   let cpuBytes = 0
+  let gpuBytesTotal = 0
   const originX = request.key.x * request.config.sectionSize
   const originZ = request.key.z * request.config.sectionSize
   for (let index = 0; index < source.positions.length; index += 3) {
@@ -137,6 +144,7 @@ export function compileTerrainSection(
       level,
       geometricError: previousError,
       positions: generated.positions,
+      stableVertexIds: generated.stableVertexIds,
       normals: generated.normals,
       colors: generated.colors,
       surfaceFields: generated.surfaceFields,
@@ -144,7 +152,8 @@ export function compileTerrainSection(
       triangleCount: generated.indices.length / 3,
       gpuBytes,
     })
-    cpuBytes += gpuBytes
+    cpuBytes += gpuBytes + generated.stableVertexIds.byteLength
+    gpuBytesTotal += gpuBytes
     if (generated !== source) warnings += generated.warnings
   }
 
@@ -159,6 +168,7 @@ export function compileTerrainSection(
     bounds,
     lods,
     cpuBytes,
+    gpuBytes: gpuBytesTotal,
     metadata: {
       compileMs: performance.now() - started,
       vertexCount: source.positions.length / 3,
@@ -243,6 +253,7 @@ function simplifyGeneratedMesh(
 function cloneGeneratedMesh(source: GeneratedMesh): GeneratedMesh {
   return {
     positions: new Float32Array(source.positions),
+    stableVertexIds: new Uint32Array(source.stableVertexIds),
     normals: new Float32Array(source.normals),
     colors: new Float32Array(source.colors),
     surfaceFields: source.surfaceFields.map((field) =>
@@ -262,6 +273,12 @@ function compactGeneratedMesh(
   const indices = new Uint32Array(simplifiedIndices)
   const [remap, vertexCount] = MeshoptSimplifier.compactMesh(indices)
   const positions = remapFloatStream(source.positions, 3, remap, vertexCount)
+  const stableVertexIds = remapUint32Stream(
+    source.stableVertexIds,
+    2,
+    remap,
+    vertexCount,
+  )
   const normals = remapFloatStream(source.normals, 3, remap, vertexCount)
   const colors = remapFloatStream(source.colors, 3, remap, vertexCount)
   const surfaceFields = source.surfaceFields.map((field) =>
@@ -272,10 +289,13 @@ function compactGeneratedMesh(
     remap,
     vertexCount,
   )
-  const validation = validateMeshData(positions, indices)
+  const validation = validateMeshData(positions, indices, {
+    rejectDegenerateTriangles: true,
+  })
   if (!validation.valid) throw new Error(validation.errors.join('; '))
   return {
     positions,
+    stableVertexIds,
     normals,
     colors,
     surfaceFields,
@@ -308,6 +328,17 @@ function remapUint16Stream(
   return target
 }
 
+function remapUint32Stream(
+  source: Uint32Array,
+  stride: number,
+  remap: Uint32Array,
+  vertexCount: number,
+): Uint32Array {
+  const target = new Uint32Array(vertexCount * stride)
+  remapVertexStream(source, target, stride, remap)
+  return target
+}
+
 function remapUint8Stream(
   source: Uint8Array,
   remap: Uint32Array,
@@ -319,8 +350,8 @@ function remapUint8Stream(
 }
 
 function remapVertexStream(
-  source: Float32Array | Uint16Array | Uint8Array,
-  target: Float32Array | Uint16Array | Uint8Array,
+  source: Float32Array | Uint32Array | Uint16Array | Uint8Array,
+  target: Float32Array | Uint32Array | Uint16Array | Uint8Array,
   stride: number,
   remap: Uint32Array,
 ): void {
@@ -359,7 +390,19 @@ function generateSectionMesh(
   seed: number,
   modifiers: TerrainModifier[],
   materialFieldCache: Map<string, TerrainMaterialFields>,
+  source?: CompileSectionRequest['source'],
 ): GeneratedMesh {
+  if (source?.kind === 'editable-mesh') {
+    return generateEditableSectionMesh(
+      key,
+      sectionSize,
+      resolution,
+      seed,
+      modifiers,
+      materialFieldCache,
+      source,
+    )
+  }
   const originX = key.x * sectionSize
   const originZ = key.z * sectionSize
   const densityModifiers = modifiers.filter(
@@ -481,10 +524,27 @@ function generateSectionMesh(
     seed,
     materialFieldCache,
   )
-  const validation = validateMeshData(result.positions, result.indices)
+  const validation = validateMeshData(result.positions, result.indices, {
+    rejectDegenerateTriangles: true,
+  })
   if (!validation.valid) throw new Error(validation.errors.join('; '))
   return {
     positions: result.positions,
+    stableVertexIds: result === baseBuffers
+      ? createParametricStableVertexIds(
+          `procedural:${key.x}:${key.z}:${resolution}`,
+          result.positions,
+          parameters,
+          originX,
+          originZ,
+          sectionSize,
+        )
+      : createDerivedStableVertexIds(
+          `procedural:${key.x}:${key.z}:${resolution}:boolean`,
+          result.positions,
+          key,
+          sectionSize,
+        ),
     normals: result.normals,
     colors,
     surfaceFields,
@@ -501,6 +561,382 @@ function generateSectionMesh(
     hasArbitraryTopology:
       cutters.length > 0 || hasLateralDisplacement(modifiers),
   }
+}
+
+function generateEditableSectionMesh(
+  key: SectionKey,
+  sectionSize: number,
+  resolution: number,
+  seed: number,
+  modifiers: TerrainModifier[],
+  materialFieldCache: Map<string, TerrainMaterialFields>,
+  source: EditableSectionSourceSnapshot,
+): GeneratedMesh {
+  validateEditableSourceSnapshot(source)
+  if (source.positions.length === 0 || source.triangles.length === 0) {
+    throw new Error('Editable terrain source must contain renderable topology')
+  }
+  const sourceValidation = validateMeshData(source.positions, source.triangles, {
+    boundaryMode: source.boundaryMode,
+    sectionSize,
+    rejectDegenerateTriangles: true,
+  })
+  if (!sourceValidation.valid) {
+    throw new Error(`Invalid editable terrain source: ${sourceValidation.errors.join('; ')}`)
+  }
+
+  const originX = key.x * sectionSize
+  const originZ = key.z * sectionSize
+  const suppliedNormals = sourceVertexAttribute(source, 'normal', 3)
+  const baseNormals = suppliedNormals
+    ? normalizedNormals(suppliedNormals)
+    : calculateNormals(source.positions, source.triangles)
+  const positions = new Float32Array(source.positions.length)
+  let displaced = false
+  for (let vertex = 0; vertex < source.positions.length / 3; vertex += 1) {
+    const offset = vertex * 3
+    const base = {
+      x: originX + source.positions[offset],
+      y: source.positions[offset + 1],
+      z: originZ + source.positions[offset + 2],
+    }
+    const point = evaluateEditableTerrainPoint(
+      base,
+      {
+        x: baseNormals[offset],
+        y: baseNormals[offset + 1],
+        z: baseNormals[offset + 2],
+      },
+      modifiers,
+    )
+    positions[offset] = point.x - originX
+    positions[offset + 1] = point.y
+    positions[offset + 2] = point.z - originZ
+    displaced ||=
+      point.x !== base.x || point.y !== base.y || point.z !== base.z
+  }
+
+  const indices = source.triangles.slice()
+  const surfaceNormals = displaced
+    ? calculateNormals(positions, indices)
+    : baseNormals
+  const baseBuffers: BooleanMeshBuffers = {
+    positions,
+    normals: surfaceNormals,
+    indices,
+    interiorVertices: new Uint8Array(positions.length / 3),
+  }
+  const tunnels = modifiers.filter(
+    (modifier): modifier is BooleanSubtractModifier =>
+      modifier.enabled && modifier.type === 'boolean-subtract',
+  )
+  const volumeBooleans = modifiers.filter(
+    (modifier): modifier is BooleanVolumeModifier =>
+      modifier.enabled && modifier.type === 'boolean-volume',
+  )
+  const cutters: CutterVolume[] = [
+    ...tunnels.flatMap(tunnelCutterVolumes),
+    ...volumeBooleans.flatMap((modifier) => modifier.volumes),
+  ]
+  const result = cutters.length > 0
+    ? tunnelBackend.subtract(
+        baseBuffers,
+        cutters,
+        originX,
+        originZ,
+        sectionSize,
+        1,
+        seed,
+      )
+    : baseBuffers
+  const topologyChanged = result !== baseBuffers
+  const suppliedColors = sourceVertexAttribute(source, 'color')
+  const colors = !topologyChanged && suppliedColors
+    ? normalizedColors(suppliedColors, source.positions.length / 3)
+    : calculateColors(
+        result.positions,
+        result.normals,
+        result.interiorVertices,
+      )
+  const surfaceFields = calculateSurfaceFields(
+    result.positions,
+    result.normals,
+    result.indices,
+    result.interiorVertices,
+    originX,
+    originZ,
+    seed,
+    materialFieldCache,
+  )
+  const validation = validateMeshData(result.positions, result.indices, {
+    boundaryMode: topologyChanged ? 'allow' : source.boundaryMode,
+    sectionSize,
+    rejectDegenerateTriangles: true,
+  })
+  if (!validation.valid) throw new Error(validation.errors.join('; '))
+
+  const featureLocks = createFeatureLocks(
+    result.positions,
+    originX,
+    originZ,
+    sectionSize,
+    sectionSize / Math.max(1, resolution),
+    modifiers,
+  )
+  if (!topologyChanged && featureLocks.length === source.boundaryEdgeMasks.length) {
+    for (let vertex = 0; vertex < featureLocks.length; vertex += 1) {
+      if (source.boundaryEdgeMasks[vertex] !== 0) featureLocks[vertex] = 1
+    }
+  }
+
+  return {
+    positions: result.positions,
+    stableVertexIds: topologyChanged
+      ? createDerivedStableVertexIds(
+          `editable:${source.sourceId}:boolean`,
+          result.positions,
+          key,
+          sectionSize,
+        )
+      : createSourceStableVertexIds(
+          source.sourceId,
+          source.vertexIds,
+          source.boundaryEdgeMasks,
+          source.boundaryWeldKeys,
+        ),
+    normals: result.normals,
+    colors,
+    surfaceFields,
+    indices: result.indices,
+    featureLocks,
+    warnings: sourceValidation.warnings.length + validation.warnings.length,
+    hasArbitraryTopology: true,
+  }
+}
+
+function validateEditableSourceSnapshot(source: EditableSectionSourceSnapshot): void {
+  if (!source.sourceId || !Number.isInteger(source.revision) || source.revision < 0) {
+    throw new Error('Editable source identity or revision is invalid')
+  }
+  const vertexCount = source.positions.length / 3
+  const triangleCount = source.triangles.length / 3
+  if (
+    source.vertexIds.length !== vertexCount ||
+    source.triangleIds.length !== triangleCount
+  ) {
+    throw new Error('Editable source stable IDs do not match its topology')
+  }
+  if (
+    source.boundaryEdgeMasks.length !== vertexCount ||
+    source.ownedBoundaryEdgeMasks.length !== vertexCount ||
+    source.boundaryWeldKeys.length !== vertexCount * 2
+  ) {
+    throw new Error('Editable source boundary metadata does not match its vertices')
+  }
+  validateUniqueIds(source.vertexIds, 'vertex')
+  validateUniqueIds(source.triangleIds, 'triangle')
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const boundary = source.boundaryEdgeMasks[vertex]
+    const owned = source.ownedBoundaryEdgeMasks[vertex]
+    if ((boundary & ~0x0f) !== 0 || (owned & ~0x0f) !== 0) {
+      throw new Error(`Editable source vertex ${vertex} has an invalid boundary mask`)
+    }
+    if ((owned & boundary) !== owned) {
+      throw new Error(`Editable source vertex ${vertex} owns a non-boundary edge`)
+    }
+    if (
+      boundary !== 0 &&
+      source.boundaryWeldKeys[vertex * 2] === 0 &&
+      source.boundaryWeldKeys[vertex * 2 + 1] === 0
+    ) {
+      throw new Error(`Editable source boundary vertex ${vertex} has no weld key`)
+    }
+  }
+  validateAttributes(source.vertexAttributes, vertexCount, 'vertex')
+  validateAttributes(source.triangleAttributes, triangleCount, 'triangle')
+}
+
+function validateUniqueIds(ids: Uint32Array, label: string): void {
+  const unique = new Set<number>()
+  for (const id of ids) {
+    if (id === 0) throw new Error(`Editable source ${label} ID 0 is reserved`)
+    if (unique.has(id)) throw new Error(`Editable source repeats ${label} ID ${id}`)
+    unique.add(id)
+  }
+}
+
+function validateAttributes(
+  attributes: readonly EditableSectionSourceSnapshot['vertexAttributes'][number][],
+  elementCount: number,
+  label: string,
+): void {
+  const names = new Set<string>()
+  for (const attribute of attributes) {
+    if (names.has(attribute.name)) {
+      throw new Error(`Editable source repeats ${label} attribute ${attribute.name}`)
+    }
+    names.add(attribute.name)
+    if (
+      !Number.isInteger(attribute.itemSize) ||
+      attribute.itemSize < 1 ||
+      attribute.values.length !== elementCount * attribute.itemSize
+    ) {
+      throw new Error(`Editable source ${label} attribute ${attribute.name} is malformed`)
+    }
+    for (const value of attribute.values) {
+      if (!Number.isFinite(value)) {
+        throw new Error(
+          `Editable source ${label} attribute ${attribute.name} is not finite`,
+        )
+      }
+    }
+  }
+}
+
+function sourceVertexAttribute(
+  source: EditableSectionSourceSnapshot,
+  name: string,
+  requiredItemSize?: number,
+): Float32Array | undefined {
+  const attribute = source.vertexAttributes.find((candidate) => candidate.name === name)
+  if (!attribute) return undefined
+  if (requiredItemSize !== undefined && attribute.itemSize !== requiredItemSize) {
+    return undefined
+  }
+  return attribute.values
+}
+
+function normalizedNormals(source: Float32Array): Float32Array {
+  const normals = source.slice()
+  for (let offset = 0; offset < normals.length; offset += 3) {
+    const length = Math.hypot(
+      normals[offset],
+      normals[offset + 1],
+      normals[offset + 2],
+    ) || 1
+    normals[offset] /= length
+    normals[offset + 1] /= length
+    normals[offset + 2] /= length
+  }
+  return normals
+}
+
+function normalizedColors(source: Float32Array, vertexCount: number): Float32Array {
+  const itemSize = source.length / vertexCount
+  if (itemSize !== 3 && itemSize !== 4) {
+    return new Float32Array(vertexCount * 3).fill(1)
+  }
+  const colors = new Float32Array(vertexCount * 3)
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    colors[vertex * 3] = clamp(source[vertex * itemSize], 0, 1)
+    colors[vertex * 3 + 1] = clamp(source[vertex * itemSize + 1], 0, 1)
+    colors[vertex * 3 + 2] = clamp(source[vertex * itemSize + 2], 0, 1)
+  }
+  return colors
+}
+
+function createSourceStableVertexIds(
+  sourceId: string,
+  localIds: Uint32Array,
+  boundaryMasks: Uint8Array,
+  boundaryWeldKeys: Uint32Array,
+): Uint32Array {
+  const ids = new Uint32Array(localIds.length * 2)
+  const namespace = hashString(sourceId) || 1
+  for (let vertex = 0; vertex < localIds.length; vertex += 1) {
+    if (boundaryMasks[vertex] !== 0) {
+      ids[vertex * 2] = boundaryWeldKeys[vertex * 2]
+      ids[vertex * 2 + 1] = boundaryWeldKeys[vertex * 2 + 1]
+    } else {
+      ids[vertex * 2] = namespace
+      ids[vertex * 2 + 1] = localIds[vertex]
+    }
+  }
+  return ids
+}
+
+function createDerivedStableVertexIds(
+  namespaceValue: string,
+  positions: Float32Array,
+  sectionKey?: SectionKey,
+  sectionSize?: number,
+): Uint32Array {
+  const vertexCount = positions.length / 3
+  const ids = new Uint32Array(vertexCount * 2)
+  const namespace = hashString(namespaceValue) || 1
+  const boundaryEpsilon = sectionSize === undefined
+    ? 0
+    : Math.max(1e-4, sectionSize * 1e-5)
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    const offset = vertex * 3
+    if (
+      sectionKey &&
+      sectionSize !== undefined &&
+      (
+        Math.abs(positions[offset]) <= boundaryEpsilon ||
+        Math.abs(positions[offset] - sectionSize) <= boundaryEpsilon ||
+        Math.abs(positions[offset + 2]) <= boundaryEpsilon ||
+        Math.abs(positions[offset + 2] - sectionSize) <= boundaryEpsilon
+      )
+    ) {
+      const [low, high] = boundaryWeldKey(
+        sectionKey.x * sectionSize + positions[offset],
+        positions[offset + 1],
+        sectionKey.z * sectionSize + positions[offset + 2],
+      )
+      ids[vertex * 2] = low
+      ids[vertex * 2 + 1] = high
+      continue
+    }
+    let local = 0x811c9dc5
+    local = hashNumber(local, Math.round(positions[offset] * 10_000))
+    local = hashNumber(local, Math.round(positions[offset + 1] * 10_000))
+    local = hashNumber(local, Math.round(positions[offset + 2] * 10_000))
+    local = hashNumber(local, vertex + 1)
+    ids[vertex * 2] = namespace
+    ids[vertex * 2 + 1] = (local >>> 0) || 1
+  }
+  return ids
+}
+
+function createParametricStableVertexIds(
+  namespaceValue: string,
+  positions: Float32Array,
+  parameters: readonly number[],
+  originX: number,
+  originZ: number,
+  sectionSize: number,
+): Uint32Array {
+  const ids = createDerivedStableVertexIds(namespaceValue, positions)
+  const epsilon = Math.max(1e-4, sectionSize * 1e-5)
+  for (let vertex = 0; vertex < positions.length / 3; vertex += 1) {
+    const worldX = parameters[vertex * 2]
+    const worldZ = parameters[vertex * 2 + 1]
+    if (
+      Math.abs(worldX - originX) > epsilon &&
+      Math.abs(worldX - (originX + sectionSize)) > epsilon &&
+      Math.abs(worldZ - originZ) > epsilon &&
+      Math.abs(worldZ - (originZ + sectionSize)) > epsilon
+    ) {
+      continue
+    }
+    const [low, high] = boundaryWeldKey(worldX, 0, worldZ)
+    ids[vertex * 2] = low
+    ids[vertex * 2 + 1] = high
+  }
+  return ids
+}
+
+function hashString(value: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193)
+  }
+  return hash >>> 0
+}
+
+function hashNumber(hash: number, value: number): number {
+  return Math.imul(hash ^ (value | 0), 0x01000193)
 }
 
 function createFeatureLocks(

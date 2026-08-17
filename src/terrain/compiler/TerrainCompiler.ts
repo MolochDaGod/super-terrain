@@ -1,5 +1,6 @@
 import type { TerrainConfig } from '../config'
 import type { CompiledSection, SectionKey } from '../core/types'
+import type { TerrainSectionSourceSnapshot } from '../mesh/EditableMesh'
 import type { TerrainModifier } from '../modifiers/types'
 import {
   TerrainWorkerPool,
@@ -46,8 +47,9 @@ export class TerrainCompiler {
     priority: number,
     modifiers: TerrainModifier[],
     levels?: readonly number[],
+    source?: TerrainSectionSourceSnapshot,
   ): number {
-    return this.pool.submit(key, revision, priority, modifiers, levels)
+    return this.pool.submit(key, revision, priority, modifiers, levels, source)
   }
 
   cancel(
