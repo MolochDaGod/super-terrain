@@ -27,6 +27,8 @@ export interface TerrainSection {
   requestedLod: number
   buildJobId?: number
   buildingRevision?: number
+  /** Finest global LOD level requested by the current worker job. */
+  buildingLod?: number
   error?: string
 }
 
@@ -114,13 +116,14 @@ export class MeshPartition {
     section.error = undefined
   }
 
-  markBuilding(section: TerrainSection, jobId: number): void {
+  markBuilding(section: TerrainSection, jobId: number, minimumLod = 0): void {
     terrainAssert(
       section.buildJobId !== jobId,
       `Duplicate build ${jobId} for section ${section.id}`,
     )
     section.buildJobId = jobId
     section.buildingRevision = section.revision
+    section.buildingLod = minimumLod
     section.buildState = 'building'
   }
 
@@ -130,6 +133,7 @@ export class MeshPartition {
     section.buildState = 'ready'
     section.buildJobId = undefined
     section.buildingRevision = undefined
+    section.buildingLod = undefined
     return true
   }
 

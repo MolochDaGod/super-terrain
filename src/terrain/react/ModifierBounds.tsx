@@ -56,7 +56,9 @@ export function ModifierBounds({ terrain, editor }: ModifierBoundsProps) {
       Math.max(0.01, bounds.max.z - bounds.min.z),
     )
     material.color.set(
-      modifier.type === 'boolean-subtract' ? 0xffa56f : 0x77e8be,
+      modifier.type === 'boolean-subtract' || modifier.type === 'boolean-volume'
+        ? 0xffa56f
+        : 0x77e8be,
     )
   })
 

@@ -22,7 +22,7 @@ export function projectedGeometricError(
 
 export function selectLod(input: LodSelectionInput): number {
   if (input.lods.length === 0) return 0
-  let candidate = 0
+  let candidateIndex = 0
   for (let index = input.lods.length - 1; index >= 0; index -= 1) {
     const error = projectedGeometricError(
       input.lods[index].geometricError,
@@ -31,30 +31,86 @@ export function selectLod(input: LodSelectionInput): number {
       input.verticalFovRadians,
     )
     if (error <= input.errorTolerancePixels) {
-      candidate = index
+      candidateIndex = index
       break
     }
   }
 
-  const current = clamp(input.currentLod, 0, input.lods.length - 1)
-  if (candidate === current) return current
-  if (candidate < current) {
+  const currentIndex = closestLodIndex(input.lods, input.currentLod)
+  const candidate = input.lods[candidateIndex]
+  const current = input.lods[currentIndex]
+  if (candidate.level === current.level) return current.level
+  if (candidate.level < current.level) {
     const currentError = projectedGeometricError(
-      input.lods[current].geometricError,
+      current.geometricError,
       input.distance,
       input.viewportHeight,
       input.verticalFovRadians,
     )
-    return currentError > input.errorTolerancePixels * 1.16 ? candidate : current
+    return currentError > input.errorTolerancePixels * 1.16
+      ? candidate.level
+      : current.level
   }
 
   const candidateError = projectedGeometricError(
-    input.lods[candidate].geometricError,
+    candidate.geometricError,
     input.distance,
     input.viewportHeight,
     input.verticalFovRadians,
   )
-  return candidateError < input.errorTolerancePixels * 0.72 ? candidate : current
+  return candidateError < input.errorTolerancePixels * 0.72
+    ? candidate.level
+    : current.level
+}
+
+export interface SourceLodSelectionInput {
+  lodResolutions: readonly number[]
+  sectionSize: number
+  distance: number
+  viewportHeight: number
+  verticalFovRadians: number
+  errorTolerancePixels: number
+}
+
+/**
+ * Coarsest source grid that is already below the current screen-space error.
+ * This lets streaming build what can be displayed now instead of eagerly
+ * generating hidden LOD0 topology for every section in the working set.
+ */
+export function selectSourceLod(input: SourceLodSelectionInput): number {
+  const lastLevel = input.lodResolutions.length - 1
+  for (let level = lastLevel; level > 0; level -= 1) {
+    const resolution = input.lodResolutions[level]
+    const geometricError =
+      (input.sectionSize / Math.max(1, resolution)) * 0.075
+    if (
+      projectedGeometricError(
+        geometricError,
+        input.distance,
+        input.viewportHeight,
+        input.verticalFovRadians,
+      ) <= input.errorTolerancePixels
+    ) {
+      return level
+    }
+  }
+  return 0
+}
+
+function closestLodIndex(
+  lods: readonly Pick<CompiledLOD, 'level'>[],
+  requested: number,
+): number {
+  let closest = 0
+  let closestDistance = Infinity
+  for (let index = 0; index < lods.length; index += 1) {
+    const distance = Math.abs(lods[index].level - requested)
+    if (distance < closestDistance) {
+      closest = index
+      closestDistance = distance
+    }
+  }
+  return clamp(closest, 0, lods.length - 1)
 }
 
 export interface LodNeighborNode {

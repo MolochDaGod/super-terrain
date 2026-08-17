@@ -7,12 +7,15 @@ import type {
   SectionKey,
 } from '../core/types'
 import { validateMeshData } from '../mesh/MeshValidation'
+import type { CutterVolume } from '../modifiers/boolean/CutterVolume'
 import {
   BvhCsgTunnelBooleanBackend,
+  tunnelCutterVolumes,
   type BooleanMeshBuffers,
 } from '../modifiers/boolean/MeshBooleanBackend'
 import type {
   BooleanSubtractModifier,
+  BooleanVolumeModifier,
   BrushStrokeModifier,
   RemeshModifier,
   TerrainModifier,
@@ -74,18 +77,15 @@ export function compileTerrainSection(
   if (requestedLevels.length === 0) {
     throw new Error('Section compile requested no valid LOD levels')
   }
-  const hasLocalAuthoring = modifiers.some(
+  const requiresAuthoritativeSource = modifiers.some(
     (modifier) =>
       modifier.enabled &&
-      (modifier.type === 'brush-stroke' ||
-        modifier.type === 'boolean-subtract' ||
-        modifier.type === 'remesh' ||
-        modifier.type === 'tessellate'),
+      modifier.type === 'brush-stroke',
   )
-  // Local edits must always be sampled by the finest authoritative grid, even
-  // when a caller asks for only a distant LOD. Procedural capture requests can
-  // start at their finest requested level and avoid compiling hidden detail.
-  const sourceLevel = hasLocalAuthoring ? 0 : requestedLevels[0]
+  // A brush can fall between coarse grid samples, so it must simplify from the
+  // authoritative source. Exact CSG intersects triangle faces directly and is
+  // safe to evaluate on the requested screen-error grid, then refine later.
+  const sourceLevel = requiresAuthoritativeSource ? 0 : requestedLevels[0]
   const sourceResolution = request.config.lodResolutions[sourceLevel]
   const source = generateSectionMesh(
     request.key,
@@ -364,12 +364,32 @@ function generateSectionMesh(
   const originZ = key.z * sectionSize
   const densityModifiers = modifiers.filter(
     (modifier): modifier is RemeshModifier | TessellateModifier =>
-      modifier.type === 'remesh' || modifier.type === 'tessellate',
+      modifier.enabled &&
+      (modifier.type === 'remesh' || modifier.type === 'tessellate') &&
+      densityModifierOverlapsSection(
+        modifier,
+        originX,
+        originZ,
+        sectionSize,
+      ),
   )
   const tunnels = modifiers.filter(
     (modifier): modifier is BooleanSubtractModifier =>
-      modifier.type === 'boolean-subtract',
+      modifier.enabled && modifier.type === 'boolean-subtract',
   )
+  const volumeBooleans = modifiers.filter(
+    (modifier): modifier is BooleanVolumeModifier =>
+      modifier.enabled && modifier.type === 'boolean-volume',
+  )
+  // Arbitrary topology is authored through bounded modifiers. Keeping cutters
+  // in the modifier stack is what makes the height-derived base cheap, keeps
+  // unrelated sections untouched, and preserves non-destructive build order.
+  // Procedural content can still create these modifiers, but the compiler must
+  // never inject world-wide booleans behind the stack's back.
+  const cutters: CutterVolume[] = [
+    ...tunnels.flatMap(tunnelCutterVolumes),
+    ...volumeBooleans.flatMap((modifier) => modifier.volumes),
+  ]
   const xAxis = createAdaptiveAxis(
     originX,
     sectionSize,
@@ -434,14 +454,15 @@ function generateSectionMesh(
     interiorVertices: new Uint8Array(positionArray.length / 3),
   }
   const result =
-    tunnels.length > 0
+    cutters.length > 0
       ? tunnelBackend.subtract(
           baseBuffers,
-          tunnels,
+          cutters,
           originX,
           originZ,
           sectionSize,
           1,
+          seed,
         )
       : baseBuffers
 
@@ -470,7 +491,6 @@ function generateSectionMesh(
     indices: result.indices,
     featureLocks: createFeatureLocks(
       result.positions,
-      result.interiorVertices,
       originX,
       originZ,
       sectionSize,
@@ -479,13 +499,12 @@ function generateSectionMesh(
     ),
     warnings: validation.warnings.length,
     hasArbitraryTopology:
-      tunnels.length > 0 || hasLateralDisplacement(modifiers),
+      cutters.length > 0 || hasLateralDisplacement(modifiers),
   }
 }
 
 function createFeatureLocks(
   positions: Float32Array,
-  interiorVertices: Uint8Array,
   originX: number,
   originZ: number,
   sectionSize: number,
@@ -510,7 +529,6 @@ function createFeatureLocks(
     const y = positions[offset + 1]
     const localZ = positions[offset + 2]
     if (
-      interiorVertices[vertex] === 1 ||
       localX <= boundaryEpsilon ||
       localX >= sectionSize - boundaryEpsilon ||
       localZ <= boundaryEpsilon ||
@@ -524,10 +542,25 @@ function createFeatureLocks(
     const z = originZ + localZ
     for (const modifier of localModifiers) {
       if (modifier.type === 'boolean-subtract') {
-        if (insideExpandedBounds(x, y, z, modifier.bounds, padding)) {
-          locks[vertex] = 1
-          break
+        // Only the portal rims need explicit locks. Locking the complete tunnel
+        // AABB (and every interior vertex) prevented QEM from reducing a cave at
+        // all, leaving thousands of near-field triangles in distant LODs. The
+        // material seam around each opening is also a mesh border protected by
+        // LockBorder; this small spatial lock makes that contract explicit.
+        const portalRadius = modifier.radius * 1.4 + padding
+        for (const portal of modifier.portals) {
+          if (
+            Math.hypot(
+              x - portal.x,
+              y - portal.y,
+              z - portal.z,
+            ) <= portalRadius
+          ) {
+            locks[vertex] = 1
+            break
+          }
         }
+        if (locks[vertex] === 1) break
         continue
       }
 
@@ -558,23 +591,6 @@ function createFeatureLocks(
     }
   }
   return locks
-}
-
-function insideExpandedBounds(
-  x: number,
-  y: number,
-  z: number,
-  bounds: AABB,
-  padding: number,
-): boolean {
-  return (
-    x >= bounds.min.x - padding &&
-    x <= bounds.max.x + padding &&
-    y >= bounds.min.y - padding &&
-    y <= bounds.max.y + padding &&
-    z >= bounds.min.z - padding &&
-    z <= bounds.max.z + padding
-  )
 }
 
 const PACKED_UNIT_MAX = 65_535
@@ -851,16 +867,39 @@ function createAdaptiveAxis(
     const center = modifier.center[axis]
     const minimum = Math.max(origin, center - modifier.radius)
     const maximum = Math.min(origin + size, center + modifier.radius)
-    const spacing = clamp(modifier.targetEdgeLength, size / 96, size / 6)
+    // ModifierStack queries with an operation halo so a worker can rebuild
+    // neighbouring ownership borders. A density sphere inside that halo may
+    // still have no overlap with this section itself. Without this guard the
+    // inverted interval inserted the modifier edge *outside* the section,
+    // stretching the cell across its neighbour before CSG ran.
+    if (maximum <= minimum) continue
+    const spacing = clamp(modifier.targetEdgeLength, size / 256, size / 6)
     const maxLines = 48
-    let lines = 0
-    for (let coordinate = minimum; coordinate <= maximum && lines < maxLines; coordinate += spacing) {
-      coordinates.add(roundCoordinate(coordinate))
-      lines += 1
+    const lineCount = Math.max(
+      1,
+      Math.min(maxLines, Math.ceil((maximum - minimum) / spacing)),
+    )
+    for (let line = 0; line <= lineCount; line += 1) {
+      coordinates.add(
+        roundCoordinate(minimum + ((maximum - minimum) * line) / lineCount),
+      )
     }
-    coordinates.add(roundCoordinate(maximum))
   }
   return [...coordinates].sort((a, b) => a - b)
+}
+
+function densityModifierOverlapsSection(
+  modifier: RemeshModifier | TessellateModifier,
+  originX: number,
+  originZ: number,
+  sectionSize: number,
+): boolean {
+  const nearestX = clamp(modifier.center.x, originX, originX + sectionSize)
+  const nearestZ = clamp(modifier.center.z, originZ, originZ + sectionSize)
+  return Math.hypot(
+    modifier.center.x - nearestX,
+    modifier.center.z - nearestZ,
+  ) < modifier.radius
 }
 
 function roundCoordinate(value: number): number {

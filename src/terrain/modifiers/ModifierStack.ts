@@ -1,5 +1,6 @@
 import { intersects } from '../core/bounds'
 import type { AABB } from '../core/types'
+import { cloneCutterVolume } from './boolean/CutterVolume'
 import type { TerrainModifier } from './types'
 import { normalizeTunnelModifier } from './tunnel'
 import { modifierWorldBounds, normalizedTransform } from './transform'
@@ -115,6 +116,19 @@ export function cloneModifier(modifier: TerrainModifier): TerrainModifier {
         ...portal,
         normal: { ...portal.normal },
       })) as typeof normalized.portals,
+    }
+    clone.bounds = modifierWorldBounds(clone)
+    return clone
+  }
+  if (modifier.type === 'boolean-volume') {
+    const clone: TerrainModifier = {
+      ...modifier,
+      transform,
+      bounds: {
+        min: { ...modifier.bounds.min },
+        max: { ...modifier.bounds.max },
+      },
+      volumes: modifier.volumes.map(cloneCutterVolume),
     }
     clone.bounds = modifierWorldBounds(clone)
     return clone

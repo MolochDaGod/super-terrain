@@ -35,7 +35,12 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   workerCount: Math.max(2, Math.min(4, availableWorkers - 2)),
   targetFps: 30,
   baseLodErrorPixels: 2.2,
-  renderRadiusSections: 10,
+  // The far-field proxy already carries the horizon. Keep only the nearest
+  // kilometre of editable sections resident at launch; the projected-view
+  // calculation still expands this radius automatically when the camera pulls
+  // back. A radius of ten forced ~120 extra worker compiles before the initial
+  // editor view could settle without improving anything visible in that view.
+  renderRadiusSections: 8,
   maxRenderRadiusSections: 22,
   prefetchSections: 2,
   maxGpuBytes: 256 * 1024 * 1024,

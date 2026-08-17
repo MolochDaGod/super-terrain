@@ -71,4 +71,44 @@ describe('frame budget scheduler', () => {
     scheduler.runFrame()
     expect(swap).toHaveBeenCalledOnce()
   })
+
+  it('admits one task that can never fit inside the absolute upload cap', () => {
+    const scheduler = new FrameBudgetScheduler({
+      cpuTerrainMs: 2,
+      gpuUploadBytes: 1_000,
+      sectionSwaps: 2,
+    })
+    const oversized = vi.fn()
+    const following = vi.fn()
+    scheduler.beginFrame(16)
+    scheduler.enqueue({
+      id: 'dense-csg-section',
+      kind: 'swap',
+      priority: 10,
+      estimatedCpuMs: 0.42,
+      uploadBytes: 1_050,
+      swaps: 1,
+      run: oversized,
+    })
+    scheduler.enqueue({
+      id: 'ordinary-section',
+      kind: 'swap',
+      priority: 1,
+      estimatedCpuMs: 0.1,
+      uploadBytes: 100,
+      swaps: 1,
+      run: following,
+    })
+
+    scheduler.runFrame()
+
+    expect(oversized).toHaveBeenCalledOnce()
+    expect(following).not.toHaveBeenCalled()
+    expect(scheduler.uploadedBytesThisFrame).toBe(1_050)
+    expect(scheduler.pendingTaskCount).toBe(1)
+
+    scheduler.beginFrame(16)
+    scheduler.runFrame()
+    expect(following).toHaveBeenCalledOnce()
+  })
 })

@@ -1,15 +1,19 @@
 import {
   BufferAttribute,
   BufferGeometry,
-  CapsuleGeometry,
+  Matrix4,
   MeshBasicMaterial,
-  Quaternion,
-  Vector3,
 } from 'three'
 import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg'
 import type { BooleanSubtractModifier } from '../types'
 import { transformedTunnel } from '../transform'
 import { tunnelPathPoints } from '../tunnel'
+import {
+  cutterBounds,
+  cutterGeometry,
+  type SweepRing,
+  type CutterVolume,
+} from './CutterVolume'
 
 export interface BooleanMeshBuffers {
   positions: Float32Array
@@ -22,12 +26,83 @@ export interface MeshBooleanBackend {
   readonly id: string
   subtract(
     target: BooleanMeshBuffers,
-    modifiers: BooleanSubtractModifier[],
+    cutters: CutterVolume[],
     sectionOriginX: number,
     sectionOriginZ: number,
     sectionSize: number,
     detail: number,
+    seed?: number,
   ): BooleanMeshBuffers
+}
+
+/**
+ * The world-space volumes an authored tunnel removes.
+ *
+ * A tunnel is emitted as one continuous, closed sweep rather than as several
+ * overlapping capsules. The whole passage therefore receives the same varying
+ * cross-section and displacement before one exact Boolean subtraction.
+ */
+export function tunnelCutterVolumes(
+  modifier: BooleanSubtractModifier,
+): CutterVolume[] {
+  const tunnel = transformedTunnel(modifier)
+  return [
+    {
+      kind: 'sweep',
+      rings: createTunnelSweep(tunnelPathPoints(tunnel), tunnel.radius),
+      surface: 'cave',
+    },
+  ]
+}
+
+function createTunnelSweep(
+  controls: ReturnType<typeof tunnelPathPoints>,
+  radius: number,
+): SweepRing[] {
+  const controlLength =
+    distance(controls[0], controls[1]) +
+    distance(controls[1], controls[2]) +
+    distance(controls[2], controls[3])
+  const segments = Math.max(24, Math.min(96, Math.ceil(controlLength / 3)))
+  const rings: SweepRing[] = []
+  for (let segment = 0; segment <= segments; segment += 1) {
+    const t = segment / segments
+    const point = cubicBezier(controls, t)
+    const interior = Math.sin(Math.PI * t)
+    const broadSwell = Math.sin(Math.PI * t * 2.35 + 0.4) * interior
+    const narrowSwell = Math.sin(Math.PI * t * 5.2 + 1.7) * interior
+    rings.push({
+      ...point,
+      horizontalRadius:
+        radius * (0.94 + interior * 0.12 + broadSwell * 0.08),
+      verticalRadius:
+        radius * (0.78 + interior * 0.08 + narrowSwell * 0.055),
+    })
+  }
+  return rings
+}
+
+function cubicBezier(
+  points: ReturnType<typeof tunnelPathPoints>,
+  t: number,
+): { x: number; y: number; z: number } {
+  const inverse = 1 - t
+  const a = inverse * inverse * inverse
+  const b = 3 * inverse * inverse * t
+  const c = 3 * inverse * t * t
+  const d = t * t * t
+  return {
+    x: points[0].x * a + points[1].x * b + points[2].x * c + points[3].x * d,
+    y: points[0].y * a + points[1].y * b + points[2].y * c + points[3].y * d,
+    z: points[0].z * a + points[1].z * b + points[2].z * c + points[3].z * d,
+  }
+}
+
+function distance(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+): number {
+  return Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z)
 }
 
 /**
@@ -45,53 +120,87 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
 
   subtract(
     target: BooleanMeshBuffers,
-    modifiers: BooleanSubtractModifier[],
+    cutters: CutterVolume[],
     sectionOriginX: number,
     sectionOriginZ: number,
     sectionSize: number,
     detail: number,
+    seed = 0,
   ): BooleanMeshBuffers {
-    if (modifiers.length === 0) return target
+    if (cutters.length === 0) return target
+
+    const sectionMaximumX = sectionOriginX + sectionSize
+    const sectionMaximumZ = sectionOriginZ + sectionSize
+    const localCutters = cutters.filter((cutter) => {
+      const bounds = cutterBounds(cutter)
+      return (
+        bounds.min.x <= sectionMaximumX &&
+        bounds.max.x >= sectionOriginX &&
+        bounds.min.z <= sectionMaximumZ &&
+        bounds.max.z >= sectionOriginZ
+      )
+    })
+    if (localCutters.length === 0) return target
+
+    // Tunnel segments deliberately overlap at bends. Concatenating those shells
+    // into one Brush creates a self-intersecting, non-manifold cutter; exact CSG
+    // then classifies large parts of the section inconsistently and can erase a
+    // whole tile. Apply each closed volume as its own Boolean instead. The result
+    // is exactly target \ union(cutters), including where the volumes overlap.
+    const geometries = localCutters.map((cutter) =>
+      cutterGeometry(cutter, detail, seed),
+    )
+    const translation = new Matrix4().makeTranslation(
+      -sectionOriginX,
+      0,
+      -sectionOriginZ,
+    )
 
     const evaluator = new Evaluator()
     evaluator.attributes = ['position', 'normal']
     evaluator.useGroups = true
-    let result = this.createTerrainSolid(target, sectionSize)
 
-    for (const modifier of modifiers) {
-      const tunnel = transformedTunnel(modifier)
-      for (const [start, end] of tunnelSegments(
-        tunnel,
-        sectionOriginX,
-        sectionOriginZ,
-      )) {
-        const cutter = this.createCapsuleBrush(
-          start,
-          end,
-          tunnel.radius,
-          detail,
-        )
-        const previous = result
-        result = evaluator.evaluate(previous, cutter, SUBTRACTION)
-        if (previous !== result) previous.geometry.dispose()
-        cutter.geometry.dispose()
-      }
+    let result = this.createTerrainSolid(target, sectionSize, geometries)
+    for (const geometry of geometries) {
+      geometry.applyMatrix4(translation)
+      const cutterBrush = new Brush(geometry, this.interiorMaterial)
+      cutterBrush.updateMatrixWorld(true)
+      const previous = result
+      result = evaluator.evaluate(previous, cutterBrush, SUBTRACTION)
+      if (result !== previous) previous.geometry.dispose()
+      cutterBrush.geometry.dispose()
     }
 
     const extracted = this.extractVisibleGeometry(result)
     snapSectionBoundaryVertices(extracted.positions, sectionSize)
     result.geometry.dispose()
-    return extracted
+    return isUsableBooleanResult(extracted) ? extracted : target
   }
 
   private createTerrainSolid(
     target: BooleanMeshBuffers,
     sectionSize: number,
+    cutters: readonly BufferGeometry[] = [],
   ): Brush {
     const vertexCount = target.positions.length / 3
     let minimumY = Infinity
     for (let offset = 1; offset < target.positions.length; offset += 3) {
       minimumY = Math.min(minimumY, target.positions[offset])
+    }
+    // The floor has to clear the deepest cutter as well as the terrain.
+    //
+    // A cutter that reaches past it punches through the artificial bottom cap,
+    // and because that cap sits at a depth derived from each section's own
+    // lowest vertex, two neighbouring sections cut it at different heights and
+    // leave a crack along their shared edge — plus a skirt of stray interior
+    // faces hanging in the void underneath. Keeping the cap strictly below
+    // everything that will be subtracted means it is never cut at all.
+    for (const cutter of cutters) {
+      const positions = cutter.getAttribute('position')
+      const array = positions.array as Float32Array
+      for (let offset = 1; offset < array.length; offset += 3) {
+        minimumY = Math.min(minimumY, array[offset])
+      }
     }
     const bottomY = minimumY - Math.max(64, sectionSize * 0.75)
     const positions = new Float32Array(target.positions.length * 2)
@@ -141,33 +250,6 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
       this.surfaceMaterial,
       this.closureMaterial,
     ])
-    brush.updateMatrixWorld(true)
-    return brush
-  }
-
-  private createCapsuleBrush(
-    start: Vector3,
-    end: Vector3,
-    radius: number,
-    detail: number,
-  ): Brush {
-    const direction = end.clone().sub(start)
-    const distance = Math.max(0.1, direction.length())
-    direction.normalize()
-    const geometry = new CapsuleGeometry(
-      radius,
-      distance,
-      Math.max(4, Math.round(5 * detail)),
-      Math.max(8, Math.round(12 * detail)),
-    )
-    geometry.deleteAttribute('uv')
-    geometry.clearGroups()
-    geometry.addGroup(0, geometry.getIndex()?.count ?? 0, 0)
-    const brush = new Brush(geometry, this.interiorMaterial)
-    brush.position.copy(start).add(end).multiplyScalar(0.5)
-    brush.quaternion.copy(
-      new Quaternion().setFromUnitVectors(new Vector3(0, 1, 0), direction),
-    )
     brush.updateMatrixWorld(true)
     return brush
   }
@@ -233,6 +315,18 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
   }
 }
 
+function isUsableBooleanResult(result: BooleanMeshBuffers): boolean {
+  const vertexCount = result.positions.length / 3
+  if (vertexCount < 3 || result.indices.length < 3) return false
+  for (const value of result.positions) {
+    if (!Number.isFinite(value)) return false
+  }
+  for (const index of result.indices) {
+    if (index >= vertexCount) return false
+  }
+  return true
+}
+
 function isDegenerateTriangle(
   positions: BufferAttribute,
   triangle: number[],
@@ -271,17 +365,6 @@ function addEdge(edges: Map<string, BoundaryEdge>, a: number, b: number): void {
   const existing = edges.get(key)
   if (existing) existing.count += 1
   else edges.set(key, { a, b, count: 1 })
-}
-
-function tunnelSegments(
-  modifier: BooleanSubtractModifier,
-  originX: number,
-  originZ: number,
-): [Vector3, Vector3][] {
-  const points = tunnelPathPoints(modifier).map(
-    (point) => new Vector3(point.x - originX, point.y, point.z - originZ),
-  )
-  return points.slice(0, -1).map((point, index) => [point, points[index + 1]])
 }
 
 /**

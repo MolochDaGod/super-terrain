@@ -3,7 +3,9 @@ import {
   Activity,
   Gem,
   HelpCircle,
+  Orbit,
   Pencil,
+  Plane,
   RotateCcw,
   Save,
   Sparkles,
@@ -58,7 +60,7 @@ export function TopBar({ terrain, editor }: TopBarProps) {
         </div>
       </div>
 
-      <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-2 md:flex">
+      <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-2 2xl:flex">
         <span
           className={`size-1.5 rounded-full ${metrics.workerActiveJobs > 0 ? 'animate-pulse bg-[#65e8ff]' : 'bg-[#77e8be]'}`}
         />
@@ -70,6 +72,22 @@ export function TopBar({ terrain, editor }: TopBarProps) {
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
+        <div className="mr-1 flex items-center gap-0.5 rounded-md border border-white/[0.07] bg-white/[0.035] p-0.5">
+          <RenderModeButton
+            active={editorSnapshot.cameraMode === 'orbit'}
+            label="Orbit camera"
+            onClick={() => editor.patch({ cameraMode: 'orbit', status: 'Orbit camera active' })}
+          >
+            <Orbit size={12} /> Orbit
+          </RenderModeButton>
+          <RenderModeButton
+            active={editorSnapshot.cameraMode === 'fly'}
+            label="Fly camera — mouse look, WASD move, Shift boost"
+            onClick={() => editor.patch({ cameraMode: 'fly' })}
+          >
+            <Plane size={12} /> Fly
+          </RenderModeButton>
+        </div>
         <div className="mr-1 flex items-center gap-0.5 rounded-md border border-white/[0.07] bg-white/[0.035] p-0.5">
           <RenderModeButton
             active={editorSnapshot.renderMode === 'preview'}

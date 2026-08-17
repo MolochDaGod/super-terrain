@@ -9,8 +9,9 @@ import type {
 import { encodeModifiers } from './protocol'
 
 interface WorkerSlot {
+  index: number
   worker: Worker
-  jobId?: number
+  request?: CompileSectionRequest
 }
 
 interface QueuedJob {
@@ -23,6 +24,11 @@ export interface TerrainWorkerPoolStats {
   queued: number
   cancelled: number
   stale: number
+}
+
+export interface TerrainWorkerCancellation {
+  queued: number
+  active: number
 }
 
 export type WorkerResultHandler = (
@@ -44,14 +50,8 @@ export class TerrainWorkerPool {
   constructor(workerCount: number, config: TerrainConfig) {
     this.config = config
     for (let index = 0; index < workerCount; index += 1) {
-      const worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), {
-        type: 'module',
-        name: `terrain-compiler-${index}`,
-      })
-      const slot: WorkerSlot = { worker }
-      worker.onmessage = (event: MessageEvent<TerrainWorkerResponse>) =>
-        this.handleMessage(slot, event.data)
-      worker.onerror = (event) => this.handleWorkerError(slot, event.message)
+      const slot = { index } as WorkerSlot
+      this.installWorker(slot)
       this.slots.push(slot)
     }
   }
@@ -61,6 +61,7 @@ export class TerrainWorkerPool {
     revision: number,
     priority: number,
     modifiers: TerrainModifier[],
+    levels?: readonly number[],
   ): number {
     const id = sectionId(key)
     this.latestRevision.set(id, revision)
@@ -86,22 +87,23 @@ export class TerrainWorkerPool {
           seed: this.config.seed,
           operationHalo: this.config.operationHalo,
         },
+        levels: levels ? [...levels] : undefined,
         modifiers: encodeModifiers(modifiers),
       },
       submittedAt: performance.now(),
     })
-    this.queue.sort((a, b) => {
-      if (a.request.priority !== b.request.priority) {
-        return b.request.priority - a.request.priority
-      }
-      return a.submittedAt - b.submittedAt
-    })
+    this.sortQueue()
     this.dispatch()
     return jobId
   }
 
-  cancelSection(key: SectionKey, beforeRevision = Infinity): void {
+  cancelSection(
+    key: SectionKey,
+    beforeRevision = Infinity,
+  ): TerrainWorkerCancellation {
     const id = sectionId(key)
+    let queuedCount = 0
+    let activeCount = 0
     const retained: QueuedJob[] = []
     for (const queued of this.queue) {
       if (
@@ -109,9 +111,49 @@ export class TerrainWorkerPool {
         queued.request.revision <= beforeRevision
       ) {
         this.cancelled += 1
+        queuedCount += 1
       } else retained.push(queued)
     }
     this.queue = retained
+
+    // Worker computation is synchronous, so a message cannot interrupt it.
+    // Terminate and replace the module instead: departed travel work must not
+    // hold a slot for seconds while relevant sections pile up behind it.
+    for (const slot of this.slots) {
+      const request = slot.request
+      if (
+        request &&
+        sectionId(request.key) === id &&
+        request.revision <= beforeRevision
+      ) {
+        this.cancelled += 1
+        activeCount += 1
+        this.restartWorker(slot)
+      }
+    }
+    this.dispatch()
+    return { queued: queuedCount, active: activeCount }
+  }
+
+  reprioritizeSection(
+    key: SectionKey,
+    revision: number,
+    priority: number,
+  ): boolean {
+    const id = sectionId(key)
+    let changed = false
+    for (const queued of this.queue) {
+      if (
+        sectionId(queued.request.key) === id &&
+        queued.request.revision === revision &&
+        queued.request.priority !== priority
+      ) {
+        queued.request.priority = priority
+        changed = true
+      }
+    }
+    if (changed) this.sortQueue()
+    return changed
   }
 
   dispose(): void {
@@ -122,7 +164,7 @@ export class TerrainWorkerPool {
 
   stats(): TerrainWorkerPoolStats {
     return {
-      active: this.slots.filter((slot) => slot.jobId !== undefined).length,
+      active: this.slots.filter((slot) => slot.request !== undefined).length,
       queued: this.queue.length,
       cancelled: this.cancelled,
       stale: this.stale,
@@ -131,16 +173,17 @@ export class TerrainWorkerPool {
 
   private dispatch(): void {
     for (const slot of this.slots) {
-      if (slot.jobId !== undefined) continue
+      if (slot.request !== undefined) continue
       const job = this.queue.shift()
       if (!job) break
-      slot.jobId = job.request.jobId
+      slot.request = job.request
       slot.worker.postMessage(job.request, [job.request.modifiers.brushPoints.buffer])
     }
   }
 
   private handleMessage(slot: WorkerSlot, response: TerrainWorkerResponse): void {
-    slot.jobId = undefined
+    if (slot.request?.jobId !== response.jobId) return
+    slot.request = undefined
     const id = sectionId(response.key)
     const latest = this.latestRevision.get(id) ?? response.revision
     if (response.revision < latest) {
@@ -164,17 +207,46 @@ export class TerrainWorkerPool {
   }
 
   private handleWorkerError(slot: WorkerSlot, error: string): void {
-    const jobId = slot.jobId
-    slot.jobId = undefined
-    if (jobId !== undefined) {
+    const request = slot.request
+    slot.request = undefined
+    if (request) {
       this.onResult?.({
         ok: false,
-        jobId,
-        key: { x: 0, z: 0 },
-        revision: -1,
+        jobId: request.jobId,
+        key: request.key,
+        revision: request.revision,
         error,
       })
     }
     this.dispatch()
+  }
+
+  private installWorker(slot: WorkerSlot): void {
+    const worker = new Worker(new URL('./terrain.worker.ts', import.meta.url), {
+      type: 'module',
+      name: `terrain-compiler-${slot.index}`,
+    })
+    slot.worker = worker
+    worker.onmessage = (event: MessageEvent<TerrainWorkerResponse>) => {
+      if (slot.worker === worker) this.handleMessage(slot, event.data)
+    }
+    worker.onerror = (event) => {
+      if (slot.worker === worker) this.handleWorkerError(slot, event.message)
+    }
+  }
+
+  private restartWorker(slot: WorkerSlot): void {
+    slot.worker.terminate()
+    slot.request = undefined
+    this.installWorker(slot)
+  }
+
+  private sortQueue(): void {
+    this.queue.sort((a, b) => {
+      if (a.request.priority !== b.request.priority) {
+        return b.request.priority - a.request.priority
+      }
+      return a.submittedAt - b.submittedAt
+    })
   }
 }

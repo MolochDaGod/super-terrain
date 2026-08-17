@@ -1,7 +1,13 @@
 import { boundsFromSphere, unionBounds } from '../core/bounds'
 import type { AABB, Vec3Like } from '../core/types'
+import {
+  cutterBounds,
+  unionBounds as unionCutterBounds,
+  type CutterVolume,
+} from './boolean/CutterVolume'
 import type {
   BooleanSubtractModifier,
+  BooleanVolumeModifier,
   BrushSample,
   BrushStrokeModifier,
   ModifierTransform,
@@ -69,6 +75,8 @@ export function materializeModifierTransforms(
       }
       case 'boolean-subtract':
         return transformedTunnel(modifier)
+      case 'boolean-volume':
+        return transformedBooleanVolume(modifier)
       case 'remesh':
       case 'tessellate': {
         const materialized = {
@@ -112,6 +120,27 @@ export function transformedTunnel(
   return next
 }
 
+export function transformedBooleanVolume(
+  modifier: BooleanVolumeModifier,
+): BooleanVolumeModifier {
+  const transform = normalizedTransform(modifier.transform)
+  const baseBounds = cutterVolumeBounds(modifier.volumes)
+  const pivot = {
+    x: (baseBounds.min.x + baseBounds.max.x) * 0.5,
+    y: (baseBounds.min.y + baseBounds.max.y) * 0.5,
+    z: (baseBounds.min.z + baseBounds.max.z) * 0.5,
+  }
+  const volumes = modifier.volumes.map((volume) =>
+    transformCutterVolume(volume, pivot, transform),
+  )
+  return {
+    ...modifier,
+    volumes,
+    bounds: cutterVolumeBounds(volumes),
+    transform: normalizedTransform(),
+  }
+}
+
 export function transformedCenter(
   center: Vec3Like,
   transform?: ModifierTransform,
@@ -144,10 +173,62 @@ export function modifierWorldBounds(modifier: TerrainModifier): AABB {
       )
     case 'boolean-subtract':
       return tunnelBounds(transformedTunnel(modifier))
+    case 'boolean-volume':
+      return transformedBooleanVolume(modifier).bounds
     case 'noise':
     case 'field-displacement':
       return transformBounds(modifier.bounds, transform)
   }
+}
+
+function cutterVolumeBounds(volumes: readonly CutterVolume[]): AABB {
+  return unionCutterBounds(volumes.map(cutterBounds)) ?? {
+    min: { x: 0, y: 0, z: 0 },
+    max: { x: 0, y: 0, z: 0 },
+  }
+}
+
+function transformCutterVolume(
+  cutter: CutterVolume,
+  pivot: Vec3Like,
+  transform: ModifierTransform,
+): CutterVolume {
+  switch (cutter.kind) {
+    case 'sweep':
+      return {
+        ...cutter,
+        rings: cutter.rings.map((ring) => ({
+          ...transformPoint(ring, pivot, transform),
+          horizontalRadius: ring.horizontalRadius * transform.scale,
+          verticalRadius: ring.verticalRadius * transform.scale,
+        })),
+      }
+    case 'capsule':
+      return {
+        ...cutter,
+        start: transformPoint(cutter.start, pivot, transform),
+        end: transformPoint(cutter.end, pivot, transform),
+        radius: cutter.radius * transform.scale,
+      }
+    case 'ellipsoid':
+      return {
+        ...cutter,
+        center: transformPoint(cutter.center, pivot, transform),
+        radii: scaleVector(cutter.radii, transform.scale),
+        forward: rotateNormal(cutter.forward, transform.yaw),
+      }
+    case 'box':
+      return {
+        ...cutter,
+        center: transformPoint(cutter.center, pivot, transform),
+        halfExtents: scaleVector(cutter.halfExtents, transform.scale),
+        forward: rotateNormal(cutter.forward, transform.yaw),
+      }
+  }
+}
+
+function scaleVector(vector: Vec3Like, scale: number): Vec3Like {
+  return { x: vector.x * scale, y: vector.y * scale, z: vector.z * scale }
 }
 
 function transformPoint(

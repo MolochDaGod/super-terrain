@@ -31,13 +31,16 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
           <HelpGroup
             title="Navigate"
             rows={[
+              ['Orbit / Fly', 'Switch camera mode in top bar'],
               ['LMB drag', 'Orbit in Inspect mode'],
               ['Alt + LMB', 'Orbit while editing'],
               ['RMB drag', 'Pan camera'],
               ['Wheel / middle', 'Zoom'],
-              ['W A S D', 'Fly laterally'],
-              ['Q / E', 'Descend / ascend'],
-              ['Shift', 'Fast movement'],
+              ['Fly: click', 'Capture mouse for free look'],
+              ['W A S D', 'Move in Fly mode'],
+              ['Q / E', 'Descend / ascend in Fly'],
+              ['Shift', 'Boost Fly speed'],
+              ['Esc', 'Release Fly mouse'],
             ]}
           />
           <HelpGroup

@@ -3,6 +3,7 @@ import type { CompiledSection, SectionKey } from '../core/types'
 import type { TerrainModifier } from '../modifiers/types'
 import {
   TerrainWorkerPool,
+  type TerrainWorkerCancellation,
   type TerrainWorkerPoolStats,
 } from '../workers/TerrainWorkerPool'
 
@@ -44,12 +45,20 @@ export class TerrainCompiler {
     revision: number,
     priority: number,
     modifiers: TerrainModifier[],
+    levels?: readonly number[],
   ): number {
-    return this.pool.submit(key, revision, priority, modifiers)
+    return this.pool.submit(key, revision, priority, modifiers, levels)
   }
 
-  cancel(key: SectionKey, beforeRevision?: number): void {
-    this.pool.cancelSection(key, beforeRevision)
+  cancel(
+    key: SectionKey,
+    beforeRevision?: number,
+  ): TerrainWorkerCancellation {
+    return this.pool.cancelSection(key, beforeRevision)
+  }
+
+  reprioritize(key: SectionKey, revision: number, priority: number): boolean {
+    return this.pool.reprioritizeSection(key, revision, priority)
   }
 
   stats(): TerrainWorkerPoolStats {

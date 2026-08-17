@@ -29,6 +29,7 @@ interface CaptureOptions {
   dumpShader: boolean
   effects: boolean
   suffix: string
+  lod?: number
 }
 
 async function main(): Promise<void> {
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
         cascadedShadows: options.cascadedShadows,
         shadows: options.shadows,
         debug: options.debug,
+        lod: options.lod,
       },
     )
     capture.scene.matrixWorldAutoUpdate = true
@@ -235,6 +237,7 @@ function parseArguments(argv: string[]): CaptureOptions {
     dumpShader: flags.has('dump-shader'),
     effects: flags.get('effects') !== '0',
     suffix: flags.get('suffix') ? `-${flags.get('suffix')}` : '',
+    lod: flags.has('lod') ? Number(flags.get('lod')) : undefined,
     width: alignCaptureWidth(Number(flags.get('width') ?? 1280)),
     height: Number(flags.get('height') ?? 720),
     outputDirectory: resolve(flags.get('out') ?? 'captures'),

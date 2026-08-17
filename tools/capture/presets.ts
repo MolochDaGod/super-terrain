@@ -50,4 +50,44 @@ export const CAMERA_PRESETS: CameraPreset[] = [
     target: [-160, 90, -120],
     fov: 34,
   },
+
+  // --- authored mesh-terrain topology ----------------------------------
+  // These fixed views face the real modifier portals. They deliberately keep
+  // the compile radius tight so visual checks exercise the CSG itself instead
+  // of rebuilding an unrelated continent around it.
+  {
+    label: 'cave',
+    position: [300, 150, -10],
+    target: [448, 112, 32],
+    fov: 48,
+    radiusSections: 4,
+  },
+  {
+    label: 'cave-high',
+    position: [300, 210, 80],
+    target: [480, 149, 128],
+    fov: 48,
+    radiusSections: 4,
+  },
+  {
+    label: 'arch',
+    position: [330, 300, 120],
+    target: [592, 252, 224],
+    fov: 48,
+    radiusSections: 4,
+  },
+  {
+    label: 'escarpment',
+    position: [280, 225, -180],
+    target: [455, 155, -88],
+    fov: 50,
+    radiusSections: 2,
+  },
+  {
+    label: 'topology',
+    position: [230, 280, -90],
+    target: [540, 190, 140],
+    fov: 48,
+    radiusSections: 3,
+  },
 ]

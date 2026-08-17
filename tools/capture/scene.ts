@@ -3,11 +3,18 @@ import type { Material } from 'three/webgpu'
 import { DEFAULT_TERRAIN_CONFIG } from '../../src/terrain/config'
 import { compileTerrainSection } from '../../src/terrain/compiler/compileSection'
 import { evaluateHeight } from '../../src/terrain/compiler/TerrainField'
+import {
+  expandBounds,
+  intersects,
+  sectionBounds,
+} from '../../src/terrain/core/bounds'
+import { createDemoTerrainModifiers } from '../../src/terrain/demo/createDemoModifiers'
 import { createSectionGeometry } from '../../src/terrain/rendering/createSectionGeometry'
 import { createTerrainEnvironment } from '../../src/terrain/rendering/environment/createTerrainEnvironment'
 import { createTerrainMaterialForMode } from '../../src/terrain/rendering/createTerrainMaterialForMode'
 import type { TerrainRenderMode } from '../../src/terrain/rendering/renderModes'
 import type { FullMaterialDebug } from '../../src/terrain/rendering/full/createFullTerrainMaterial'
+import { encodeModifiers } from '../../src/terrain/workers/protocol'
 
 export interface CameraPreset {
   label: string
@@ -17,6 +24,8 @@ export interface CameraPreset {
   fov: number
   /** When set, `position[1]` is treated as an offset above the terrain surface. */
   groundRelative?: boolean
+  /** Keeps close topology-review captures small enough for quick iteration. */
+  radiusSections?: number
 }
 
 export interface CaptureScene {
@@ -43,7 +52,8 @@ export function buildCaptureScene(
   } = {},
 ): CaptureScene {
   const config = DEFAULT_TERRAIN_CONFIG
-  const radius = options.radiusSections ?? 24
+  const radius = options.radiusSections ?? preset.radiusSections ?? 24
+  const demoModifiers = createDemoTerrainModifiers(config.seed)
   const scene = new Scene()
   const group = new Group()
   const disposables: { dispose(): void }[] = []
@@ -69,6 +79,13 @@ export function buildCaptureScene(
         centreZ - cameraPosition[2],
       )
       const lod = options.lod ?? distanceToLod(distance)
+      const modifierBounds = expandBounds(
+        sectionBounds(key, config.sectionSize),
+        config.operationHalo,
+      )
+      const modifiers = demoModifiers.filter(
+        (modifier) => modifier.enabled && intersects(modifier.bounds, modifierBounds),
+      )
       const compiled = compileTerrainSection({
         kind: 'compile-section',
         jobId: 0,
@@ -79,7 +96,7 @@ export function buildCaptureScene(
         // Only the displayed level is needed; the LOD pyramid exists for
         // streaming, which the harness does not exercise.
         levels: [lod],
-        modifiers: { descriptors: [], brushPoints: new Float32Array(0) },
+        modifiers: encodeModifiers(modifiers),
       })
       const geometry = createSectionGeometry(compiled.lods[0], config.sectionSize)
       const mesh = new Mesh(geometry, material.material as Material)

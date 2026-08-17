@@ -43,9 +43,9 @@ export interface CompileSectionRequest {
     'sectionSize' | 'lodResolutions' | 'seed' | 'operationHalo'
   >
   /**
-   * Optional subset of LOD levels to return. Purely procedural sections can
-   * start at the finest requested level; localized edits still simplify from
-   * LOD0 so their topology cannot disappear in a distant-only compile.
+   * Optional subset of LOD levels to return. Exact Boolean topology can be
+   * evaluated directly on the finest requested screen-error grid; sampled
+   * brush strokes still simplify from LOD0 so a small edit cannot disappear.
    */
   levels?: readonly number[]
   modifiers: ModifierPacket

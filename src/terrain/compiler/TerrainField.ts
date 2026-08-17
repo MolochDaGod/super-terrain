@@ -32,6 +32,7 @@ export function evaluateHeight(
         break
       case 'brush-stroke':
       case 'boolean-subtract':
+      case 'boolean-volume':
       case 'remesh':
       case 'tessellate':
         break

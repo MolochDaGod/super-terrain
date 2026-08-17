@@ -145,6 +145,11 @@ function ModifierRow({
                 {tunnelPortalDistance(modifier).toFixed(0)} m path · r {modifier.radius.toFixed(1)} m
               </span>
             )}
+            {modifier.type === 'boolean-volume' && (
+              <span className="mt-0.5 block font-mono text-[7px] text-white/24">
+                {modifier.volumes.length} closed {modifier.volumes.length === 1 ? 'volume' : 'volumes'} · exact CSG
+              </span>
+            )}
           </span>
         </span>
       </button>
@@ -236,6 +241,8 @@ function modifierLabel(modifier: TerrainModifier): string {
       return `${modifier.domain === 'mesh' ? 'Mesh' : 'Height'} · ${modifier.mode}`
     case 'boolean-subtract':
       return 'Mesh · tunnel subtract'
+    case 'boolean-volume':
+      return 'Mesh · volume subtract'
     case 'remesh':
       return 'Mesh · density'
     case 'tessellate':

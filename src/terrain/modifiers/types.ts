@@ -1,4 +1,5 @@
 import type { AABB, Vec3Like } from '../core/types'
+import type { CutterVolume } from './boolean/CutterVolume'
 
 export type BrushMode = 'raise' | 'lower' | 'smooth' | 'flatten'
 export type BrushDomain = 'heightfield' | 'mesh'
@@ -78,6 +79,14 @@ export interface BooleanSubtractModifier extends ModifierBase {
   backend: string
 }
 
+/** A serializable set of arbitrary closed meshes removed by exact CSG. */
+export interface BooleanVolumeModifier extends ModifierBase {
+  type: 'boolean-volume'
+  operation: 'subtract'
+  volumes: CutterVolume[]
+  backend: string
+}
+
 export type TerrainModifier =
   | BrushStrokeModifier
   | NoiseModifier
@@ -85,6 +94,7 @@ export type TerrainModifier =
   | RemeshModifier
   | TessellateModifier
   | BooleanSubtractModifier
+  | BooleanVolumeModifier
 
 export interface ModifierContext {
   sectionBounds: AABB

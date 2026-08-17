@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { constrainNeighborLods, projectedGeometricError, selectLod } from './LodSelector'
+import {
+  constrainNeighborLods,
+  projectedGeometricError,
+  selectLod,
+  selectSourceLod,
+} from './LodSelector'
 
 const lods = [
   { level: 0, geometricError: 0.4 },
@@ -53,5 +58,42 @@ describe('screen-space LOD selection', () => {
     ])
     expect(constrained.get('1:0')).toBe(1)
     expect(constrained.get('2:0')).toBe(2)
+  })
+
+  it('returns global levels when a compiled section contains a sparse LOD set', () => {
+    const sparse = lods.slice(2)
+    expect(
+      selectLod({
+        lods: sparse,
+        distance: 8_000,
+        viewportHeight: 1080,
+        verticalFovRadians: Math.PI / 3,
+        errorTolerancePixels: 2,
+        currentLod: 4,
+      }),
+    ).toBe(4)
+    expect(
+      selectLod({
+        lods: sparse,
+        distance: 70,
+        viewportHeight: 1080,
+        verticalFovRadians: Math.PI / 3,
+        errorTolerancePixels: 2,
+        currentLod: 2,
+      }),
+    ).toBe(2)
+  })
+
+  it('stages source grids by projected screen error', () => {
+    const input = {
+      lodResolutions: [96, 48, 24, 12, 6],
+      sectionSize: 128,
+      viewportHeight: 720,
+      verticalFovRadians: (48 * Math.PI) / 180,
+      errorTolerancePixels: 2.2,
+    }
+    expect(selectSourceLod({ ...input, distance: 64 })).toBe(0)
+    expect(selectSourceLod({ ...input, distance: 256 })).toBe(2)
+    expect(selectSourceLod({ ...input, distance: 1_280 })).toBe(4)
   })
 })

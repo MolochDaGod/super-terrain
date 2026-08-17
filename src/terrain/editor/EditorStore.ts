@@ -19,6 +19,8 @@ export type TerrainOverlay =
   | 'density'
   | 'streaming'
 
+export type CameraMode = 'orbit' | 'fly'
+
 export interface EditorSnapshot {
   tool: EditorTool
   brushDomain: BrushDomain
@@ -30,6 +32,7 @@ export interface EditorSnapshot {
   tunnelDepth: number
   overlay: TerrainOverlay
   renderMode: TerrainRenderMode
+  cameraMode: CameraMode
   showHud: boolean
   showHelp: boolean
   cursorPosition: Vec3Like
@@ -52,6 +55,7 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   tunnelDepth: 14,
   overlay: 'none',
   renderMode: 'preview',
+  cameraMode: 'orbit',
   showHud: true,
   showHelp: false,
   cursorPosition: { x: 0, y: 0, z: 0 },

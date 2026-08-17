@@ -22,8 +22,16 @@ import {
 import { BenchmarkHistory } from './benchmarks/BenchmarkHistory'
 import { evaluateHeight } from './compiler/TerrainField'
 import { TerrainCompiler } from './compiler/TerrainCompiler'
+import {
+  createDemoTerrainModifiers,
+  upgradeLegacyDemoTerrainModifiers,
+} from './demo/createDemoModifiers'
 import type { EditorSnapshot, TerrainOverlay } from './editor/EditorStore'
-import { constrainNeighborLods, selectLod } from './lod/LodSelector'
+import {
+  constrainNeighborLods,
+  selectLod,
+  selectSourceLod,
+} from './lod/LodSelector'
 import { ModifierStack } from './modifiers/ModifierStack'
 import {
   appendBrushPoint,
@@ -87,6 +95,11 @@ interface TerrainViewSignature {
 const BRUSH_FLOW_PER_SECOND = 2.4
 const SPATIAL_DAB_WEIGHT = 0.08
 const MAX_AUTHORED_DAB_WEIGHT = 0.2
+
+function requestedLevels(minimum: number, count: number): number[] {
+  const first = Math.max(0, Math.min(count - 1, Math.round(minimum)))
+  return Array.from({ length: count - first }, (_, offset) => first + offset)
+}
 
 function sameViewSignature(
   previous: TerrainViewSignature | undefined,
@@ -176,12 +189,19 @@ export class WorldTerrain {
           this.benchmarkHistory.record('compile', result.compiled.metadata.compileMs)
         } else if (section.buildingRevision === result.revision) {
           section.buildState = 'queued'
+          section.buildJobId = undefined
+          section.buildingRevision = undefined
+          section.buildingLod = undefined
         }
       } else if (section.revision === result.revision) {
         section.buildState = 'failed'
         section.error = result.error ?? 'Terrain compilation failed'
+        console.error(
+          `Terrain section ${section.id} failed to compile: ${section.error}`,
+        )
         section.buildJobId = undefined
         section.buildingRevision = undefined
+        section.buildingLod = undefined
       }
     }
   }
@@ -272,6 +292,7 @@ export class WorldTerrain {
         : undefined,
     )
     const candidateMap = new Map(candidates.map((candidate) => [candidate.id, candidate]))
+    this.cancelDepartedBuilds(this.cachedCandidateMap, candidateMap)
     this.cachedCandidateMap = candidateMap
 
     if (this.renderer) {
@@ -304,7 +325,13 @@ export class WorldTerrain {
         )
       }
       section.lastTouched = now
-      this.maybeQueueBuild(section, candidate, now)
+      const minimumLod = this.minimumBuildLod(
+        section,
+        candidate,
+        input,
+      )
+      section.requestedLod = minimumLod
+      this.maybeQueueBuild(section, candidate, minimumLod, now)
       this.maybeScheduleSwap(section, candidate)
       this.renderer?.setSectionState(section)
     }
@@ -620,8 +647,17 @@ export class WorldTerrain {
   private async loadPersistedWorld(): Promise<void> {
     try {
       const saved = await this.storage.load('default')
-      if (saved && saved.length > 0) this.modifiers.replace(saved)
-      else this.installDemoModifiers()
+      const upgraded = saved?.length
+        ? upgradeLegacyDemoTerrainModifiers(saved, this.config.seed)
+        : undefined
+      if (upgraded) {
+        this.modifiers.replace(upgraded)
+        await this.storage.save('default', this.modifiers.snapshot())
+      } else if (saved && saved.length > 0) {
+        this.modifiers.replace(saved)
+      } else {
+        this.installDemoModifiers()
+      }
       this.savedModifierRevision = this.modifiers.sourceRevision
     } finally {
       this.initialized = true
@@ -629,24 +665,9 @@ export class WorldTerrain {
   }
 
   private installDemoModifiers(): void {
-    const x = 14
-    const z = 34
-    const y = evaluateHeight(x, z, this.config.seed, [])
-    this.modifiers.add(
-      createTunnelModifier({
-        center: { x, y, z },
-        radius: 9,
-        length: 76,
-        direction: { x: 1, z: 0.16 },
-      }),
-    )
-    this.modifiers.add(
-      createRemeshModifier({
-        center: { x: -52, y: evaluateHeight(-52, -12, this.config.seed, []), z: -12 },
-        radius: 34,
-        targetEdgeLength: 2.4,
-      }),
-    )
+    for (const modifier of createDemoTerrainModifiers(this.config.seed)) {
+      this.modifiers.add(modifier)
+    }
   }
 
   private invalidate(bounds: AABB): void {
@@ -672,6 +693,7 @@ export class WorldTerrain {
 
   private detectPendingTerrainWork(): boolean {
     for (const section of this.partition.values()) {
+      if (!this.streamer.isDesired(section.key)) continue
       if (
         section.buildState === 'queued' ||
         section.buildState === 'building' ||
@@ -687,6 +709,7 @@ export class WorldTerrain {
   private maybeQueueBuild(
     section: TerrainSection,
     candidate: StreamCandidate,
+    minimumLod: number,
     now: number,
   ): void {
     if (
@@ -695,13 +718,47 @@ export class WorldTerrain {
     ) {
       return
     }
+    if (
+      section.buildState === 'building' &&
+      section.buildingRevision === section.revision &&
+      (section.buildingLod ?? 0) <= minimumLod
+    ) {
+      this.compiler.reprioritize(
+        section.key,
+        section.revision,
+        candidate.priority,
+      )
+      return
+    }
+
+    // Let an already finished coarse result become visible before asking for a
+    // finer replacement. Committing and starting another build in the same
+    // frame would make commitPending overwrite the new building state.
+    if (
+      section.pendingCompiled?.sourceRevision === section.revision
+    ) {
+      return
+    }
+
+    const compiledMinimumLod =
+      section.compiled?.sourceRevision === section.revision
+        ? (section.compiled.lods[0]?.level ?? Infinity)
+        : Infinity
     const needsBuild =
       section.buildState === 'queued' ||
       section.buildState === 'failed' ||
-      (section.buildState === 'building' && section.buildingRevision !== section.revision)
-    if (!needsBuild || section.buildingRevision === section.revision) return
+      (section.buildState === 'building' &&
+        section.buildingRevision !== section.revision) ||
+      minimumLod < compiledMinimumLod
+    if (!needsBuild) return
     const coalesceDelay = section.compiled ? 95 : 0
     if (now - section.dirtySince < coalesceDelay) return
+    if (section.buildState === 'building') {
+      this.compiler.cancel(
+        section.key,
+        section.buildingRevision ?? section.revision,
+      )
+    }
     const modifiers = this.modifiers.query(
       expandBounds(section.bounds, this.config.operationHalo),
     )
@@ -710,8 +767,58 @@ export class WorldTerrain {
       section.revision,
       candidate.priority,
       modifiers,
+      requestedLevels(minimumLod, this.config.lodResolutions.length),
     )
-    this.partition.markBuilding(section, jobId)
+    this.partition.markBuilding(section, jobId, minimumLod)
+  }
+
+  private minimumBuildLod(
+    section: TerrainSection,
+    candidate: StreamCandidate,
+    input: TerrainUpdateInput,
+  ): number {
+    if (section.dirtyRegion) return 0
+    const lastLevel = this.config.lodResolutions.length - 1
+    if (!candidate.visible) return lastLevel
+    return selectSourceLod({
+      lodResolutions: this.config.lodResolutions,
+      sectionSize: this.config.sectionSize,
+      distance: Math.max(
+        this.config.sectionSize * 0.5,
+        candidate.distance * this.config.sectionSize,
+      ),
+      viewportHeight: input.viewportHeight,
+      verticalFovRadians: input.verticalFovRadians,
+      // Worker source resolution must be stable for a stable view. The frame
+      // scheduler's quality scale can drop during startup and then recover;
+      // feeding that transient value into compilation caused a second wave of
+      // finer jobs for sections that were already rendered. Runtime LOD choice
+      // can still follow frame pressure, while workers refine only when camera
+      // distance or authored terrain actually changes.
+      errorTolerancePixels: this.config.baseLodErrorPixels,
+    })
+  }
+
+  private cancelDepartedBuilds(
+    previous: ReadonlyMap<string, StreamCandidate>,
+    next: ReadonlyMap<string, StreamCandidate>,
+  ): void {
+    for (const id of previous.keys()) {
+      if (next.has(id)) continue
+      const previousCandidate = previous.get(id)
+      if (!previousCandidate) continue
+      const section = this.partition.get(previousCandidate.key)
+      if (!section || section.buildState !== 'building') continue
+      this.compiler.cancel(section.key, section.buildingRevision)
+      section.buildJobId = undefined
+      section.buildingRevision = undefined
+      section.buildingLod = undefined
+      section.buildState =
+        section.compiled?.sourceRevision === section.revision &&
+        !section.dirtyRegion
+          ? 'clean'
+          : 'queued'
+    }
   }
 
   private maybeScheduleSwap(
@@ -945,7 +1052,12 @@ export class WorldTerrain {
     const workers = this.compiler.stats()
     let rebuilding = 0
     for (const section of this.partition.values()) {
-      if (section.buildState === 'building' || section.buildState === 'queued') rebuilding += 1
+      if (
+        this.streamer.isDesired(section.key) &&
+        (section.buildState === 'building' || section.buildState === 'queued')
+      ) {
+        rebuilding += 1
+      }
     }
     this.metrics.set({
       fps: 1000 / Math.max(1, scheduler.averageFrameMs),

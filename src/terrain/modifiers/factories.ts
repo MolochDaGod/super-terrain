@@ -1,7 +1,14 @@
 import { boundsFromSphere, unionBounds } from '../core/bounds'
 import type { AABB, Vec3Like } from '../core/types'
+import {
+  cloneCutterVolume,
+  cutterBounds,
+  unionBounds as unionCutterBounds,
+  type CutterVolume,
+} from './boolean/CutterVolume'
 import type {
   BooleanSubtractModifier,
+  BooleanVolumeModifier,
   BrushDomain,
   BrushMode,
   BrushStrokeModifier,
@@ -136,6 +143,26 @@ export function createTunnelModifier(options: {
   }
   modifier.bounds = tunnelBounds(modifier)
   return modifier
+}
+
+export function createBooleanVolumeModifier(options: {
+  volumes: CutterVolume[]
+}): BooleanVolumeModifier {
+  const bounds = unionCutterBounds(options.volumes.map(cutterBounds)) ?? {
+    min: { x: 0, y: 0, z: 0 },
+    max: { x: 0, y: 0, z: 0 },
+  }
+  return {
+    id: createModifierId('volume'),
+    type: 'boolean-volume',
+    operation: 'subtract',
+    enabled: true,
+    priority: 190,
+    volumes: options.volumes.map(cloneCutterVolume),
+    backend: 'bvh-csg-volume-v1',
+    bounds,
+    transform: identityTransform(),
+  }
 }
 
 function normalize3(value: Vec3Like): Vec3Like {

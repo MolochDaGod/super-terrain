@@ -28,6 +28,7 @@ export class FrameBudgetScheduler {
   private terrainTimeMs = 0
   private uploadBytes = 0
   private swaps = 0
+  private tasksRun = 0
   private violations = 0
 
   constructor(options: SchedulerOptions) {
@@ -52,6 +53,7 @@ export class FrameBudgetScheduler {
     this.terrainTimeMs = 0
     this.uploadBytes = 0
     this.swaps = 0
+    this.tasksRun = 0
   }
 
   enqueue(task: TerrainTask): void {
@@ -66,11 +68,21 @@ export class FrameBudgetScheduler {
     for (const task of tasks) {
       const uploadBytes = task.uploadBytes ?? 0
       const swaps = task.swaps ?? 0
-      if (
+      const exceedsRemainingBudget =
         task.estimatedCpuMs > this.remainingCpuMs ||
         uploadBytes > this.remainingUploadBytes ||
         swaps > this.remainingSwaps
-      ) {
+      // A task larger than an absolute per-frame cap can never become
+      // eligible by waiting. Dense CSG sections can legitimately cross the
+      // upload cap by a small amount, so admit exactly one such task on an
+      // otherwise untouched frame and charge its full overage afterward.
+      const individuallyOversized =
+        task.estimatedCpuMs > this.options.cpuTerrainMs ||
+        uploadBytes > this.options.gpuUploadBytes ||
+        swaps > this.options.sectionSwaps
+      const allowOversizedProgress =
+        exceedsRemainingBudget && individuallyOversized && this.tasksRun === 0
+      if (exceedsRemainingBudget && !allowOversizedProgress) {
         continue
       }
 
@@ -84,8 +96,10 @@ export class FrameBudgetScheduler {
       this.remainingSwaps -= swaps
       this.uploadBytes += uploadBytes
       this.swaps += swaps
+      this.tasksRun += 1
 
       if (elapsed > Math.max(4, task.estimatedCpuMs * 3)) this.violations += 1
+      if (allowOversizedProgress) break
       if (this.remainingCpuMs <= 0) break
     }
   }

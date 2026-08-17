@@ -22,7 +22,7 @@ export function WebGpuCanvas({ children }: PropsWithChildren) {
         createRenderer(defaults.canvas as HTMLCanvasElement)
       }
       camera={{
-        position: [238, 176, 264],
+        position: [230, 280, -90],
         fov: 48,
         near: 0.5,
         far: 80_000,

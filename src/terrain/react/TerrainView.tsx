@@ -19,7 +19,7 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
     [group, terrain.config.sectionSize],
   )
   const { camera, gl, raycaster, size } = useThree()
-  const { renderMode } = useEditorSnapshot(editor)
+  const { cameraMode, renderMode } = useEditorSnapshot(editor)
   const pointer = useMemo(() => new Vector2(), [])
   const dragging = useRef(false)
   const activePointerId = useRef<number | null>(null)
@@ -50,6 +50,10 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
     }
 
     const onPointerMove = (event: PointerEvent) => {
+      if (editor.getSnapshot().cameraMode === 'fly') {
+        editor.hideCursor()
+        return
+      }
       if (
         dragging.current &&
         activePointerId.current !== null &&
@@ -68,6 +72,7 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
     }
 
     const onPointerDown = (event: PointerEvent) => {
+      if (editor.getSnapshot().cameraMode === 'fly') return
       if (
         event.button !== 0 ||
         event.altKey ||
@@ -136,6 +141,10 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
       activePointerId.current = null
     }
   }, [backend, camera, editor, gl.domElement, pointer, raycaster, terrain])
+
+  useEffect(() => {
+    if (cameraMode === 'fly') editor.hideCursor()
+  }, [cameraMode, editor])
 
   useFrame((state, delta) => {
     const perspective = state.camera as PerspectiveCamera

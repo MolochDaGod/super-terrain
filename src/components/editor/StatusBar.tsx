@@ -1,4 +1,4 @@
-import { Database, Orbit } from 'lucide-react'
+import { Database, Orbit, Plane } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
 import { useEditorSnapshot, useTerrainMetrics } from '../../terrain/react/hooks'
@@ -25,7 +25,10 @@ export function StatusBar({ terrain, editor }: StatusBarProps) {
           <Database size={9} /> {metrics.sourceResidentSections} source
         </span>
         <span className="flex items-center gap-1.5">
-          <Orbit size={9} /> LMB orbit · RMB pan · WASD fly
+          {snapshot.cameraMode === 'fly' ? <Plane size={9} /> : <Orbit size={9} />}
+          {snapshot.cameraMode === 'fly'
+            ? 'Fly · click capture · WASD · Shift boost · Esc release'
+            : 'Orbit · LMB rotate · RMB pan · WASD translate'}
         </span>
       </div>
     </footer>

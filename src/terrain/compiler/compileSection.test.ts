@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createBooleanVolumeModifier,
   createBrushStroke,
+  createRemeshModifier,
   createTunnelModifier,
 } from '../modifiers/factories'
 import type { TerrainModifier } from '../modifiers/types'
@@ -84,6 +86,47 @@ describe('section compiler', () => {
         ),
       ).toBe(true)
     }
+  })
+
+  it('subtracts an arbitrary closed volume without deleting the section', () => {
+    const center = { x: 54, y: evaluateHeight(54, 52, 17, []), z: 52 }
+    const volume = createBooleanVolumeModifier({
+      volumes: [
+        {
+          kind: 'ellipsoid',
+          center,
+          radii: { x: 14, y: 9, z: 11 },
+          forward: { x: 1, y: 0, z: 0.2 },
+          surface: 'cave',
+        },
+      ],
+    })
+    const base = compileTerrainSection(requestFor({ x: 0, z: 0 }, [], 12))
+    const carved = compileTerrainSection(requestFor({ x: 0, z: 0 }, [volume], 12))
+
+    expect(carved.metadata.hasArbitraryTopology).toBe(true)
+    expect(carved.metadata.validationWarnings).toBe(0)
+    expect(carved.metadata.vertexCount).toBeGreaterThan(base.metadata.vertexCount)
+    expect(carved.lods[0].triangleCount).toBeGreaterThan(0)
+    expect(carved.bounds.max.x - carved.bounds.min.x).toBeCloseTo(128, 4)
+    expect(carved.bounds.max.z - carved.bounds.min.z).toBeCloseTo(128, 4)
+  })
+
+  it('does not stretch a section toward a density modifier that only touches its halo', () => {
+    const adjacentDensity = createRemeshModifier({
+      center: { x: 150, y: 0, z: 64 },
+      radius: 10,
+      targetEdgeLength: 0.75,
+    })
+    const base = compileTerrainSection(requestFor({ x: 0, z: 0 }, [], 12))
+    const compiled = compileTerrainSection(
+      requestFor({ x: 0, z: 0 }, [adjacentDensity], 12),
+    )
+
+    expect(compiled.bounds.min.x).toBeCloseTo(0, 6)
+    expect(compiled.bounds.max.x).toBeCloseTo(128, 6)
+    expect(compiled.lods[0].positions).toEqual(base.lods[0].positions)
+    expect(compiled.lods[0].indices).toEqual(base.lods[0].indices)
   })
 
   it('retains a localized mesh sculpt in every simplified LOD', () => {
