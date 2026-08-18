@@ -4,6 +4,7 @@ import { EditableMesh } from './mesh/EditableMesh'
 import type { TerrainStorage } from './persistence/TerrainStorage'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
 import { WorldTerrain } from './WorldTerrain'
+import { graniteMassingPreset } from './rocks/types'
 
 class FakeWorker {
   onmessage: ((event: MessageEvent) => void) | null = null
@@ -110,6 +111,39 @@ describe('world terrain brush sessions', () => {
     terrain.dispose()
   })
 
+  it('keeps weight painting on the direct buffer path until stroke end', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    const previewBrush = vi.fn<TerrainRenderBackend['previewBrush']>()
+    const previewWeightPaint = vi.fn<TerrainRenderBackend['previewWeightPaint']>()
+    terrain.attachRenderer(fakeRenderer(previewBrush, previewWeightPaint))
+    const editor = new EditorStore()
+    editor.patch({ tool: 'paint', brushRadius: 10 })
+
+    terrain.beginStroke(
+      { x: 0, y: 0, z: 0 },
+      { x: 0, y: 1, z: 0 },
+      editor.getSnapshot(),
+    )
+    const revisionDuringStroke = terrain.modifiers.sourceRevision
+    terrain.continueStroke(
+      { x: 8, y: 0, z: 0 },
+      { x: 0, y: 1, z: 0 },
+    )
+    terrain.advanceActiveStroke(1 / 60)
+
+    expect(terrain.partition.sections.size).toBe(0)
+    expect(terrain.modifiers.sourceRevision).toBe(revisionDuringStroke)
+    expect(previewWeightPaint).toHaveBeenCalledTimes(3)
+
+    terrain.endStroke()
+    expect(terrain.partition.sections.size).toBeGreaterThan(0)
+    expect(terrain.modifiers.sourceRevision).toBe(revisionDuringStroke + 1)
+    for (const section of terrain.partition.values()) {
+      expect(section.revision).toBe(1)
+    }
+    terrain.dispose()
+  })
+
   it('authors a tunnel by dragging between two surface portals', () => {
     const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
     const editor = new EditorStore()
@@ -181,6 +215,39 @@ describe('world terrain brush sessions', () => {
     expect(terrain.partition.get({ x: 0, z: 0 })).toBeUndefined()
     terrain.dispose()
   })
+
+  it('places deterministic granite objects and snapshots their exact topology as CSG', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    const recipe = graniteMassingPreset('tor', 908, 3)
+    const rockId = terrain.addGraniteRock(recipe, { x: 12, y: 30, z: -8 })
+    const rock = terrain.rocks.get(rockId)!
+
+    expect(terrain.rocks.count).toBe(1)
+    expect(rock.parameters).toEqual(recipe)
+    const modifierId = terrain.applyGraniteRockAsCsg(rockId, 'subtract')
+    const modifier = terrain.modifiers.get(modifierId)
+    expect(modifier?.type).toBe('boolean-volume')
+    if (modifier?.type !== 'boolean-volume') throw new Error('Missing rock CSG modifier')
+    expect(modifier.operation).toBe('subtract')
+    expect(modifier.volumes[0]?.kind).toBe('mesh')
+    if (modifier.volumes[0]?.kind !== 'mesh') throw new Error('Missing mesh cutter')
+    const snapshot = [...modifier.volumes[0].positions]
+    const lowest = snapshot.filter((_, index) => index % 3 === 1)
+      .reduce((minimum, value) => Math.min(minimum, value), Infinity)
+    expect(lowest).toBeLessThan(30)
+    expect(lowest).toBeGreaterThan(28)
+    expect(terrain.rocks.get(rockId)?.visible).toBe(false)
+
+    terrain.updateGraniteRockParameters(rockId, {
+      ...recipe,
+      seed: recipe.seed + 1,
+      detailStrength: 1,
+    })
+    expect(modifier.volumes[0].positions).toEqual(snapshot)
+    expect(terrain.removeGraniteRock(rockId)).toBe(true)
+    expect(terrain.rocks.count).toBe(0)
+    terrain.dispose()
+  })
 })
 
 function triangleSource(sourceId: string): EditableMesh {
@@ -193,6 +260,7 @@ function triangleSource(sourceId: string): EditableMesh {
 
 function fakeRenderer(
   previewBrush: TerrainRenderBackend['previewBrush'],
+  previewWeightPaint: TerrainRenderBackend['previewWeightPaint'] = () => {},
 ): TerrainRenderBackend {
   return {
     upload: () => 0,
@@ -202,7 +270,9 @@ function fakeRenderer(
     setSectionState() {},
     setOverlay() {},
     setRenderMode() {},
+    setMaterialSettings() {},
     previewBrush,
+    previewWeightPaint,
     raycast: () => undefined,
     flushDeferredDisposals() {},
     evict() {},

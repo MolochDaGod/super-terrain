@@ -1,5 +1,10 @@
-import { clamp } from '../core/bounds'
-import type { CompiledLOD, SectionId } from '../core/types'
+import { clamp, worldToSection } from '../core/bounds'
+import type {
+  CompiledLOD,
+  SectionId,
+  SectionKey,
+  Vec3Like,
+} from '../core/types'
 
 export interface LodSelectionInput {
   lods: readonly Pick<CompiledLOD, 'level' | 'geometricError'>[]
@@ -8,6 +13,10 @@ export interface LodSelectionInput {
   verticalFovRadians: number
   errorTolerancePixels: number
   currentLod: number
+  /** Section-grid distance from the camera's terrain section. */
+  focusDistanceSections?: number
+  /** Sections inside this radius retain the finest available topology. */
+  lod0FocusRadiusSections?: number
 }
 
 export function projectedGeometricError(
@@ -22,6 +31,16 @@ export function projectedGeometricError(
 
 export function selectLod(input: LodSelectionInput): number {
   if (input.lods.length === 0) return 0
+  const focusCeiling =
+    input.focusDistanceSections !== undefined &&
+    input.lod0FocusRadiusSections !== undefined
+      ? focusedLodCeiling(
+        input.focusDistanceSections,
+        input.lod0FocusRadiusSections,
+        input.lods[input.lods.length - 1].level,
+      )
+      : Infinity
+  const applyFocusCeiling = (lod: number) => Math.min(lod, focusCeiling)
   let candidateIndex = 0
   for (let index = input.lods.length - 1; index >= 0; index -= 1) {
     const error = projectedGeometricError(
@@ -39,7 +58,7 @@ export function selectLod(input: LodSelectionInput): number {
   const currentIndex = closestLodIndex(input.lods, input.currentLod)
   const candidate = input.lods[candidateIndex]
   const current = input.lods[currentIndex]
-  if (candidate.level === current.level) return current.level
+  if (candidate.level === current.level) return applyFocusCeiling(current.level)
   if (candidate.level < current.level) {
     const currentError = projectedGeometricError(
       current.geometricError,
@@ -47,9 +66,9 @@ export function selectLod(input: LodSelectionInput): number {
       input.viewportHeight,
       input.verticalFovRadians,
     )
-    return currentError > input.errorTolerancePixels * 1.16
+    return applyFocusCeiling(currentError > input.errorTolerancePixels * 1.16
       ? candidate.level
-      : current.level
+      : current.level)
   }
 
   const candidateError = projectedGeometricError(
@@ -58,9 +77,35 @@ export function selectLod(input: LodSelectionInput): number {
     input.viewportHeight,
     input.verticalFovRadians,
   )
-  return candidateError < input.errorTolerancePixels * 0.72
+  return applyFocusCeiling(candidateError < input.errorTolerancePixels * 0.72
     ? candidate.level
-    : current.level
+    : current.level)
+}
+
+/** Finest LOD ring required by distance from the camera's terrain section. */
+export function focusedLodCeiling(
+  distanceInSections: number,
+  lod0RadiusSections: number,
+  maximumLevel: number,
+): number {
+  return clamp(
+    Math.ceil(Math.max(0, distanceInSections - lod0RadiusSections)),
+    0,
+    maximumLevel,
+  )
+}
+
+/** Section-grid distance from a terrain cell to the cell below the camera. */
+export function cameraSectionDistance(
+  section: SectionKey,
+  camera: Vec3Like,
+  sectionSize: number,
+): number {
+  const cameraSection = worldToSection(camera.x, camera.z, sectionSize)
+  return Math.hypot(
+    section.x - cameraSection.x,
+    section.z - cameraSection.z,
+  )
 }
 
 export interface SourceLodSelectionInput {

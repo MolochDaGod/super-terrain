@@ -1,7 +1,16 @@
 import { ExternalStore } from '../core/ExternalStore'
 import type { SectionId, Vec3Like } from '../core/types'
-import type { BrushDomain } from '../modifiers/types'
+import type {
+  BrushDomain,
+  CsgOperation,
+  PaintMode,
+} from '../modifiers/types'
+import type { TerrainPaintChannelId } from '../rendering/materialSettings'
 import type { TerrainRenderMode } from '../rendering/renderModes'
+import {
+  DEFAULT_GRANITE_ROCK_PARAMETERS,
+  type GraniteRockParameters,
+} from '../rocks/types'
 
 export type EditorTool =
   | 'select'
@@ -9,8 +18,17 @@ export type EditorTool =
   | 'lower'
   | 'smooth'
   | 'flatten'
+  | 'clay'
+  | 'pinch'
+  | 'scrape'
+  | 'terrace'
+  | 'noise'
+  | 'paint'
   | 'remesh'
   | 'tunnel'
+
+export type TransformMode = 'translate' | 'rotate' | 'scale'
+export type CsgPrimitive = 'box' | 'sphere' | 'capsule'
 
 export type TerrainOverlay =
   | 'none'
@@ -27,9 +45,19 @@ export interface EditorSnapshot {
   brushRadius: number
   brushStrength: number
   brushFalloff: number
+  terraceStep: number
+  noiseScale: number
+  activeSculptLayerId?: string
+  activePaintChannel: TerrainPaintChannelId
+  paintMode: PaintMode
   targetEdgeLength: number
   tunnelRadius: number
   tunnelDepth: number
+  csgPrimitive: CsgPrimitive
+  csgOperation: CsgOperation
+  csgSize: number
+  rockParameters: GraniteRockParameters
+  transformMode: TransformMode
   overlay: TerrainOverlay
   renderMode: TerrainRenderMode
   cameraMode: CameraMode
@@ -41,6 +69,7 @@ export interface EditorSnapshot {
   dragging: boolean
   selectedSection?: SectionId
   selectedModifierId?: string
+  selectedRockId?: string
   status: string
 }
 
@@ -50,9 +79,18 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   brushRadius: 22,
   brushStrength: 0.38,
   brushFalloff: 0.55,
+  terraceStep: 4,
+  noiseScale: 3,
+  activePaintChannel: 'channel0',
+  paintMode: 'add',
   targetEdgeLength: 2.5,
   tunnelRadius: 8,
   tunnelDepth: 14,
+  csgPrimitive: 'box',
+  csgOperation: 'subtract',
+  csgSize: 16,
+  rockParameters: { ...DEFAULT_GRANITE_ROCK_PARAMETERS },
+  transformMode: 'translate',
   overlay: 'none',
   renderMode: 'preview',
   cameraMode: 'orbit',
@@ -88,6 +126,6 @@ export class EditorStore extends ExternalStore<EditorSnapshot> {
   }
 
   hideCursor(): void {
-    this.patch({ cursorVisible: false, dragging: false })
+    this.patch({ cursorVisible: false })
   }
 }

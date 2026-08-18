@@ -41,6 +41,8 @@ export interface CompiledLOD {
     Uint16Array,
     Uint16Array,
   ]
+  /** Four user-painted material/biome weight channels, normalized u16 RGBA. */
+  paintWeights?: Uint16Array
   indices: Uint32Array
   triangleCount: number
   gpuBytes: number

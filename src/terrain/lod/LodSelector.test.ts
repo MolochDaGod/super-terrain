@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  cameraSectionDistance,
   constrainNeighborLods,
+  focusedLodCeiling,
   projectedGeometricError,
   selectLod,
   selectSourceLod,
@@ -15,6 +17,14 @@ const lods = [
 ]
 
 describe('screen-space LOD selection', () => {
+  it('anchors the finest-detail patch to the camera section, not the origin', () => {
+    const camera = { x: 512, y: 300, z: -256 }
+    expect(cameraSectionDistance({ x: 4, z: -2 }, camera, 128)).toBe(0)
+    expect(cameraSectionDistance({ x: 0, z: 0 }, camera, 128)).toBeCloseTo(
+      Math.sqrt(20),
+    )
+  })
+
   it('selects finer geometry near the camera and coarse geometry far away', () => {
     const near = selectLod({
       lods,
@@ -34,6 +44,37 @@ describe('screen-space LOD selection', () => {
     })
     expect(near).toBe(0)
     expect(far).toBe(4)
+  })
+
+  it('keeps the framed editing patch at real LOD0 from orbit distance', () => {
+    const terrainLods = [
+      { level: 0, geometricError: 0 },
+      { level: 1, geometricError: 0.083 },
+      { level: 2, geometricError: 0.398 },
+      { level: 3, geometricError: 0.79 },
+      { level: 4, geometricError: 1.58 },
+    ]
+    const orbitView = {
+      lods: terrainLods,
+      distance: 400,
+      viewportHeight: 720,
+      verticalFovRadians: (48 * Math.PI) / 180,
+      errorTolerancePixels: 2.2,
+      currentLod: 3,
+    }
+    expect(selectLod(orbitView)).toBeGreaterThan(0)
+    expect(selectLod({
+      ...orbitView,
+      focusDistanceSections: Math.SQRT2,
+      lod0FocusRadiusSections: 1.75,
+    })).toBe(0)
+    expect(selectLod({
+      ...orbitView,
+      focusDistanceSections: 2,
+      lod0FocusRadiusSections: 1.75,
+    })).toBe(1)
+    expect(focusedLodCeiling(Math.SQRT2, 1.75, 4)).toBe(0)
+    expect(focusedLodCeiling(Math.sqrt(8), 1.75, 4)).toBe(2)
   })
 
   it('uses hysteresis instead of flipping exactly at the threshold', () => {

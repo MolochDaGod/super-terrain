@@ -1,21 +1,25 @@
 import type { TerrainModifier } from '../modifiers/types'
+import type { GraniteRock } from '../rocks/types'
 
 export interface SerializedTerrainWorld {
-  version: 4
+  version: 6
   worldId: string
   savedAt: number
   modifiers: TerrainModifier[]
+  rocks: GraniteRock[]
 }
 
 export function serializeWorld(
   worldId: string,
   modifiers: TerrainModifier[],
+  rocks: GraniteRock[] = [],
 ): string {
   const payload: SerializedTerrainWorld = {
-    version: 4,
+    version: 6,
     worldId,
     savedAt: Date.now(),
     modifiers,
+    rocks,
   }
   return JSON.stringify(payload)
 }
@@ -26,14 +30,13 @@ export function deserializeWorld(serialized: string): SerializedTerrainWorld {
     worldId?: string
     savedAt?: number
     modifiers?: TerrainModifier[]
+    rocks?: GraniteRock[]
   }
   if (
-    (parsed.version !== 1 &&
-      parsed.version !== 2 &&
-      parsed.version !== 3 &&
-      parsed.version !== 4) ||
+    ![1, 2, 3, 4, 5, 6].includes(parsed.version ?? -1) ||
     typeof parsed.worldId !== 'string' ||
-    !Array.isArray(parsed.modifiers)
+    !Array.isArray(parsed.modifiers) ||
+    (parsed.rocks !== undefined && !Array.isArray(parsed.rocks))
   ) {
     throw new Error('Unsupported or invalid terrain world data')
   }
@@ -41,6 +44,7 @@ export function deserializeWorld(serialized: string): SerializedTerrainWorld {
     worldId: parsed.worldId,
     savedAt: parsed.savedAt ?? Date.now(),
     modifiers: parsed.modifiers,
-    version: 4,
+    rocks: parsed.rocks ?? [],
+    version: 6,
   }
 }

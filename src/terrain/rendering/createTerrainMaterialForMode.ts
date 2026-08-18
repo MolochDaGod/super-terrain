@@ -5,6 +5,10 @@ import {
   type FullMaterialDebug,
 } from './full/createFullTerrainMaterial'
 import type { TerrainRenderMode } from './renderModes'
+import {
+  DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+  type TerrainMaterialSettings,
+} from './materialSettings'
 
 export interface TerrainMaterialHandle {
   material: Material
@@ -15,8 +19,9 @@ export interface TerrainMaterialHandle {
 export function createTerrainMaterialForMode(
   mode: TerrainRenderMode,
   debug: FullMaterialDebug = 'none',
+  settings: TerrainMaterialSettings = DEFAULT_TERRAIN_MATERIAL_SETTINGS,
 ): TerrainMaterialHandle {
   return mode === 'full'
-    ? createFullTerrainMaterial({ debug })
-    : createTerrainMaterial()
+    ? createFullTerrainMaterial({ debug, materialSettings: settings })
+    : createTerrainMaterial(settings)
 }

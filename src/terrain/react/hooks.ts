@@ -21,3 +21,11 @@ export function useModifierRevision(terrain: WorldTerrain) {
     terrain.modifiers.getSnapshot,
   )
 }
+
+export function useGraniteRockRevision(terrain: WorldTerrain) {
+  return useSyncExternalStore(
+    terrain.rocks.subscribe,
+    terrain.rocks.getSnapshot,
+    terrain.rocks.getSnapshot,
+  )
+}

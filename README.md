@@ -2,7 +2,7 @@
 
 A browser-first, partitioned mesh-terrain editor inspired by Unreal Engine 5.8's Mesh Terrain architecture. It runs on Three.js `WebGPURenderer` through React Three Fiber and keeps terrain authoring, compilation, streaming, and rendering as separate systems.
 
-This is not a single heightmap mesh. The demo world is a sparse 16 km × 16 km logical terrain with editable topology, local density control, real tunnel interior geometry, five geometric LODs, worker compilation, bounded residency, and IndexedDB persistence.
+This is not a single heightmap mesh. The demo world is a sparse 16 km × 16 km logical terrain with sculpt layers, configurable weight-painted materials, editable topology, live add/subtract CSG objects, local density control, tunnel interiors, five geometric LODs, worker compilation, bounded residency, and IndexedDB persistence.
 
 ## Requirements
 
@@ -32,10 +32,14 @@ bun run build
 - Inspect mode: left-drag orbits, right-drag pans, wheel/middle dollies.
 - Editing mode: left-drag applies the brush; Alt+left-drag orbits.
 - `W A S D` flies laterally, `Q / E` changes elevation, and Shift accelerates.
-- `1`–`7` selects inspect, raise, lower, smooth, flatten, density, and tunnel tools.
+- `1`–`0` selects inspect and the sculpt tools; `P`, `G`, and `T` select paint, density, and tunnel.
 - `[` / `]` changes brush radius; `H` toggles telemetry.
 
-The inspector exposes two authoring domains. **Heightfield · Y** keeps brush displacement vertical for traditional landscape work. **Mesh · XYZ** follows the picked surface normal, so strokes can push into X/Z and form lateral deformation or overhangs. One uninterrupted press/drag creates one non-destructive modifier containing spatially resampled, frame-scaled brush flow: holding in place raises or lowers continuously instead of stamping discrete full-strength dabs. Density operations and tunnel subtractions are modifiers too. Select a stack entry to enable, move, rotate, scale, or delete it; affected sections are then rebuilt from source.
+The inspector exposes two authoring domains. **Heightfield · Y** keeps brush displacement vertical for traditional landscape work. **Mesh · XYZ** follows the picked surface normal, so strokes can push into X/Z and form lateral deformation or overhangs. Raise/lower, smooth, flatten, clay, pinch, scrape, terrace, and seeded noise strokes remain grouped into editable sculpt layers. Four paint channels have configurable names, colors, and roughness.
+
+The Granite Rock Lab ports scifi-kit's seed-driven fractured-granite SDF through QEF dual contouring and the source metre conversion. Formation, uniform placement scale, wetness, lichen, moss, snow, relief, seed, and topology quality stay editable after placement. A selected scene rock can be snapshotted with its current transform as an exact add/subtract CSG operand without removing or coupling the original rock.
+
+Procedural boxes, spheres, capsules, and imported GLB triangle meshes also become live exact-CSG modifiers. Choose add or subtract, then select the operand to translate, pitch/yaw/roll, or scale it with the viewport gizmo or numeric controls. Moving it later re-evaluates the terrain instead of baking the result.
 
 Edits preview immediately on the active GPU mesh. The authoritative modifier stack is compiled off-thread, revision-checked, and swapped into the scene only when the frame budget permits.
 
@@ -80,9 +84,10 @@ authored source through streaming eviction, and exposes defensive copies through
 its deterministic recipe.
 
 This source contract is intentionally internal while the editor is a prototype.
-The current IndexedDB record still stores only modifiers; project/document
-persistence and interchange import belong to the later document workflow, so
-this phase does not freeze or migrate a public mesh file format.
+The current IndexedDB record stores modifiers and authored procedural-rock
+recipes/transforms. Arbitrary section source meshes still need the later
+project/document workflow, so this phase does not freeze or migrate a public
+mesh file format for those sources.
 
 ## Terrain pipeline
 
@@ -94,7 +99,7 @@ The editor includes repeatable sculpt, rebuild, and high-speed streaming torture
 
 ## Persistence
 
-Modifier data is stored locally in IndexedDB. Save writes the current terrain edit graph; Reset clears local data and restores the demonstration tunnel and remeshed high-density region. Persistence sits behind `TerrainStorage`, so another section-oriented backend can replace IndexedDB without changing the editor or terrain engine.
+Modifier data and authored granite-rock recipes/transforms are stored locally in IndexedDB. Save writes the current terrain edit graph and placed rocks; Reset clears local data and restores the demonstration tunnel and remeshed high-density region. Persistence sits behind `TerrainStorage`, so another section-oriented backend can replace IndexedDB without changing the editor or terrain engine.
 
 ## Tests
 

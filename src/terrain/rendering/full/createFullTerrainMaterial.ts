@@ -33,6 +33,11 @@ import {
   surfaceDetail,
   terrainSlowFields,
 } from './surface'
+import {
+  DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+  type TerrainMaterialSettings,
+} from '../materialSettings'
+import { applyTerrainPaint } from '../terrainPaintMaterial'
 
 /**
  * Unlit inspection views. Shading bugs and material bugs look identical in a
@@ -53,6 +58,7 @@ export interface FullTerrainMaterialOptions {
   /** Scales every micro-relief effect; 0 disables parallax entirely. */
   detailScale?: number
   debug?: FullMaterialDebug
+  materialSettings?: TerrainMaterialSettings
 }
 
 function debugView(debug: FullMaterialDebug, surface: any) {
@@ -116,6 +122,8 @@ export function createFullTerrainMaterial(
 ) {
   const detailScale = options.detailScale ?? 1
   const debug = options.debug ?? 'none'
+  const materialSettings =
+    options.materialSettings ?? DEFAULT_TERRAIN_MATERIAL_SETTINGS
   const material = new MeshStandardNodeMaterial({
     metalness: 0,
     side: DoubleSide,
@@ -227,6 +235,11 @@ export function createFullTerrainMaterial(
   })()
 
   const surface = evaluate as any
+  const painted = applyTerrainPaint(
+    surface.get('albedo'),
+    surface.get('roughness'),
+    materialSettings,
+  )
   if (debug !== 'none') {
     // Unlit: whatever is inspected must not be modulated by the lighting that
     // is under investigation.
@@ -235,8 +248,8 @@ export function createFullTerrainMaterial(
     return { material, dispose: () => material.dispose() }
   }
 
-  material.colorNode = surface.get('albedo')
-  material.roughnessNode = surface.get('roughness')
+  material.colorNode = painted.color
+  material.roughnessNode = painted.roughness
   material.normalNode = surface.get('normal').transformDirection(cameraViewMatrix)
   material.aoNode = surface.get('occlusion')
 

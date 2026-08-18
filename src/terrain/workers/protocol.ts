@@ -21,6 +21,10 @@ export interface BrushModifierDescriptor {
   strength: number
   falloff: number
   targetY?: number
+  terraceStep?: number
+  noiseScale?: number
+  noiseSeed?: number
+  sculptLayerId?: string
   pointOffset: number
   pointCount: number
 }
@@ -113,6 +117,10 @@ export function encodeModifiers(modifiers: TerrainModifier[]): ModifierPacket {
       strength: modifier.strength,
       falloff: modifier.falloff,
       targetY: modifier.targetY,
+      terraceStep: modifier.terraceStep,
+      noiseScale: modifier.noiseScale,
+      noiseSeed: modifier.noiseSeed,
+      sculptLayerId: modifier.sculptLayerId,
       pointOffset,
       pointCount: modifier.points.length,
     })
@@ -155,6 +163,7 @@ export function compiledTransferables(compiled: CompiledSection): Transferable[]
       lod.normals.buffer,
       lod.colors.buffer,
       ...(lod.surfaceFields?.map((field) => field.buffer) ?? []),
+      ...(lod.paintWeights ? [lod.paintWeights.buffer] : []),
       lod.indices.buffer,
     )
   }

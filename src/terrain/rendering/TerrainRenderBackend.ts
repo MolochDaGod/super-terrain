@@ -8,6 +8,13 @@ import type { TerrainOverlay } from '../editor/EditorStore'
 import type { TerrainRenderMode } from './renderModes'
 import type { CompiledSection, SectionId } from '../core/types'
 import type { TerrainSection } from '../partition/MeshPartition'
+import type {
+  PaintMode,
+} from '../modifiers/types'
+import type {
+  TerrainMaterialSettings,
+  TerrainPaintChannelId,
+} from './materialSettings'
 
 export interface TerrainRenderStats {
   gpuBytes: number
@@ -31,6 +38,18 @@ export interface PreviewBrush {
   strength: number
   falloff: number
   targetY?: number
+  terraceStep?: number
+  noiseScale?: number
+  noiseSeed?: number
+}
+
+export interface PreviewWeightPaint {
+  samples: readonly BrushSample[]
+  channel: TerrainPaintChannelId
+  mode: PaintMode
+  radius: number
+  strength: number
+  falloff: number
 }
 
 export interface TerrainRenderBackend {
@@ -41,7 +60,9 @@ export interface TerrainRenderBackend {
   setSectionState(section: TerrainSection): void
   setOverlay(overlay: TerrainOverlay): void
   setRenderMode(mode: TerrainRenderMode): void
+  setMaterialSettings(settings: TerrainMaterialSettings): void
   previewBrush(preview: PreviewBrush): void
+  previewWeightPaint(preview: PreviewWeightPaint): void
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined
   flushDeferredDisposals(maxCount: number): void
   evict(sectionId: SectionId): void

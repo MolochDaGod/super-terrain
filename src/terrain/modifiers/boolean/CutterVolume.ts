@@ -33,6 +33,7 @@ export type CutterVolume =
   | CapsuleCutter
   | EllipsoidCutter
   | BoxCutter
+  | MeshCutter
 
 interface CutterBase {
   /**
@@ -40,7 +41,7 @@ interface CutterBase {
    * analytic reads as machined, so this is effectively required for anything
    * meant to look like rock.
    */
-  surface?: keyof typeof DISPLACEMENT_PROFILES
+  surface?: keyof typeof DISPLACEMENT_PROFILES | 'none'
 }
 
 /** One elliptical cross-section of a continuous authored void. */
@@ -81,6 +82,7 @@ export interface EllipsoidCutter extends CutterBase {
   radii: Vec3Like
   /** World direction the local +x axis points along. */
   forward: Vec3Like
+  up?: Vec3Like
 }
 
 /** A rotated box, used for the straight-walled reaches of a slot canyon. */
@@ -89,6 +91,14 @@ export interface BoxCutter extends CutterBase {
   center: Vec3Like
   halfExtents: Vec3Like
   forward: Vec3Like
+  up?: Vec3Like
+}
+
+/** Serializable closed triangle mesh used as a non-destructive CSG operand. */
+export interface MeshCutter extends CutterBase {
+  kind: 'mesh'
+  positions: number[]
+  indices: number[]
 }
 
 export function cloneCutterVolume(cutter: CutterVolume): CutterVolume {
@@ -103,6 +113,7 @@ export function cloneCutterVolume(cutter: CutterVolume): CutterVolume {
         center: { ...cutter.center },
         radii: { ...cutter.radii },
         forward: { ...cutter.forward },
+        up: cutter.up ? { ...cutter.up } : undefined,
       }
     case 'box':
       return {
@@ -110,6 +121,13 @@ export function cloneCutterVolume(cutter: CutterVolume): CutterVolume {
         center: { ...cutter.center },
         halfExtents: { ...cutter.halfExtents },
         forward: { ...cutter.forward },
+        up: cutter.up ? { ...cutter.up } : undefined,
+      }
+    case 'mesh':
+      return {
+        ...cutter,
+        positions: [...cutter.positions],
+        indices: [...cutter.indices],
       }
   }
 }
@@ -138,15 +156,19 @@ export function cutterGeometry(
       ? buildSweptCaveGeometry(cutter, detail)
       : buildLocalGeometry(cutter, detail)
   geometry.deleteAttribute('uv')
-  if (cutter.kind !== 'sweep') geometry.applyMatrix4(cutterMatrix(cutter))
+  if (cutter.kind !== 'sweep' && cutter.kind !== 'mesh') {
+    geometry.applyMatrix4(cutterMatrix(cutter))
+  }
   // Displaced in world space, and only after the transform is baked. Roughening
   // in the primitive's local frame would make the noise rotate and stretch with
   // the shape, and — far worse — two sections cutting the same formation would
   // disagree about the surface and leave a crack at the seam.
-  const profile =
-    DISPLACEMENT_PROFILES[cutter.surface ?? 'default'] ??
-    DISPLACEMENT_PROFILES.default
-  displaceCutterGeometry(geometry, cutter, profile, seed)
+  if (cutter.surface !== 'none' && cutter.kind !== 'mesh') {
+    const profile =
+      DISPLACEMENT_PROFILES[cutter.surface ?? 'default'] ??
+      DISPLACEMENT_PROFILES.default
+    displaceCutterGeometry(geometry, cutter, profile, seed)
+  }
   return geometry
 }
 
@@ -182,6 +204,16 @@ function buildLocalGeometry(
         scaled(BOX_SEGMENTS),
         scaled(BOX_SEGMENTS),
       )
+    case 'mesh': {
+      const geometry = new BufferGeometry()
+      geometry.setAttribute(
+        'position',
+        new BufferAttribute(Float32Array.from(cutter.positions), 3),
+      )
+      geometry.setIndex(new BufferAttribute(Uint32Array.from(cutter.indices), 1))
+      geometry.computeVertexNormals()
+      return geometry
+    }
   }
 }
 
@@ -288,7 +320,7 @@ function sweepFrames(rings: readonly SweepRing[]): SweepFrame[] {
 }
 
 function cutterMatrix(cutter: CutterVolume): Matrix4 {
-  if (cutter.kind === 'sweep') return new Matrix4()
+  if (cutter.kind === 'sweep' || cutter.kind === 'mesh') return new Matrix4()
   if (cutter.kind === 'capsule') {
     // Capsule geometry is built along +y, so the rotation takes +y to the axis.
     const axis = new Vector3(
@@ -318,9 +350,20 @@ function cutterMatrix(cutter: CutterVolume): Matrix4 {
   forward.normalize()
   const size =
     cutter.kind === 'ellipsoid' ? cutter.radii : cutter.halfExtents
+  const up = new Vector3(
+    cutter.up?.x ?? 0,
+    cutter.up?.y ?? 1,
+    cutter.up?.z ?? 0,
+  ).normalize()
+  const side = new Vector3().crossVectors(forward, up)
+  if (side.lengthSq() < 1e-8) side.set(0, 0, 1)
+  else side.normalize()
+  const correctedUp = new Vector3().crossVectors(side, forward).normalize()
+  const rotation = new Matrix4().makeBasis(forward, correctedUp, side)
+  const quaternion = new Quaternion().setFromRotationMatrix(rotation)
   return new Matrix4().compose(
     new Vector3(cutter.center.x, cutter.center.y, cutter.center.z),
-    new Quaternion().setFromUnitVectors(new Vector3(1, 0, 0), forward),
+    quaternion,
     new Vector3(size.x, size.y, size.z),
   )
 }
@@ -385,6 +428,27 @@ export function mergeCutterGeometries(
  */
 export function cutterBounds(cutter: CutterVolume): AABB {
   const margin = cutterDisplacementBudget(cutter)
+  if (cutter.kind === 'mesh') {
+    if (cutter.positions.length < 3) {
+      return {
+        min: { x: 0, y: 0, z: 0 },
+        max: { x: 0, y: 0, z: 0 },
+      }
+    }
+    const bounds: AABB = {
+      min: { x: Infinity, y: Infinity, z: Infinity },
+      max: { x: -Infinity, y: -Infinity, z: -Infinity },
+    }
+    for (let offset = 0; offset < cutter.positions.length; offset += 3) {
+      bounds.min.x = Math.min(bounds.min.x, cutter.positions[offset])
+      bounds.min.y = Math.min(bounds.min.y, cutter.positions[offset + 1])
+      bounds.min.z = Math.min(bounds.min.z, cutter.positions[offset + 2])
+      bounds.max.x = Math.max(bounds.max.x, cutter.positions[offset])
+      bounds.max.y = Math.max(bounds.max.y, cutter.positions[offset + 1])
+      bounds.max.z = Math.max(bounds.max.z, cutter.positions[offset + 2])
+    }
+    return bounds
+  }
   if (cutter.kind === 'sweep') {
     const first = cutter.rings[0]
     if (!first) {
@@ -425,19 +489,19 @@ export function cutterBounds(cutter: CutterVolume): AABB {
       },
     }
   }
-  // Rotation is about Y only in practice, but the conservative bound is the
-  // largest half-extent applied on every axis, which costs nothing here.
+  // CSG operands can pitch, yaw and roll. A spherical conservative bound keeps
+  // section invalidation correct for every orientation.
   const size = cutter.kind === 'ellipsoid' ? cutter.radii : cutter.halfExtents
-  const reach = Math.max(size.x, size.z) + margin
+  const reach = Math.max(size.x, size.y, size.z) + margin
   return {
     min: {
       x: cutter.center.x - reach,
-      y: cutter.center.y - size.y - margin,
+      y: cutter.center.y - reach,
       z: cutter.center.z - reach,
     },
     max: {
       x: cutter.center.x + reach,
-      y: cutter.center.y + size.y + margin,
+      y: cutter.center.y + reach,
       z: cutter.center.z + reach,
     },
   }

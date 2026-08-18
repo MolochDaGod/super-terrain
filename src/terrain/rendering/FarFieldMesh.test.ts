@@ -26,7 +26,7 @@ describe('far-field terrain mesh', () => {
     // This is a grid vertex in the denser proxy. It used to be lowered solely
     // for overlap prevention, which made the atmosphere treat the ridge as
     // valley floor and abruptly veil it at the residency boundary. Overlap is
-    // now handled by the proxy material's far-plane depth instead.
+    // now handled by the resident/proxy stencil mask instead.
     const worldX = 768
     const worldZ = 256
     const proxyHeight = interpolateGridHeight(

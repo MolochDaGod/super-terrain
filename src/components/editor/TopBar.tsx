@@ -38,7 +38,12 @@ export function TopBar({ terrain, editor }: TopBarProps) {
   const reset = async () => {
     if (!window.confirm('Reset all local terrain edits to the demo world?')) return
     await terrain.resetEdits()
-    editor.patch({ status: 'Terrain reset; sections rebuilding asynchronously' })
+    editor.patch({
+      activeSculptLayerId: terrain.getSculptLayers()[0]?.id,
+      selectedModifierId: undefined,
+      selectedRockId: undefined,
+      status: 'Terrain reset; sections rebuilding asynchronously',
+    })
   }
 
   return (

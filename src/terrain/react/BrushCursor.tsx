@@ -45,9 +45,15 @@ export function BrushCursor({ editor }: BrushCursorProps) {
     cursor.visible = snapshot.cursorVisible && snapshot.tool !== 'select'
     cursorNormal
       .set(
-        snapshot.brushDomain === 'mesh' ? snapshot.cursorNormal.x : 0,
-        snapshot.brushDomain === 'mesh' ? snapshot.cursorNormal.y : 1,
-        snapshot.brushDomain === 'mesh' ? snapshot.cursorNormal.z : 0,
+        snapshot.brushDomain === 'mesh' || snapshot.tool === 'paint'
+          ? snapshot.cursorNormal.x
+          : 0,
+        snapshot.brushDomain === 'mesh' || snapshot.tool === 'paint'
+          ? snapshot.cursorNormal.y
+          : 1,
+        snapshot.brushDomain === 'mesh' || snapshot.tool === 'paint'
+          ? snapshot.cursorNormal.z
+          : 0,
       )
       .normalize()
     cursor.position

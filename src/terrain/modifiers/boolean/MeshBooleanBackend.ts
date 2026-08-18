@@ -4,8 +4,8 @@ import {
   Matrix4,
   MeshBasicMaterial,
 } from 'three'
-import { Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg'
-import type { BooleanSubtractModifier } from '../types'
+import { ADDITION, Brush, Evaluator, SUBTRACTION } from 'three-bvh-csg'
+import type { BooleanSubtractModifier, CsgOperation } from '../types'
 import { transformedTunnel } from '../transform'
 import { tunnelPathPoints } from '../tunnel'
 import {
@@ -24,6 +24,15 @@ export interface BooleanMeshBuffers {
 
 export interface MeshBooleanBackend {
   readonly id: string
+  evaluate(
+    target: BooleanMeshBuffers,
+    operations: readonly MeshBooleanOperation[],
+    sectionOriginX: number,
+    sectionOriginZ: number,
+    sectionSize: number,
+    detail: number,
+    seed?: number,
+  ): BooleanMeshBuffers
   subtract(
     target: BooleanMeshBuffers,
     cutters: CutterVolume[],
@@ -33,6 +42,11 @@ export interface MeshBooleanBackend {
     detail: number,
     seed?: number,
   ): BooleanMeshBuffers
+}
+
+export interface MeshBooleanOperation {
+  operation: CsgOperation
+  cutters: readonly CutterVolume[]
 }
 
 /**
@@ -113,7 +127,7 @@ function distance(
  * walls/ceiling/floor produced by the boolean itself.
  */
 export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
-  readonly id = 'bvh-csg-tunnel-v3'
+  readonly id = 'bvh-csg-nondestructive-v4'
   private readonly surfaceMaterial = new MeshBasicMaterial()
   private readonly closureMaterial = new MeshBasicMaterial()
   private readonly interiorMaterial = new MeshBasicMaterial()
@@ -127,29 +141,58 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     detail: number,
     seed = 0,
   ): BooleanMeshBuffers {
-    if (cutters.length === 0) return target
+    return this.evaluate(
+      target,
+      [{ operation: 'subtract', cutters }],
+      sectionOriginX,
+      sectionOriginZ,
+      sectionSize,
+      detail,
+      seed,
+    )
+  }
+
+  evaluate(
+    target: BooleanMeshBuffers,
+    operations: readonly MeshBooleanOperation[],
+    sectionOriginX: number,
+    sectionOriginZ: number,
+    sectionSize: number,
+    detail: number,
+    seed = 0,
+  ): BooleanMeshBuffers {
+    if (operations.length === 0) return target
 
     const sectionMaximumX = sectionOriginX + sectionSize
     const sectionMaximumZ = sectionOriginZ + sectionSize
-    const localCutters = cutters.filter((cutter) => {
-      const bounds = cutterBounds(cutter)
-      return (
-        bounds.min.x <= sectionMaximumX &&
-        bounds.max.x >= sectionOriginX &&
-        bounds.min.z <= sectionMaximumZ &&
-        bounds.max.z >= sectionOriginZ
-      )
-    })
-    if (localCutters.length === 0) return target
+    const localOperations = operations
+      .map((operation) => ({
+        operation: operation.operation,
+        cutters: operation.cutters.filter((cutter) => {
+          const bounds = cutterBounds(cutter)
+          return (
+            bounds.min.x <= sectionMaximumX &&
+            bounds.max.x >= sectionOriginX &&
+            bounds.min.z <= sectionMaximumZ &&
+            bounds.max.z >= sectionOriginZ
+          )
+        }),
+      }))
+      .filter((operation) => operation.cutters.length > 0)
+    if (localOperations.length === 0) return target
 
     // Tunnel segments deliberately overlap at bends. Concatenating those shells
     // into one Brush creates a self-intersecting, non-manifold cutter; exact CSG
     // then classifies large parts of the section inconsistently and can erase a
     // whole tile. Apply each closed volume as its own Boolean instead. The result
     // is exactly target \ union(cutters), including where the volumes overlap.
-    const geometries = localCutters.map((cutter) =>
-      cutterGeometry(cutter, detail, seed),
+    const steps = localOperations.flatMap((operation) =>
+      operation.cutters.map((cutter) => ({
+        operation: operation.operation,
+        geometry: cutterGeometry(cutter, detail, seed),
+      })),
     )
+    const geometries = steps.map((step) => step.geometry)
     const translation = new Matrix4().makeTranslation(
       -sectionOriginX,
       0,
@@ -161,20 +204,31 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     evaluator.useGroups = true
 
     let result = this.createTerrainSolid(target, sectionSize, geometries)
-    for (const geometry of geometries) {
+    for (const step of steps) {
+      const { geometry, operation } = step
       geometry.applyMatrix4(translation)
-      const cutterBrush = new Brush(geometry, this.interiorMaterial)
+      const cutterBrush = new Brush(
+        geometry,
+        operation === 'subtract'
+          ? this.interiorMaterial
+          : this.surfaceMaterial,
+      )
       cutterBrush.updateMatrixWorld(true)
       const previous = result
-      result = evaluator.evaluate(previous, cutterBrush, SUBTRACTION)
+      result = evaluator.evaluate(
+        previous,
+        cutterBrush,
+        operation === 'subtract' ? SUBTRACTION : ADDITION,
+      )
       if (result !== previous) previous.geometry.dispose()
       cutterBrush.geometry.dispose()
     }
 
     const extracted = this.extractVisibleGeometry(result)
     snapSectionBoundaryVertices(extracted.positions, sectionSize)
+    const cleaned = removeBooleanSliverTriangles(extracted)
     result.geometry.dispose()
-    return isUsableBooleanResult(extracted) ? extracted : target
+    return isUsableBooleanResult(cleaned) ? cleaned : target
   }
 
   private createTerrainSolid(
@@ -337,6 +391,46 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
       interiorVertices: Uint8Array.from(interior),
     }
   }
+}
+
+/**
+ * Exact triangle intersections can leave zero-area numerical shards, especially
+ * after a seam coordinate is snapped to its authoritative section plane. They
+ * carry no visible surface but fail the authoritative mesh validator and can
+ * otherwise put a section into an endless rebuild loop.
+ */
+export function removeBooleanSliverTriangles(
+  result: BooleanMeshBuffers,
+  minimumDoubleAreaSquared = 2e-12,
+): BooleanMeshBuffers {
+  const indices: number[] = []
+  for (let offset = 0; offset < result.indices.length; offset += 3) {
+    const a = result.indices[offset]!
+    const b = result.indices[offset + 1]!
+    const c = result.indices[offset + 2]!
+    if (a === b || b === c || c === a) continue
+    const ai = a * 3
+    const bi = b * 3
+    const ci = c * 3
+    const abx = result.positions[bi]! - result.positions[ai]!
+    const aby = result.positions[bi + 1]! - result.positions[ai + 1]!
+    const abz = result.positions[bi + 2]! - result.positions[ai + 2]!
+    const acx = result.positions[ci]! - result.positions[ai]!
+    const acy = result.positions[ci + 1]! - result.positions[ai + 1]!
+    const acz = result.positions[ci + 2]! - result.positions[ai + 2]!
+    const crossX = aby * acz - abz * acy
+    const crossY = abz * acx - abx * acz
+    const crossZ = abx * acy - aby * acx
+    if (
+      crossX * crossX + crossY * crossY + crossZ * crossZ <
+      minimumDoubleAreaSquared
+    ) {
+      continue
+    }
+    indices.push(a, b, c)
+  }
+  if (indices.length === result.indices.length) return result
+  return { ...result, indices: Uint32Array.from(indices) }
 }
 
 function isUsableBooleanResult(result: BooleanMeshBuffers): boolean {

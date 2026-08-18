@@ -20,7 +20,12 @@ function App() {
   useEffect(() => {
     let active = true
     void terrain.initialize().then(() => {
-      if (active) editor.patch({ status: 'Stream scheduler online' })
+      if (active) {
+        editor.patch({
+          activeSculptLayerId: terrain.getSculptLayers()[0]?.id,
+          status: 'Stream scheduler online',
+        })
+      }
     })
     return () => {
       active = false

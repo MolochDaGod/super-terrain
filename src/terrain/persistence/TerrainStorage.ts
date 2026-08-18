@@ -1,9 +1,16 @@
 import type { TerrainModifier } from '../modifiers/types'
+import type { GraniteRock } from '../rocks/types'
 import { deserializeWorld, serializeWorld } from './serialization'
 
 export interface TerrainStorage {
   load(worldId: string): Promise<TerrainModifier[] | undefined>
-  save(worldId: string, modifiers: TerrainModifier[]): Promise<void>
+  /** Optional for legacy/in-memory adapters; absent means no authored rocks. */
+  loadRocks?(worldId: string): Promise<GraniteRock[] | undefined>
+  save(
+    worldId: string,
+    modifiers: TerrainModifier[],
+    rocks?: GraniteRock[],
+  ): Promise<void>
   clear(worldId: string): Promise<void>
 }
 
@@ -26,11 +33,28 @@ export class IndexedDbTerrainStorage implements TerrainStorage {
     return serialized ? deserializeWorld(serialized).modifiers : undefined
   }
 
-  async save(worldId: string, modifiers: TerrainModifier[]): Promise<void> {
+  async loadRocks(worldId: string): Promise<GraniteRock[] | undefined> {
+    if (typeof indexedDB === 'undefined') return undefined
+    const database = await this.open()
+    const serialized = await requestResult<string | undefined>(
+      database.transaction(this.storeName, 'readonly').objectStore(this.storeName).get(worldId),
+    )
+    database.close()
+    return serialized ? deserializeWorld(serialized).rocks : undefined
+  }
+
+  async save(
+    worldId: string,
+    modifiers: TerrainModifier[],
+    rocks: GraniteRock[] = [],
+  ): Promise<void> {
     if (typeof indexedDB === 'undefined') return
     const database = await this.open()
     const transaction = database.transaction(this.storeName, 'readwrite')
-    transaction.objectStore(this.storeName).put(serializeWorld(worldId, modifiers), worldId)
+    transaction.objectStore(this.storeName).put(
+      serializeWorld(worldId, modifiers, rocks),
+      worldId,
+    )
     await transactionComplete(transaction)
     database.close()
   }

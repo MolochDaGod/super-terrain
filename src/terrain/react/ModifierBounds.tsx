@@ -8,6 +8,7 @@ import {
 import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
 import { TunnelModifierPreview } from './TunnelModifierPreview'
+import { BooleanVolumePreview } from './BooleanVolumePreview'
 
 interface ModifierBoundsProps {
   terrain: WorldTerrain
@@ -72,6 +73,7 @@ export function ModifierBounds({ terrain, editor }: ModifierBoundsProps) {
         visible={false}
       />
       <TunnelModifierPreview terrain={terrain} editor={editor} />
+      <BooleanVolumePreview terrain={terrain} editor={editor} />
     </>
   )
 }

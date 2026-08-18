@@ -11,6 +11,7 @@ export interface SkirtedGeometryData {
     Uint16Array,
     Uint16Array,
   ]
+  paintWeights: Uint16Array
   indices: Uint32Array
 }
 
@@ -28,12 +29,14 @@ interface EdgeUse {
 export function addSectionSkirts(
   lod: Pick<
     CompiledLOD,
-    'positions' | 'normals' | 'colors' | 'surfaceFields' | 'indices'
+    'positions' | 'normals' | 'colors' | 'surfaceFields' | 'paintWeights' | 'indices'
   >,
   sectionSize: number,
 ): SkirtedGeometryData {
   const sourceSurfaceFields =
     lod.surfaceFields ?? createDefaultSurfaceFields(lod.positions.length / 3)
+  const sourcePaintWeights =
+    lod.paintWeights ?? new Uint16Array((lod.positions.length / 3) * 4)
   const edges = collectOpenEdges(lod.indices)
   const candidates = edges
     .map((edge) => ({ edge, normal: ownershipPlaneNormal(lod.positions, edge, sectionSize) }))
@@ -41,7 +44,11 @@ export function addSectionSkirts(
       candidate.normal !== undefined,
     )
   if (candidates.length === 0) {
-    return { ...lod, surfaceFields: sourceSurfaceFields }
+    return {
+      ...lod,
+      surfaceFields: sourceSurfaceFields,
+      paintWeights: sourcePaintWeights,
+    }
   }
 
   const positions = Array.from(lod.positions)
@@ -54,6 +61,7 @@ export function addSectionSkirts(
     number[],
     number[],
   ]
+  const paintWeights = Array.from(sourcePaintWeights)
   const indices = Array.from(lod.indices)
   const skirtDepth = Math.max(1.5, sectionSize / 32)
 
@@ -61,10 +69,10 @@ export function addSectionSkirts(
     const first = edge.a * 3
     const second = edge.b * 3
     const base = positions.length / 3
-    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, first, normal, 0)
-    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, first, normal, -skirtDepth)
-    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, second, normal, 0)
-    appendVertex(positions, normals, colors, surfaceFields, lod, sourceSurfaceFields, second, normal, -skirtDepth)
+    appendVertex(positions, normals, colors, surfaceFields, paintWeights, lod, sourceSurfaceFields, sourcePaintWeights, first, normal, 0)
+    appendVertex(positions, normals, colors, surfaceFields, paintWeights, lod, sourceSurfaceFields, sourcePaintWeights, first, normal, -skirtDepth)
+    appendVertex(positions, normals, colors, surfaceFields, paintWeights, lod, sourceSurfaceFields, sourcePaintWeights, second, normal, 0)
+    appendVertex(positions, normals, colors, surfaceFields, paintWeights, lod, sourceSurfaceFields, sourcePaintWeights, second, normal, -skirtDepth)
     indices.push(base, base + 1, base + 2, base + 2, base + 1, base + 3)
   }
 
@@ -79,6 +87,7 @@ export function addSectionSkirts(
       Uint16Array,
       Uint16Array,
     ],
+    paintWeights: Uint16Array.from(paintWeights),
     indices: Uint32Array.from(indices),
   }
 }
@@ -88,6 +97,7 @@ function appendVertex(
   normals: number[],
   colors: number[],
   surfaceFields: [number[], number[], number[], number[], number[]],
+  paintWeights: number[],
   source: Pick<CompiledLOD, 'positions' | 'colors'>,
   sourceSurfaceFields: readonly [
     Uint16Array,
@@ -96,6 +106,7 @@ function appendVertex(
     Uint16Array,
     Uint16Array,
   ],
+  sourcePaintWeights: Uint16Array,
   offset: number,
   normal: readonly [number, number, number],
   yOffset: number,
@@ -121,6 +132,12 @@ function appendVertex(
       sourceSurfaceFields[field][fieldOffset + 3],
     )
   }
+  paintWeights.push(
+    sourcePaintWeights[fieldOffset],
+    sourcePaintWeights[fieldOffset + 1],
+    sourcePaintWeights[fieldOffset + 2],
+    sourcePaintWeights[fieldOffset + 3],
+  )
 }
 
 function createDefaultSurfaceFields(vertexCount: number): readonly [

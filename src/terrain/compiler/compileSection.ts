@@ -9,19 +9,19 @@ import type {
 import type { EditableSectionSourceSnapshot } from '../mesh/EditableMesh'
 import { boundaryWeldKey } from '../partition/boundary'
 import { validateMeshData } from '../mesh/MeshValidation'
-import type { CutterVolume } from '../modifiers/boolean/CutterVolume'
 import {
   BvhCsgTunnelBooleanBackend,
   tunnelCutterVolumes,
   type BooleanMeshBuffers,
+  type MeshBooleanOperation,
 } from '../modifiers/boolean/MeshBooleanBackend'
 import type {
   BooleanSubtractModifier,
-  BooleanVolumeModifier,
   BrushStrokeModifier,
   RemeshModifier,
   TerrainModifier,
   TessellateModifier,
+  WeightPaintModifier,
 } from '../modifiers/types'
 import { materializeModifierTransforms } from '../modifiers/transform'
 import type { CompileSectionRequest } from '../workers/protocol'
@@ -35,6 +35,7 @@ import {
   evaluateTerrainMaterialFields,
   type TerrainMaterialFields,
 } from './TerrainMaterialFields'
+import { paintChannelIndex } from '../rendering/materialSettings'
 
 export { evaluateHeight } from './TerrainField'
 
@@ -51,6 +52,7 @@ interface GeneratedMesh {
     Uint16Array,
     Uint16Array,
   ]
+  paintWeights: Uint16Array
   indices: Uint32Array
   /** Vertices authored by a modifier that must survive every LOD. */
   featureLocks: Uint8Array
@@ -85,7 +87,7 @@ export function compileTerrainSection(
   const requiresAuthoritativeSource = modifiers.some(
     (modifier) =>
       modifier.enabled &&
-      modifier.type === 'brush-stroke',
+      (modifier.type === 'brush-stroke' || modifier.type === 'weight-paint'),
   ) || request.source?.kind === 'editable-mesh'
   // A brush can fall between coarse grid samples, so it must simplify from the
   // authoritative source. Exact CSG intersects triangle faces directly and is
@@ -148,6 +150,7 @@ export function compileTerrainSection(
       normals: generated.normals,
       colors: generated.colors,
       surfaceFields: generated.surfaceFields,
+      paintWeights: generated.paintWeights,
       indices: generated.indices,
       triangleCount: generated.indices.length / 3,
       gpuBytes,
@@ -259,6 +262,7 @@ function cloneGeneratedMesh(source: GeneratedMesh): GeneratedMesh {
     surfaceFields: source.surfaceFields.map((field) =>
       new Uint16Array(field),
     ) as unknown as GeneratedMesh['surfaceFields'],
+    paintWeights: new Uint16Array(source.paintWeights),
     indices: new Uint32Array(source.indices),
     featureLocks: new Uint8Array(source.featureLocks),
     warnings: source.warnings,
@@ -284,6 +288,12 @@ function compactGeneratedMesh(
   const surfaceFields = source.surfaceFields.map((field) =>
     remapUint16Stream(field, 4, remap, vertexCount),
   ) as unknown as GeneratedMesh['surfaceFields']
+  const paintWeights = remapUint16Stream(
+    source.paintWeights,
+    4,
+    remap,
+    vertexCount,
+  )
   const featureLocks = remapUint8Stream(
     source.featureLocks,
     remap,
@@ -299,6 +309,7 @@ function compactGeneratedMesh(
     normals,
     colors,
     surfaceFields,
+    paintWeights,
     indices,
     featureLocks,
     warnings: validation.warnings.length,
@@ -379,6 +390,7 @@ function generatedMeshBytes(generated: GeneratedMesh): number {
       (bytes, field) => bytes + field.byteLength,
       0,
     ) +
+    generated.paintWeights.byteLength +
     generated.indices.byteLength
   )
 }
@@ -416,23 +428,12 @@ function generateSectionMesh(
         sectionSize,
       ),
   )
-  const tunnels = modifiers.filter(
-    (modifier): modifier is BooleanSubtractModifier =>
-      modifier.enabled && modifier.type === 'boolean-subtract',
-  )
-  const volumeBooleans = modifiers.filter(
-    (modifier): modifier is BooleanVolumeModifier =>
-      modifier.enabled && modifier.type === 'boolean-volume',
-  )
   // Arbitrary topology is authored through bounded modifiers. Keeping cutters
   // in the modifier stack is what makes the height-derived base cheap, keeps
   // unrelated sections untouched, and preserves non-destructive build order.
   // Procedural content can still create these modifiers, but the compiler must
   // never inject world-wide booleans behind the stack's back.
-  const cutters: CutterVolume[] = [
-    ...tunnels.flatMap(tunnelCutterVolumes),
-    ...volumeBooleans.flatMap((modifier) => modifier.volumes),
-  ]
+  const booleanOperations = collectBooleanOperations(modifiers)
   const xAxis = createAdaptiveAxis(
     originX,
     sectionSize,
@@ -497,10 +498,10 @@ function generateSectionMesh(
     interiorVertices: new Uint8Array(positionArray.length / 3),
   }
   const result =
-    cutters.length > 0
-      ? tunnelBackend.subtract(
+    booleanOperations.length > 0
+      ? tunnelBackend.evaluate(
           baseBuffers,
-          cutters,
+          booleanOperations,
           originX,
           originZ,
           sectionSize,
@@ -523,6 +524,12 @@ function generateSectionMesh(
     originZ,
     seed,
     materialFieldCache,
+  )
+  const paintWeights = calculatePaintWeights(
+    result.positions,
+    originX,
+    originZ,
+    modifiers,
   )
   const validation = validateMeshData(result.positions, result.indices, {
     rejectDegenerateTriangles: true,
@@ -548,6 +555,7 @@ function generateSectionMesh(
     normals: result.normals,
     colors,
     surfaceFields,
+    paintWeights,
     indices: result.indices,
     featureLocks: createFeatureLocks(
       result.positions,
@@ -559,7 +567,7 @@ function generateSectionMesh(
     ),
     warnings: validation.warnings.length,
     hasArbitraryTopology:
-      cutters.length > 0 || hasLateralDisplacement(modifiers),
+      booleanOperations.length > 0 || hasLateralDisplacement(modifiers),
   }
 }
 
@@ -626,22 +634,11 @@ function generateEditableSectionMesh(
     indices,
     interiorVertices: new Uint8Array(positions.length / 3),
   }
-  const tunnels = modifiers.filter(
-    (modifier): modifier is BooleanSubtractModifier =>
-      modifier.enabled && modifier.type === 'boolean-subtract',
-  )
-  const volumeBooleans = modifiers.filter(
-    (modifier): modifier is BooleanVolumeModifier =>
-      modifier.enabled && modifier.type === 'boolean-volume',
-  )
-  const cutters: CutterVolume[] = [
-    ...tunnels.flatMap(tunnelCutterVolumes),
-    ...volumeBooleans.flatMap((modifier) => modifier.volumes),
-  ]
-  const result = cutters.length > 0
-    ? tunnelBackend.subtract(
+  const booleanOperations = collectBooleanOperations(modifiers)
+  const result = booleanOperations.length > 0
+    ? tunnelBackend.evaluate(
         baseBuffers,
-        cutters,
+        booleanOperations,
         originX,
         originZ,
         sectionSize,
@@ -667,6 +664,12 @@ function generateEditableSectionMesh(
     originZ,
     seed,
     materialFieldCache,
+  )
+  const paintWeights = calculatePaintWeights(
+    result.positions,
+    originX,
+    originZ,
+    modifiers,
   )
   const validation = validateMeshData(result.positions, result.indices, {
     boundaryMode: topologyChanged ? 'allow' : source.boundaryMode,
@@ -707,11 +710,33 @@ function generateEditableSectionMesh(
     normals: result.normals,
     colors,
     surfaceFields,
+    paintWeights,
     indices: result.indices,
     featureLocks,
     warnings: sourceValidation.warnings.length + validation.warnings.length,
     hasArbitraryTopology: true,
   }
+}
+
+function collectBooleanOperations(
+  modifiers: readonly TerrainModifier[],
+): MeshBooleanOperation[] {
+  const operations: MeshBooleanOperation[] = []
+  for (const modifier of modifiers) {
+    if (!modifier.enabled) continue
+    if (modifier.type === 'boolean-subtract') {
+      operations.push({
+        operation: 'subtract',
+        cutters: tunnelCutterVolumes(modifier),
+      })
+    } else if (modifier.type === 'boolean-volume') {
+      operations.push({
+        operation: modifier.operation ?? 'subtract',
+        cutters: modifier.volumes,
+      })
+    }
+  }
+  return operations
 }
 
 function validateEditableSourceSnapshot(source: EditableSectionSourceSnapshot): void {
@@ -1031,6 +1056,56 @@ function createFeatureLocks(
 
 const PACKED_UNIT_MAX = 65_535
 const BEDDED_OFFSET_RANGE = 16
+
+function calculatePaintWeights(
+  positions: Float32Array,
+  originX: number,
+  originZ: number,
+  modifiers: readonly TerrainModifier[],
+): Uint16Array {
+  const strokes = modifiers.filter(
+    (modifier): modifier is WeightPaintModifier =>
+      modifier.enabled && modifier.type === 'weight-paint',
+  )
+  const weights = new Float32Array((positions.length / 3) * 4)
+
+  for (const stroke of strokes) {
+    const channel = paintChannelIndex(stroke.channel)
+    const direction = stroke.mode === 'subtract' ? -1 : 1
+    const exponent = 1 + clamp(stroke.falloff, 0, 1) * 4
+    for (let vertex = 0; vertex < positions.length / 3; vertex += 1) {
+      const positionOffset = vertex * 3
+      const worldX = originX + positions[positionOffset]
+      const worldY = positions[positionOffset + 1]
+      const worldZ = originZ + positions[positionOffset + 2]
+      let influence = 0
+      for (const sample of stroke.points) {
+        const distance = Math.hypot(
+          worldX - sample.x,
+          worldY - sample.y,
+          worldZ - sample.z,
+        )
+        if (distance >= stroke.radius) continue
+        const radial = 1 - distance / Math.max(0.001, stroke.radius)
+        influence +=
+          Math.pow(smoothstep(0, 1, radial), exponent) * sample.weight
+      }
+      if (influence <= 0) continue
+      const target = vertex * 4 + channel
+      weights[target] = clamp(
+        weights[target] + direction * influence * stroke.strength,
+        0,
+        1,
+      )
+    }
+  }
+
+  const packed = new Uint16Array(weights.length)
+  for (let index = 0; index < weights.length; index += 1) {
+    packed[index] = Math.round(clamp(weights[index], 0, 1) * PACKED_UNIT_MAX)
+  }
+  return packed
+}
 
 function calculateSurfaceFields(
   positions: Float32Array,

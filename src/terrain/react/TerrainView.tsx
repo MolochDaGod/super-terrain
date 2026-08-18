@@ -50,10 +50,12 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
     }
 
     const onPointerMove = (event: PointerEvent) => {
-      if (editor.getSnapshot().cameraMode === 'fly') {
+      const snapshot = editor.getSnapshot()
+      if (snapshot.cameraMode === 'fly') {
         editor.hideCursor()
         return
       }
+      if (snapshot.dragging && !dragging.current) return
       if (
         dragging.current &&
         activePointerId.current !== null &&
@@ -72,7 +74,8 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
     }
 
     const onPointerDown = (event: PointerEvent) => {
-      if (editor.getSnapshot().cameraMode === 'fly') return
+      const snapshot = editor.getSnapshot()
+      if (snapshot.cameraMode === 'fly' || snapshot.dragging) return
       if (
         event.button !== 0 ||
         event.altKey ||
@@ -84,7 +87,6 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
       }
       const hit = hitAt(event)
       if (!hit) return
-      const snapshot = editor.getSnapshot()
       editor.setCursor(hit.point, hit.normal, hit.sectionId)
       if (snapshot.tool === 'select') return
       event.preventDefault()
@@ -94,7 +96,9 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
       editor.patch({ dragging: true })
       canvas.setPointerCapture(event.pointerId)
       const modifierId = terrain.beginStroke(hit.point, hit.normal, snapshot)
-      if (modifierId) editor.patch({ selectedModifierId: modifierId })
+      if (modifierId) {
+        editor.patch({ selectedModifierId: modifierId, selectedRockId: undefined })
+      }
     }
 
     const endPointer = (event: PointerEvent) => {

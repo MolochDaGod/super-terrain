@@ -18,6 +18,10 @@ export function createSectionGeometry(
       new BufferAttribute(skirted.surfaceFields[field], 4, true),
     )
   }
+  geometry.setAttribute(
+    'terrainPaintWeights',
+    new BufferAttribute(skirted.paintWeights, 4, true),
+  )
   geometry.setIndex(new BufferAttribute(skirted.indices, 1))
   geometry.computeBoundingBox()
   geometry.computeBoundingSphere()

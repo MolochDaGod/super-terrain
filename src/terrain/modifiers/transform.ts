@@ -11,13 +11,17 @@ import type {
   BrushSample,
   BrushStrokeModifier,
   ModifierTransform,
+  SculptLayerModifier,
   TerrainModifier,
+  WeightPaintModifier,
 } from './types'
 import { normalizeTunnelModifier, tunnelBounds } from './tunnel'
 
 export const IDENTITY_MODIFIER_TRANSFORM: ModifierTransform = {
   offset: { x: 0, y: 0, z: 0 },
   yaw: 0,
+  pitch: 0,
+  roll: 0,
   scale: 1,
 }
 
@@ -31,6 +35,8 @@ export function normalizedTransform(
       z: transform?.offset?.z ?? 0,
     },
     yaw: transform?.yaw ?? 0,
+    pitch: transform?.pitch ?? 0,
+    roll: transform?.roll ?? 0,
     scale: Math.max(0.05, transform?.scale ?? 1),
   }
 }
@@ -51,7 +57,7 @@ export function transformedBrushSamples(
     const normal =
       (modifier.domain ?? 'heightfield') === 'heightfield'
         ? { x: 0, y: 1, z: 0 }
-        : rotateNormal(sample.normal ?? { x: 0, y: 1, z: 0 }, transform.yaw)
+        : rotateNormal(sample.normal ?? { x: 0, y: 1, z: 0 }, transform)
     return { ...point, normal, weight: sample.weight ?? 1 }
   })
 }
@@ -59,6 +65,11 @@ export function transformedBrushSamples(
 export function materializeModifierTransforms(
   modifiers: TerrainModifier[],
 ): TerrainModifier[] {
+  const sculptLayers = new Map(
+    modifiers
+      .filter((modifier): modifier is SculptLayerModifier => modifier.type === 'sculpt-layer')
+      .map((layer) => [layer.id, layer]),
+  )
   return modifiers.map((modifier) => {
     const transform = normalizedTransform(modifier.transform)
     switch (modifier.type) {
@@ -67,6 +78,37 @@ export function materializeModifierTransforms(
           ...modifier,
           domain: modifier.domain ?? 'heightfield',
           points: transformedBrushSamples(modifier),
+          radius: modifier.radius * transform.scale,
+          strength:
+            modifier.strength *
+            (modifier.sculptLayerId
+              ? Math.max(0, Math.min(1, sculptLayers.get(modifier.sculptLayerId)?.opacity ?? 1))
+              : 1),
+          enabled:
+            modifier.enabled &&
+            (modifier.sculptLayerId
+              ? (sculptLayers.get(modifier.sculptLayerId)?.enabled ?? true)
+              : true),
+          transform: normalizedTransform(),
+        }
+        materialized.bounds = modifierWorldBounds(materialized)
+        return materialized
+      }
+      case 'weight-paint': {
+        const pivot = modifier.points[0] ?? {
+          x: 0,
+          y: 0,
+          z: 0,
+          normal: { x: 0, y: 1, z: 0 },
+          weight: 1,
+        }
+        const materialized: WeightPaintModifier = {
+          ...modifier,
+          points: modifier.points.map((sample) => ({
+            ...transformPoint(sample, pivot, transform),
+            normal: rotateNormal(sample.normal, transform),
+            weight: sample.weight,
+          })),
           radius: modifier.radius * transform.scale,
           transform: normalizedTransform(),
         }
@@ -91,6 +133,8 @@ export function materializeModifierTransforms(
       }
       case 'noise':
       case 'field-displacement':
+      case 'sculpt-layer':
+      case 'material-settings':
         return { ...modifier, transform }
     }
   })
@@ -110,7 +154,7 @@ export function transformedTunnel(
     ...normalized,
     portals: normalized.portals.map((portal) => ({
       ...transformPoint(portal, pivot, transform),
-      normal: rotateNormal(portal.normal, transform.yaw),
+      normal: rotateNormal(portal.normal, transform),
     })) as BooleanSubtractModifier['portals'],
     radius: normalized.radius * transform.scale,
     depth: normalized.depth * transform.scale,
@@ -153,6 +197,41 @@ export function transformedCenter(
   }
 }
 
+/** Stable, untransformed pivot used by the editor transform gizmo. */
+export function modifierTransformPivot(modifier: TerrainModifier): Vec3Like {
+  switch (modifier.type) {
+    case 'brush-stroke':
+    case 'weight-paint':
+      return { ...(modifier.points[0] ?? { x: 0, y: 0, z: 0 }) }
+    case 'boolean-subtract':
+      return {
+        x: (modifier.portals[0].x + modifier.portals[1].x) * 0.5,
+        y: (modifier.portals[0].y + modifier.portals[1].y) * 0.5,
+        z: (modifier.portals[0].z + modifier.portals[1].z) * 0.5,
+      }
+    case 'boolean-volume': {
+      const bounds = cutterVolumeBounds(modifier.volumes)
+      return {
+        x: (bounds.min.x + bounds.max.x) * 0.5,
+        y: (bounds.min.y + bounds.max.y) * 0.5,
+        z: (bounds.min.z + bounds.max.z) * 0.5,
+      }
+    }
+    case 'remesh':
+    case 'tessellate':
+      return { ...modifier.center }
+    case 'noise':
+    case 'field-displacement':
+    case 'sculpt-layer':
+    case 'material-settings':
+      return {
+        x: (modifier.bounds.min.x + modifier.bounds.max.x) * 0.5,
+        y: (modifier.bounds.min.y + modifier.bounds.max.y) * 0.5,
+        z: (modifier.bounds.min.z + modifier.bounds.max.z) * 0.5,
+      }
+  }
+}
+
 export function modifierWorldBounds(modifier: TerrainModifier): AABB {
   const transform = normalizedTransform(modifier.transform)
   switch (modifier.type) {
@@ -162,6 +241,30 @@ export function modifierWorldBounds(modifier: TerrainModifier): AABB {
       let bounds = boundsFromSphere(samples[0] ?? { x: 0, y: 0, z: 0 }, radius)
       for (let index = 1; index < samples.length; index += 1) {
         bounds = unionBounds(bounds, boundsFromSphere(samples[index], radius))
+      }
+      return bounds
+    }
+    case 'weight-paint': {
+      const pivot = modifier.points[0] ?? {
+        x: 0,
+        y: 0,
+        z: 0,
+        normal: { x: 0, y: 1, z: 0 },
+        weight: 1,
+      }
+      const radius = modifier.radius * transform.scale
+      let bounds = boundsFromSphere(
+        transformPoint(pivot, pivot, transform),
+        radius,
+      )
+      for (let index = 1; index < modifier.points.length; index += 1) {
+        bounds = unionBounds(
+          bounds,
+          boundsFromSphere(
+            transformPoint(modifier.points[index], pivot, transform),
+            radius,
+          ),
+        )
       }
       return bounds
     }
@@ -178,6 +281,9 @@ export function modifierWorldBounds(modifier: TerrainModifier): AABB {
     case 'noise':
     case 'field-displacement':
       return transformBounds(modifier.bounds, transform)
+    case 'sculpt-layer':
+    case 'material-settings':
+      return modifier.bounds
   }
 }
 
@@ -215,14 +321,22 @@ function transformCutterVolume(
         ...cutter,
         center: transformPoint(cutter.center, pivot, transform),
         radii: scaleVector(cutter.radii, transform.scale),
-        forward: rotateNormal(cutter.forward, transform.yaw),
+        forward: rotateNormal(cutter.forward, transform),
+        up: rotateNormal(cutter.up ?? { x: 0, y: 1, z: 0 }, transform),
       }
     case 'box':
       return {
         ...cutter,
         center: transformPoint(cutter.center, pivot, transform),
         halfExtents: scaleVector(cutter.halfExtents, transform.scale),
-        forward: rotateNormal(cutter.forward, transform.yaw),
+        forward: rotateNormal(cutter.forward, transform),
+        up: rotateNormal(cutter.up ?? { x: 0, y: 1, z: 0 }, transform),
+      }
+    case 'mesh':
+      return {
+        ...cutter,
+        positions: transformMeshPositions(cutter.positions, pivot, transform),
+        indices: [...cutter.indices],
       }
   }
 }
@@ -239,22 +353,59 @@ function transformPoint(
   const dx = (point.x - pivot.x) * transform.scale
   const dy = (point.y - pivot.y) * transform.scale
   const dz = (point.z - pivot.z) * transform.scale
-  const cosine = Math.cos(transform.yaw)
-  const sine = Math.sin(transform.yaw)
+  const rotated = rotateVector({ x: dx, y: dy, z: dz }, transform)
   return {
-    x: pivot.x + dx * cosine - dz * sine + transform.offset.x,
-    y: pivot.y + dy + transform.offset.y,
-    z: pivot.z + dx * sine + dz * cosine + transform.offset.z,
+    x: pivot.x + rotated.x + transform.offset.x,
+    y: pivot.y + rotated.y + transform.offset.y,
+    z: pivot.z + rotated.z + transform.offset.z,
   }
 }
 
-function rotateNormal(normal: Vec3Like, yaw: number): Vec3Like {
-  const cosine = Math.cos(yaw)
-  const sine = Math.sin(yaw)
-  const x = normal.x * cosine - normal.z * sine
-  const z = normal.x * sine + normal.z * cosine
-  const length = Math.hypot(x, normal.y, z) || 1
-  return { x: x / length, y: normal.y / length, z: z / length }
+function rotateNormal(normal: Vec3Like, transform: ModifierTransform): Vec3Like {
+  const rotated = rotateVector(normal, transform)
+  const length = Math.hypot(rotated.x, rotated.y, rotated.z) || 1
+  return {
+    x: rotated.x / length,
+    y: rotated.y / length,
+    z: rotated.z / length,
+  }
+}
+
+function rotateVector(vector: Vec3Like, transform: ModifierTransform): Vec3Like {
+  const pitch = transform.pitch ?? 0
+  const roll = transform.roll ?? 0
+  const pitchCosine = Math.cos(pitch)
+  const pitchSine = Math.sin(pitch)
+  const pitchedY = vector.y * pitchCosine - vector.z * pitchSine
+  const pitchedZ = vector.y * pitchSine + vector.z * pitchCosine
+  const yawCosine = Math.cos(transform.yaw)
+  const yawSine = Math.sin(transform.yaw)
+  const yawedX = vector.x * yawCosine - pitchedZ * yawSine
+  const yawedZ = vector.x * yawSine + pitchedZ * yawCosine
+  const rollCosine = Math.cos(roll)
+  const rollSine = Math.sin(roll)
+  return {
+    x: yawedX * rollCosine - pitchedY * rollSine,
+    y: yawedX * rollSine + pitchedY * rollCosine,
+    z: yawedZ,
+  }
+}
+
+function transformMeshPositions(
+  positions: readonly number[],
+  pivot: Vec3Like,
+  transform: ModifierTransform,
+): number[] {
+  const transformed: number[] = []
+  for (let offset = 0; offset < positions.length; offset += 3) {
+    const point = transformPoint(
+      { x: positions[offset], y: positions[offset + 1], z: positions[offset + 2] },
+      pivot,
+      transform,
+    )
+    transformed.push(point.x, point.y, point.z)
+  }
+  return transformed
 }
 
 function transformBounds(
@@ -269,20 +420,17 @@ function transformBounds(
   const halfX = (bounds.max.x - bounds.min.x) * 0.5 * transform.scale
   const halfY = (bounds.max.y - bounds.min.y) * 0.5 * transform.scale
   const halfZ = (bounds.max.z - bounds.min.z) * 0.5 * transform.scale
-  const cosine = Math.abs(Math.cos(transform.yaw))
-  const sine = Math.abs(Math.sin(transform.yaw))
-  const rotatedHalfX = halfX * cosine + halfZ * sine
-  const rotatedHalfZ = halfX * sine + halfZ * cosine
+  const reach = Math.hypot(halfX, halfY, halfZ)
   return {
     min: {
-      x: center.x + transform.offset.x - rotatedHalfX,
-      y: center.y + transform.offset.y - halfY,
-      z: center.z + transform.offset.z - rotatedHalfZ,
+      x: center.x + transform.offset.x - reach,
+      y: center.y + transform.offset.y - reach,
+      z: center.z + transform.offset.z - reach,
     },
     max: {
-      x: center.x + transform.offset.x + rotatedHalfX,
-      y: center.y + transform.offset.y + halfY,
-      z: center.z + transform.offset.z + rotatedHalfZ,
+      x: center.x + transform.offset.x + reach,
+      y: center.y + transform.offset.y + reach,
+      z: center.z + transform.offset.z + reach,
     },
   }
 }

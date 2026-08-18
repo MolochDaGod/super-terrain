@@ -2,10 +2,16 @@ import type { LucideIcon } from 'lucide-react'
 import {
   ArrowDown,
   ArrowUp,
+  CircleMinus,
+  CirclePlus,
   CircleDotDashed,
+  Focus,
   Grid3X3,
+  Layers3,
   MousePointer2,
+  Paintbrush,
   Pickaxe,
+  Sparkles,
   Waves,
 } from 'lucide-react'
 import type { EditorStore, EditorTool } from '../../terrain/editor/EditorStore'
@@ -24,8 +30,14 @@ const TOOLS: ToolDefinition[] = [
   { id: 'lower', label: 'Lower', shortcut: '3', icon: ArrowDown },
   { id: 'smooth', label: 'Smooth', shortcut: '4', icon: Waves },
   { id: 'flatten', label: 'Flatten', shortcut: '5', icon: CircleDotDashed },
-  { id: 'remesh', label: 'Density', shortcut: '6', icon: Grid3X3 },
-  { id: 'tunnel', label: 'Tunnel', shortcut: '7', icon: Pickaxe },
+  { id: 'clay', label: 'Clay', shortcut: '6', icon: CirclePlus },
+  { id: 'pinch', label: 'Pinch', shortcut: '7', icon: Focus },
+  { id: 'scrape', label: 'Scrape', shortcut: '8', icon: CircleMinus },
+  { id: 'terrace', label: 'Terrace', shortcut: '9', icon: Layers3 },
+  { id: 'noise', label: 'Noise', shortcut: '0', icon: Sparkles },
+  { id: 'paint', label: 'Paint weights', shortcut: 'P', icon: Paintbrush },
+  { id: 'remesh', label: 'Density', shortcut: 'G', icon: Grid3X3 },
+  { id: 'tunnel', label: 'Tunnel', shortcut: 'T', icon: Pickaxe },
 ]
 
 interface ToolRailProps {
@@ -41,7 +53,9 @@ export function ToolRail({ editor }: ToolRailProps) {
     >
       {TOOLS.map(({ id, label, shortcut, icon: Icon }, index) => (
         <div key={id}>
-          {index === 5 && <div className="mx-1 my-1.5 h-px bg-white/[0.08]" />}
+          {(index === 5 || index === 10 || index === 11) && (
+            <div className="mx-1 my-1.5 h-px bg-white/[0.08]" />
+          )}
           <button
             type="button"
             aria-label={`${label} tool (${shortcut})`}

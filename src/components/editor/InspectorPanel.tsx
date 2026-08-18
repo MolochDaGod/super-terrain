@@ -8,6 +8,10 @@ import type {
 import { useEditorSnapshot, useTerrainMetrics } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
 import { ModifierStackPanel } from './ModifierStackPanel'
+import { SculptLayersPanel } from './SculptLayersPanel'
+import { MaterialChannelsPanel } from './MaterialChannelsPanel'
+import { CsgObjectsPanel } from './CsgObjectsPanel'
+import { GraniteRockPanel } from './GraniteRockPanel'
 
 interface InspectorPanelProps {
   terrain: WorldTerrain
@@ -30,7 +34,13 @@ export function InspectorPanel({ terrain, editor }: InspectorPanelProps) {
     snapshot.tool === 'raise' ||
     snapshot.tool === 'lower' ||
     snapshot.tool === 'smooth' ||
-    snapshot.tool === 'flatten'
+    snapshot.tool === 'flatten' ||
+    snapshot.tool === 'clay' ||
+    snapshot.tool === 'pinch' ||
+    snapshot.tool === 'scrape' ||
+    snapshot.tool === 'terrace' ||
+    snapshot.tool === 'noise'
+  const isPaintTool = snapshot.tool === 'paint'
 
   useEffect(() => {
     if (previousBenchmark.current && !metrics.activeBenchmark) {
@@ -62,7 +72,7 @@ export function InspectorPanel({ terrain, editor }: InspectorPanelProps) {
             }
           />
         )}
-        {(isSculptTool || snapshot.tool === 'remesh') && (
+        {(isSculptTool || isPaintTool || snapshot.tool === 'remesh') && (
           <RangeField
             label={snapshot.tool === 'remesh' ? 'Influence radius' : 'Brush radius'}
             value={snapshot.brushRadius}
@@ -73,7 +83,7 @@ export function InspectorPanel({ terrain, editor }: InspectorPanelProps) {
             onChange={(brushRadius) => editor.patch({ brushRadius })}
           />
         )}
-        {isSculptTool && (
+        {(isSculptTool || isPaintTool) && (
           <>
             <RangeField
               label="Strength"
@@ -92,6 +102,48 @@ export function InspectorPanel({ terrain, editor }: InspectorPanelProps) {
               onChange={(brushFalloff) => editor.patch({ brushFalloff })}
             />
           </>
+        )}
+        {snapshot.tool === 'terrace' && (
+          <RangeField
+            label="Terrace height"
+            value={snapshot.terraceStep}
+            min={0.5}
+            max={16}
+            step={0.5}
+            unit=" m"
+            onChange={(terraceStep) => editor.patch({ terraceStep })}
+          />
+        )}
+        {snapshot.tool === 'noise' && (
+          <RangeField
+            label="Noise scale"
+            value={snapshot.noiseScale}
+            min={0.25}
+            max={24}
+            step={0.25}
+            unit=" m"
+            onChange={(noiseScale) => editor.patch({ noiseScale })}
+          />
+        )}
+        {isPaintTool && (
+          <div>
+            <div className="mb-2 text-[9px] font-medium uppercase tracking-[0.12em] text-white/30">
+              Paint mode
+            </div>
+            <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
+              {(['add', 'subtract'] as const).map((paintMode) => (
+                <button
+                  key={paintMode}
+                  type="button"
+                  data-active={snapshot.paintMode === paintMode}
+                  className="rounded-md px-2 py-2 text-[9px] capitalize transition"
+                  onClick={() => editor.patch({ paintMode })}
+                >
+                  {paintMode}
+                </button>
+              ))}
+            </div>
+          </div>
         )}
         {snapshot.tool === 'remesh' && (
           <RangeField
@@ -128,6 +180,10 @@ export function InspectorPanel({ terrain, editor }: InspectorPanelProps) {
         )}
       </div>
 
+      <SculptLayersPanel terrain={terrain} editor={editor} />
+      <MaterialChannelsPanel terrain={terrain} editor={editor} />
+      <GraniteRockPanel terrain={terrain} editor={editor} />
+      <CsgObjectsPanel terrain={terrain} editor={editor} />
       <ModifierStackPanel terrain={terrain} editor={editor} />
 
       <PanelHeader icon={Layers} title="Visualization" />
@@ -213,6 +269,12 @@ function ToolReadout({
         : 'Lower the procedural surface along world Y.',
     smooth: 'Relax local detail toward the broad terrain field.',
     flatten: 'Converge the surface toward the first sampled elevation.',
+    clay: 'Build broad clay-like mass with a naturally flattened crest.',
+    pinch: 'Pull the surface inward in the tangent plane to sharpen ridges and creases.',
+    scrape: 'Plane away only material above the sampled surface.',
+    terrace: 'Quantize elevation into editable stepped benches.',
+    noise: 'Stamp seeded surface breakup at a configurable world scale.',
+    paint: 'Paint or erase one of four configurable material weight channels.',
     remesh: 'Inject local coordinate bands at the requested edge length.',
     tunnel: 'Press one portal, drag to the second, then release. The swept Boolean remains editable in the modifier stack.',
   }

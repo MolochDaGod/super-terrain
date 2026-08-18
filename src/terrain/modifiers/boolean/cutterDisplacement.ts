@@ -131,11 +131,13 @@ export function displaceCutterGeometry(
  * formation reached that far, does not subtract it and the shared edge tears.
  */
 export function cutterDisplacementBudget(cutter: CutterVolume): number {
+  if (cutter.surface === 'none' || cutter.kind === 'mesh') return 0
   return cutterRadius(cutter) * MAX_DISPLACEMENT_FRACTION
 }
 
 /** Smallest radius of the cutter; the displacement budget scales from it. */
 function cutterRadius(cutter: CutterVolume): number {
+  if (cutter.kind === 'mesh') return 0
   if (cutter.kind === 'sweep') {
     let radius = Infinity
     for (const ring of cutter.rings) {
@@ -158,6 +160,7 @@ function radialDirection(
   y: number,
   z: number,
 ): { x: number; y: number; z: number } | null {
+  if (cutter.kind === 'mesh') return null
   if (cutter.kind === 'sweep') {
     let nearest = cutter.rings[0]
     let nearestDistance = Infinity

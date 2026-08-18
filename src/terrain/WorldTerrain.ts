@@ -30,7 +30,9 @@ import {
 } from './demo/createDemoModifiers'
 import type { EditorSnapshot, TerrainOverlay } from './editor/EditorStore'
 import {
+  cameraSectionDistance,
   constrainNeighborLods,
+  focusedLodCeiling,
   selectLod,
   selectSourceLod,
 } from './lod/LodSelector'
@@ -38,14 +40,22 @@ import { ModifierStack } from './modifiers/ModifierStack'
 import { EditableMesh } from './mesh/EditableMesh'
 import {
   appendBrushPoint,
+  createBooleanVolumeModifier,
   createBrushStroke,
+  createMaterialSettingsModifier,
   createRemeshModifier,
+  createSculptLayerModifier,
   createTunnelModifier,
+  createWeightPaintStroke,
 } from './modifiers/factories'
 import type {
   BooleanSubtractModifier,
   BrushStrokeModifier,
+  CsgOperation,
+  MaterialSettingsModifier,
   ModifierTransform,
+  SculptLayerModifier,
+  WeightPaintModifier,
 } from './modifiers/types'
 import { sampleStrokeSegment } from './modifiers/strokeSampling'
 import {
@@ -59,7 +69,26 @@ import {
 import { MeshPartition, type TerrainSection } from './partition/MeshPartition'
 import { IndexedDbTerrainStorage, type TerrainStorage } from './persistence/TerrainStorage'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
+import {
+  cloneTerrainMaterialSettings,
+  DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+  type TerrainMaterialChannel,
+  type TerrainMaterialSettings,
+  type TerrainPaintChannelId,
+} from './rendering/materialSettings'
 import { TerrainStreamer, type StreamCandidate } from './streaming/TerrainStreamer'
+import type { CsgPrimitive } from './editor/EditorStore'
+import { GraniteRockStore } from './rocks/GraniteRockStore'
+import {
+  generateGraniteRock,
+  transformGraniteRockPositions,
+} from './rocks/generateGraniteRock'
+import {
+  normalizeGraniteRockParameters,
+  normalizeGraniteRockTransform,
+  type GraniteRockParameters,
+  type GraniteRockTransform,
+} from './rocks/types'
 
 export interface TerrainUpdateInput {
   camera: Vec3Like
@@ -98,6 +127,7 @@ interface TerrainViewSignature {
 const BRUSH_FLOW_PER_SECOND = 2.4
 const SPATIAL_DAB_WEIGHT = 0.08
 const MAX_AUTHORED_DAB_WEIGHT = 0.2
+const GRANITE_PLANT_DEPTH_RATIO = 0.06
 
 function compiledGpuBytes(compiled: CompiledSection | undefined): number {
   return compiled?.gpuBytes ?? compiled?.lods.reduce(
@@ -130,11 +160,13 @@ function sameViewSignature(
 }
 
 export type StrokeEndResult = 'committed' | 'cancelled' | 'none'
+type ActiveStrokeModifier = BrushStrokeModifier | WeightPaintModifier
 
 export class WorldTerrain {
   readonly config: TerrainConfig
   readonly partition: MeshPartition
   readonly modifiers = new ModifierStack()
+  readonly rocks = new GraniteRockStore()
   readonly metrics = new ExternalStore<TerrainMetrics>(EMPTY_METRICS)
   readonly coordinates: WorldCoordinates
   private readonly compiler: TerrainCompiler
@@ -143,7 +175,7 @@ export class WorldTerrain {
   private readonly storage: TerrainStorage
   private readonly benchmarkHistory = new BenchmarkHistory()
   private renderer?: TerrainRenderBackend
-  private activeStroke?: BrushStrokeModifier
+  private activeStroke?: ActiveStrokeModifier
   private activeTunnel?: BooleanSubtractModifier
   private lastStrokePoint?: Vec3Like
   private lastStrokeNormal?: Vec3Like
@@ -156,6 +188,7 @@ export class WorldTerrain {
   private overlay: TerrainOverlay = 'none'
   private nextSaveAt = Infinity
   private savedModifierRevision = 0
+  private savedRockRevision = 0
   private saveInFlight = false
   private lastMetricsAt = 0
   private schedulingMs = 0
@@ -225,6 +258,7 @@ export class WorldTerrain {
   attachRenderer(renderer: TerrainRenderBackend): void {
     this.renderer = renderer
     renderer.setOverlay(this.overlay)
+    renderer.setMaterialSettings(this.getMaterialSettings())
     // A renderer can be recreated during development or device recovery while
     // the source/compiled world remains alive. Stage existing CPU meshes for
     // budgeted re-upload instead of forcing every section through a recompile.
@@ -259,7 +293,7 @@ export class WorldTerrain {
       this.streamer.isSettled &&
       !this.hasPendingTerrainWork &&
       this.processedTerrainStateRevision === this.terrainStateRevision &&
-      !this.activeStroke &&
+      this.activeStroke?.type !== 'brush-stroke' &&
       !this.activeTunnel &&
       !this.activeBenchmark
 
@@ -400,26 +434,52 @@ export class WorldTerrain {
       this.markPersistenceDirty()
       return modifier.id
     }
+    const isPaint = editor.tool === 'paint'
     const strokeNormal =
-      editor.brushDomain === 'mesh' ? normal : { x: 0, y: 1, z: 0 }
-    const stroke = createBrushStroke({
-      point,
-      normal: strokeNormal,
-      domain: editor.brushDomain,
-      mode: editor.tool,
-      radius: editor.brushRadius,
-      strength: editor.brushStrength,
-      falloff: editor.brushFalloff,
-      targetY: editor.tool === 'flatten' ? point.y : undefined,
-      sampleWeight: SPATIAL_DAB_WEIGHT,
-    })
+      !isPaint && editor.brushDomain === 'heightfield'
+        ? { x: 0, y: 1, z: 0 }
+        : normal
+    const sculptLayers = this.getSculptLayers()
+    const sculptLayerId = sculptLayers.some(
+      (layer) => layer.id === editor.activeSculptLayerId,
+    )
+      ? editor.activeSculptLayerId
+      : sculptLayers[0]?.id
+    const stroke: ActiveStrokeModifier = editor.tool === 'paint'
+      ? createWeightPaintStroke({
+          point,
+          normal: strokeNormal,
+          channel: editor.activePaintChannel,
+          mode: editor.paintMode,
+          radius: editor.brushRadius,
+          strength: editor.brushStrength,
+          falloff: editor.brushFalloff,
+          sampleWeight: SPATIAL_DAB_WEIGHT,
+        })
+      : createBrushStroke({
+          point,
+          normal: strokeNormal,
+          domain: editor.brushDomain,
+          mode: editor.tool,
+          radius: editor.brushRadius,
+          strength: editor.brushStrength,
+          falloff: editor.brushFalloff,
+          targetY:
+            editor.tool === 'flatten' || editor.tool === 'scrape'
+              ? point.y
+              : undefined,
+          terraceStep: editor.terraceStep,
+          noiseScale: editor.noiseScale,
+          sculptLayerId,
+          sampleWeight: SPATIAL_DAB_WEIGHT,
+        })
     this.modifiers.add(stroke)
     this.activeStroke = stroke
     this.lastStrokePoint = { ...point }
     this.lastStrokeNormal = { ...strokeNormal }
     this.liveStrokePoint = { ...point }
     this.liveStrokeNormal = { ...strokeNormal }
-    this.invalidate(stroke.bounds)
+    if (stroke.type === 'brush-stroke') this.invalidate(stroke.bounds)
     this.forceEditingLod(point, stroke.radius)
     this.applyPreview(stroke, [stroke.points[0]])
     return stroke.id
@@ -436,7 +496,9 @@ export class WorldTerrain {
     if (!stroke || !this.lastStrokePoint || !this.lastStrokeNormal) return
     const spacing = Math.max(0.35, stroke.radius * 0.05)
     const strokeNormal =
-      stroke.domain === 'mesh' ? normal : { x: 0, y: 1, z: 0 }
+      stroke.type === 'brush-stroke' && stroke.domain === 'heightfield'
+        ? { x: 0, y: 1, z: 0 }
+        : normal
     this.liveStrokePoint = { ...point }
     this.liveStrokeNormal = { ...strokeNormal }
     this.editFocus = { ...point }
@@ -457,11 +519,11 @@ export class WorldTerrain {
         appendBrushPoint(stroke, sample, sample.normal, sample.weight),
       )
     }
-    this.modifiers.touch()
+    if (stroke.type === 'brush-stroke') this.modifiers.touch()
     const latest = samples.at(-1)!
     this.lastStrokePoint = { x: latest.x, y: latest.y, z: latest.z }
     this.lastStrokeNormal = { ...latest.normal }
-    this.invalidate(dirtyBounds!)
+    if (stroke.type === 'brush-stroke') this.invalidate(dirtyBounds!)
     this.applyPreview(stroke, samples)
   }
 
@@ -479,6 +541,11 @@ export class WorldTerrain {
     }
     const hadStroke = Boolean(this.activeStroke)
     if (this.activeStroke) {
+      if (this.activeStroke.type === 'weight-paint') {
+        // Painting already mutated the resident GPU attributes directly. Only
+        // now dirty the authoritative sections and launch one worker rebuild.
+        this.invalidate(this.activeStroke.bounds)
+      }
       this.modifiers.touch()
       this.markPersistenceDirty()
     }
@@ -522,7 +589,7 @@ export class WorldTerrain {
     if (appended) {
       this.lastStrokePoint = { ...point }
       this.lastStrokeNormal = { ...normal }
-      this.modifiers.touch()
+      if (stroke.type === 'brush-stroke') this.modifiers.touch()
     }
     this.applyPreview(stroke, [
       {
@@ -536,6 +603,316 @@ export class WorldTerrain {
   setOverlay(overlay: TerrainOverlay): void {
     this.overlay = overlay
     this.renderer?.setOverlay(overlay)
+  }
+
+  getSculptLayers(): SculptLayerModifier[] {
+    return this.modifiers
+      .snapshot()
+      .filter(
+        (modifier): modifier is SculptLayerModifier =>
+          modifier.type === 'sculpt-layer',
+      )
+  }
+
+  addSculptLayer(name = `Sculpt ${this.getSculptLayers().length + 1}`): string {
+    const layer = this.modifiers.add(createSculptLayerModifier(name))
+    this.markPersistenceDirty()
+    return layer.id
+  }
+
+  updateSculptLayer(
+    id: string,
+    values: Partial<Pick<SculptLayerModifier, 'name' | 'opacity' | 'enabled'>>,
+  ): boolean {
+    const layer = this.modifiers.get(id)
+    if (!layer || layer.type !== 'sculpt-layer') return false
+    const affected = this.sculptLayerBounds(id)
+    if (values.name !== undefined) layer.name = values.name.trim() || 'Sculpt'
+    if (values.opacity !== undefined) {
+      layer.opacity = Math.max(0, Math.min(1, values.opacity))
+    }
+    if (values.enabled !== undefined) layer.enabled = values.enabled
+    this.modifiers.touch()
+    if (affected) this.invalidate(affected)
+    this.markPersistenceDirty()
+    return true
+  }
+
+  removeSculptLayer(id: string): boolean {
+    const layers = this.getSculptLayers()
+    if (layers.length <= 1 || !layers.some((layer) => layer.id === id)) {
+      return false
+    }
+    const affected = this.sculptLayerBounds(id)
+    for (const modifier of this.modifiers.snapshot()) {
+      if (modifier.type === 'brush-stroke' && modifier.sculptLayerId === id) {
+        this.modifiers.remove(modifier.id)
+      }
+    }
+    this.modifiers.remove(id)
+    if (affected) this.invalidate(affected)
+    this.markPersistenceDirty()
+    return true
+  }
+
+  getMaterialSettings(): TerrainMaterialSettings {
+    const material = this.modifiers
+      .snapshot()
+      .find(
+        (modifier): modifier is MaterialSettingsModifier =>
+          modifier.type === 'material-settings',
+      )
+    return cloneTerrainMaterialSettings(
+      material?.settings ?? DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+    )
+  }
+
+  updateMaterialChannel(
+    id: TerrainPaintChannelId,
+    values: Partial<Pick<TerrainMaterialChannel, 'name' | 'color' | 'roughness'>>,
+  ): boolean {
+    let material = this.modifiers.get('terrain-material-settings')
+    if (!material || material.type !== 'material-settings') {
+      material = this.modifiers.add(createMaterialSettingsModifier())
+    }
+    const channel = material.settings.channels.find((item) => item.id === id)
+    if (!channel) return false
+    if (values.name !== undefined) channel.name = values.name.trim() || channel.name
+    if (values.color !== undefined) {
+      channel.color = Math.max(0, Math.min(0xffffff, Math.round(values.color)))
+    }
+    if (values.roughness !== undefined) {
+      channel.roughness = Math.max(0.05, Math.min(1, values.roughness))
+    }
+    this.modifiers.touch()
+    this.renderer?.setMaterialSettings(material.settings)
+    this.markPersistenceDirty()
+    return true
+  }
+
+  addGraniteRock(
+    parameters: GraniteRockParameters,
+    surfacePoint: Vec3Like,
+  ): string {
+    const normalized = normalizeGraniteRockParameters(parameters)
+    const mesh = generateGraniteRock(normalized)
+    const localHeight = mesh.bounds.max.y - mesh.bounds.min.y
+    const rock = this.rocks.create({
+      parameters: normalized,
+      transform: {
+        position: {
+          x: surfacePoint.x,
+          y:
+            surfacePoint.y -
+            mesh.bounds.min.y -
+            localHeight * GRANITE_PLANT_DEPTH_RATIO,
+          z: surfacePoint.z,
+        },
+        rotation: {
+          x: 0,
+          y: ((normalized.seed * 0.618_033_988_75) % 1) * Math.PI * 2,
+          z: 0,
+        },
+        scale: 1,
+      },
+    })
+    this.markPersistenceDirty()
+    return rock.id
+  }
+
+  updateGraniteRockParameters(
+    id: string,
+    parameters: GraniteRockParameters,
+  ): boolean {
+    const rock = this.rocks.get(id)
+    if (!rock) return false
+    const normalized = normalizeGraniteRockParameters(parameters)
+    const previousMesh = generateGraniteRock(rock.parameters)
+    const nextMesh = generateGraniteRock(normalized)
+    const nextTransform = normalizeGraniteRockTransform(rock.transform)
+    // Keep an upright rock planted while its source recipe or scale changes. Once a
+    // user has pitched or rolled it, preserving the authored pivot is safer.
+    if (
+      Math.abs(nextTransform.rotation.x) < 1e-5 &&
+      Math.abs(nextTransform.rotation.z) < 1e-5
+    ) {
+      const previousHeight = previousMesh.bounds.max.y - previousMesh.bounds.min.y
+      const nextHeight = nextMesh.bounds.max.y - nextMesh.bounds.min.y
+      nextTransform.position.y +=
+        (
+          previousMesh.bounds.min.y +
+          previousHeight * GRANITE_PLANT_DEPTH_RATIO -
+          nextMesh.bounds.min.y -
+          nextHeight * GRANITE_PLANT_DEPTH_RATIO
+        ) * nextTransform.scale
+    }
+    this.rocks.updateParameters(id, normalized)
+    this.rocks.updateTransform(id, nextTransform)
+    this.markPersistenceDirty()
+    return true
+  }
+
+  updateGraniteRockTransform(
+    id: string,
+    transform: GraniteRockTransform,
+  ): boolean {
+    if (!this.rocks.updateTransform(id, transform)) return false
+    this.markPersistenceDirty()
+    return true
+  }
+
+  setGraniteRockVisible(id: string, visible: boolean): boolean {
+    if (!this.rocks.setVisible(id, visible)) return false
+    this.markPersistenceDirty()
+    return true
+  }
+
+  removeGraniteRock(id: string): boolean {
+    if (!this.rocks.remove(id)) return false
+    this.markPersistenceDirty()
+    return true
+  }
+
+  /**
+   * Copies the selected rock's current world-space triangles into a live exact
+   * CSG modifier. Later edits to the scene rock do not mutate this snapshot.
+   */
+  applyGraniteRockAsCsg(id: string, operation: CsgOperation): string {
+    const rock = this.rocks.get(id)
+    if (!rock) throw new Error('Select a granite rock before applying CSG')
+    const mesh = generateGraniteRock(rock.parameters)
+    const modifier = this.modifiers.add(
+      createBooleanVolumeModifier({
+        operation,
+        volumes: [{
+          kind: 'mesh',
+          positions: transformGraniteRockPositions(
+            mesh.positions,
+            rock.transform,
+          ),
+          indices: Array.from(mesh.indices),
+          surface: 'none',
+        }],
+      }),
+    )
+    this.rocks.setVisible(id, false)
+    this.invalidate(modifier.bounds)
+    this.markPersistenceDirty()
+    return modifier.id
+  }
+
+  addCsgPrimitive(
+    kind: CsgPrimitive,
+    operation: CsgOperation,
+    center: Vec3Like,
+    size: number,
+  ): string {
+    const safeSize = Math.max(0.5, size)
+    const half = safeSize * 0.5
+    const volume = kind === 'sphere'
+      ? {
+          kind: 'ellipsoid' as const,
+          center: { ...center },
+          radii: { x: half, y: half, z: half },
+          forward: { x: 1, y: 0, z: 0 },
+          up: { x: 0, y: 1, z: 0 },
+          surface: 'none' as const,
+        }
+      : kind === 'capsule'
+        ? {
+            kind: 'capsule' as const,
+            start: { x: center.x, y: center.y - half * 0.65, z: center.z },
+            end: { x: center.x, y: center.y + half * 0.65, z: center.z },
+            radius: half * 0.55,
+            surface: 'none' as const,
+          }
+        : {
+            kind: 'box' as const,
+            center: { ...center },
+            halfExtents: { x: half, y: half, z: half },
+            forward: { x: 1, y: 0, z: 0 },
+            up: { x: 0, y: 1, z: 0 },
+            surface: 'none' as const,
+          }
+    const modifier = this.modifiers.add(
+      createBooleanVolumeModifier({ volumes: [volume], operation }),
+    )
+    this.invalidate(modifier.bounds)
+    this.markPersistenceDirty()
+    return modifier.id
+  }
+
+  addCsgMesh(
+    positions: readonly number[],
+    indices: readonly number[],
+    operation: CsgOperation,
+    center: Vec3Like,
+  ): string {
+    if (positions.length < 9 || positions.length % 3 !== 0) {
+      throw new Error('Imported CSG mesh has no valid vertices')
+    }
+    if (indices.length < 3 || indices.length % 3 !== 0) {
+      throw new Error('Imported CSG mesh has no valid triangles')
+    }
+    if (
+      positions.some((value) => !Number.isFinite(value)) ||
+      indices.some(
+        (value) =>
+          !Number.isInteger(value) || value < 0 || value >= positions.length / 3,
+      )
+    ) {
+      throw new Error('Imported CSG mesh contains invalid geometry')
+    }
+    let minX = Infinity
+    let minY = Infinity
+    let minZ = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    let maxZ = -Infinity
+    for (let offset = 0; offset < positions.length; offset += 3) {
+      minX = Math.min(minX, positions[offset])
+      minY = Math.min(minY, positions[offset + 1])
+      minZ = Math.min(minZ, positions[offset + 2])
+      maxX = Math.max(maxX, positions[offset])
+      maxY = Math.max(maxY, positions[offset + 1])
+      maxZ = Math.max(maxZ, positions[offset + 2])
+    }
+    const sourceCenter = {
+      x: (minX + maxX) * 0.5,
+      y: (minY + maxY) * 0.5,
+      z: (minZ + maxZ) * 0.5,
+    }
+    const worldPositions = positions.map((value, index) => {
+      const axis = index % 3
+      return value -
+        (axis === 0 ? sourceCenter.x : axis === 1 ? sourceCenter.y : sourceCenter.z) +
+        (axis === 0 ? center.x : axis === 1 ? center.y : center.z)
+    })
+    const modifier = this.modifiers.add(
+      createBooleanVolumeModifier({
+        operation,
+        volumes: [{
+          kind: 'mesh',
+          positions: worldPositions,
+          indices: [...indices],
+          surface: 'none',
+        }],
+      }),
+    )
+    this.invalidate(modifier.bounds)
+    this.markPersistenceDirty()
+    return modifier.id
+  }
+
+  updateCsgOperation(id: string, operation: CsgOperation): boolean {
+    const modifier = this.modifiers.get(id)
+    if (!modifier || modifier.type !== 'boolean-volume') return false
+    if (modifier.operation === operation) return true
+    modifier.operation = operation
+    this.modifiers.touch()
+    this.invalidate(modifier.bounds)
+    this.markPersistenceDirty()
+    return true
   }
 
   setViewTarget(target: Vec3Like): void {
@@ -587,6 +964,10 @@ export class WorldTerrain {
   setModifierEnabled(id: string, enabled: boolean): boolean {
     const modifier = this.modifiers.get(id)
     if (!modifier || modifier.enabled === enabled) return false
+    if (modifier.type === 'sculpt-layer') {
+      return this.updateSculptLayer(id, { enabled })
+    }
+    if (modifier.type === 'material-settings') return false
     modifier.enabled = enabled
     this.modifiers.touch()
     this.invalidate(modifier.bounds)
@@ -614,15 +995,30 @@ export class WorldTerrain {
   }
 
   async save(): Promise<void> {
-    await this.storage.save('default', this.modifiers.snapshot())
-    this.savedModifierRevision = this.modifiers.sourceRevision
-    this.nextSaveAt = Infinity
+    const modifierRevision = this.modifiers.sourceRevision
+    const rockRevision = this.rocks.sourceRevision
+    await this.storage.save(
+      'default',
+      this.modifiers.snapshot(),
+      this.rocks.snapshot(),
+    )
+    this.savedModifierRevision = modifierRevision
+    this.savedRockRevision = rockRevision
+    if (
+      modifierRevision === this.modifiers.sourceRevision &&
+      rockRevision === this.rocks.sourceRevision
+    ) {
+      this.nextSaveAt = Infinity
+    }
   }
 
   async resetEdits(): Promise<void> {
     await this.storage.clear('default')
     this.modifiers.clear()
+    this.rocks.clear()
     this.installDemoModifiers()
+    this.ensureDocumentModifiers()
+    this.renderer?.setMaterialSettings(this.getMaterialSettings())
     const now = performance.now()
     for (const section of this.partition.values()) {
       this.partition.markDirty(section, section.bounds, now)
@@ -630,6 +1026,7 @@ export class WorldTerrain {
     this.terrainStateRevision += 1
     this.hasPendingTerrainWork = true
     this.savedModifierRevision = this.modifiers.sourceRevision
+    this.savedRockRevision = this.rocks.sourceRevision
     this.nextSaveAt = Infinity
   }
 
@@ -693,19 +1090,30 @@ export class WorldTerrain {
 
   private async loadPersistedWorld(): Promise<void> {
     try {
-      const saved = await this.storage.load('default')
+      const [saved, savedRocks] = await Promise.all([
+        this.storage.load('default'),
+        this.storage.loadRocks?.('default') ?? Promise.resolve(undefined),
+      ])
       const upgraded = saved?.length
         ? upgradeLegacyDemoTerrainModifiers(saved, this.config.seed)
         : undefined
       if (upgraded) {
         this.modifiers.replace(upgraded)
-        await this.storage.save('default', this.modifiers.snapshot())
+        await this.storage.save(
+          'default',
+          this.modifiers.snapshot(),
+          savedRocks ?? [],
+        )
       } else if (saved && saved.length > 0) {
         this.modifiers.replace(saved)
       } else {
         this.installDemoModifiers()
       }
+      this.rocks.replace(savedRocks ?? [])
+      this.ensureDocumentModifiers()
+      this.renderer?.setMaterialSettings(this.getMaterialSettings())
       this.savedModifierRevision = this.modifiers.sourceRevision
+      this.savedRockRevision = this.rocks.sourceRevision
     } finally {
       this.initialized = true
     }
@@ -715,6 +1123,27 @@ export class WorldTerrain {
     for (const modifier of createDemoTerrainModifiers(this.config.seed)) {
       this.modifiers.add(modifier)
     }
+  }
+
+  private ensureDocumentModifiers(): void {
+    const snapshot = this.modifiers.snapshot()
+    if (!snapshot.some((modifier) => modifier.type === 'sculpt-layer')) {
+      this.modifiers.add(createSculptLayerModifier('Base sculpt'))
+    }
+    if (!snapshot.some((modifier) => modifier.type === 'material-settings')) {
+      this.modifiers.add(createMaterialSettingsModifier())
+    }
+  }
+
+  private sculptLayerBounds(id: string): AABB | undefined {
+    let result: AABB | undefined
+    for (const modifier of this.modifiers.snapshot()) {
+      if (modifier.type !== 'brush-stroke' || modifier.sculptLayerId !== id) {
+        continue
+      }
+      result = result ? unionBounds(result, modifier.bounds) : modifier.bounds
+    }
+    return result
   }
 
   private invalidate(bounds: AABB): void {
@@ -835,7 +1264,12 @@ export class WorldTerrain {
     if (section.dirtyRegion) return 0
     const lastLevel = this.config.lodResolutions.length - 1
     if (!candidate.visible) return lastLevel
-    return selectSourceLod({
+    const cameraDistance = cameraSectionDistance(
+      candidate.key,
+      input.camera,
+      this.config.sectionSize,
+    )
+    const screenLod = selectSourceLod({
       lodResolutions: this.config.lodResolutions,
       sectionSize: this.config.sectionSize,
       distance: Math.max(
@@ -852,6 +1286,14 @@ export class WorldTerrain {
       // distance or authored terrain actually changes.
       errorTolerancePixels: this.config.baseLodErrorPixels,
     })
+    return Math.min(
+      screenLod,
+      focusedLodCeiling(
+        cameraDistance,
+        this.config.lod0FocusRadiusSections,
+        lastLevel,
+      ),
+    )
   }
 
   private cancelDepartedBuilds(
@@ -937,6 +1379,12 @@ export class WorldTerrain {
         errorTolerancePixels:
           this.config.baseLodErrorPixels / Math.max(0.48, this.scheduler.snapshot().qualityScale),
         currentLod: section.activeLod,
+        focusDistanceSections: cameraSectionDistance(
+          candidate.key,
+          input.camera,
+          this.config.sectionSize,
+        ),
+        lod0FocusRadiusSections: this.config.lod0FocusRadiusSections,
       })
       const activeBrushTouchesSection = Boolean(
         this.activeStroke &&
@@ -1015,20 +1463,34 @@ export class WorldTerrain {
   }
 
   private applyPreview(
-    stroke: BrushStrokeModifier,
-    samples: readonly BrushStrokeModifier['points'][number][],
+    stroke: ActiveStrokeModifier,
+    samples: readonly ActiveStrokeModifier['points'][number][],
   ): void {
     // This mutates only small resident render buffers and must be visible in
     // the very next frame. Authoritative evaluation remains worker-only.
-    this.renderer?.previewBrush({
-      mode: stroke.mode,
-      domain: stroke.domain,
-      samples,
-      radius: stroke.radius,
-      strength: stroke.strength,
-      falloff: stroke.falloff,
-      targetY: stroke.targetY,
-    })
+    if (stroke.type === 'weight-paint') {
+      this.renderer?.previewWeightPaint({
+        channel: stroke.channel,
+        mode: stroke.mode,
+        samples,
+        radius: stroke.radius,
+        strength: stroke.strength,
+        falloff: stroke.falloff,
+      })
+    } else {
+      this.renderer?.previewBrush({
+        mode: stroke.mode,
+        domain: stroke.domain,
+        samples,
+        radius: stroke.radius,
+        strength: stroke.strength,
+        falloff: stroke.falloff,
+        targetY: stroke.targetY,
+        terraceStep: stroke.terraceStep,
+        noiseScale: stroke.noiseScale,
+        noiseSeed: stroke.noiseSeed,
+      })
+    }
   }
 
   private markPersistenceDirty(): void {
@@ -1039,7 +1501,8 @@ export class WorldTerrain {
     if (
       this.saveInFlight ||
       now < this.nextSaveAt ||
-      this.savedModifierRevision === this.modifiers.sourceRevision
+      (this.savedModifierRevision === this.modifiers.sourceRevision &&
+        this.savedRockRevision === this.rocks.sourceRevision)
     ) {
       return
     }
@@ -1050,12 +1513,22 @@ export class WorldTerrain {
       estimatedCpuMs: 0.25,
       run: () => {
         this.saveInFlight = true
-        const revision = this.modifiers.sourceRevision
+        const modifierRevision = this.modifiers.sourceRevision
+        const rockRevision = this.rocks.sourceRevision
         void this.storage
-          .save('default', this.modifiers.snapshot())
+          .save(
+            'default',
+            this.modifiers.snapshot(),
+            this.rocks.snapshot(),
+          )
           .then(() => {
-            this.savedModifierRevision = revision
-            this.nextSaveAt = Infinity
+            this.savedModifierRevision = modifierRevision
+            this.savedRockRevision = rockRevision
+            this.nextSaveAt =
+              modifierRevision === this.modifiers.sourceRevision &&
+              rockRevision === this.rocks.sourceRevision
+                ? Infinity
+                : performance.now() + 500
           })
           .finally(() => {
             this.saveInFlight = false

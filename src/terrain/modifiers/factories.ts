@@ -12,12 +12,22 @@ import type {
   BrushDomain,
   BrushMode,
   BrushStrokeModifier,
+  CsgOperation,
+  MaterialSettingsModifier,
   NoiseModifier,
+  PaintMode,
   RemeshModifier,
+  SculptLayerModifier,
   TessellateModifier,
   TunnelPortal,
+  WeightPaintModifier,
 } from './types'
 import { createTunnelPortals, tunnelBounds } from './tunnel'
+import {
+  cloneTerrainMaterialSettings,
+  type TerrainMaterialSettings,
+  type TerrainPaintChannelId,
+} from '../rendering/materialSettings'
 
 let fallbackId = 0
 
@@ -38,6 +48,9 @@ export function createBrushStroke(options: {
   strength: number
   falloff: number
   targetY?: number
+  terraceStep?: number
+  noiseScale?: number
+  sculptLayerId?: string
   sampleWeight?: number
 }): BrushStrokeModifier {
   return {
@@ -52,6 +65,10 @@ export function createBrushStroke(options: {
     strength: options.strength,
     falloff: options.falloff,
     targetY: options.targetY,
+    terraceStep: options.terraceStep,
+    noiseScale: options.noiseScale,
+    noiseSeed: Math.floor(Math.random() * 0x7fff_ffff),
+    sculptLayerId: options.sculptLayerId,
     points: [
       {
         ...options.point,
@@ -63,8 +80,74 @@ export function createBrushStroke(options: {
   }
 }
 
+export function createWeightPaintStroke(options: {
+  point: Vec3Like
+  normal?: Vec3Like
+  channel: TerrainPaintChannelId
+  mode: PaintMode
+  radius: number
+  strength: number
+  falloff: number
+  sampleWeight?: number
+}): WeightPaintModifier {
+  return {
+    id: createModifierId('paint'),
+    type: 'weight-paint',
+    enabled: true,
+    priority: 400,
+    bounds: boundsFromSphere(options.point, options.radius),
+    channel: options.channel,
+    mode: options.mode,
+    radius: options.radius,
+    strength: options.strength,
+    falloff: options.falloff,
+    points: [{
+      ...options.point,
+      normal: normalize3(options.normal ?? { x: 0, y: 1, z: 0 }),
+      weight: options.sampleWeight ?? 1,
+    }],
+    transform: identityTransform(),
+  }
+}
+
+export function createSculptLayerModifier(
+  name: string,
+  priority = 100,
+): SculptLayerModifier {
+  return {
+    id: createModifierId('sculpt-layer'),
+    type: 'sculpt-layer',
+    enabled: true,
+    priority,
+    bounds: {
+      min: { x: 0, y: 0, z: 0 },
+      max: { x: 0, y: 0, z: 0 },
+    },
+    name,
+    opacity: 1,
+    transform: identityTransform(),
+  }
+}
+
+export function createMaterialSettingsModifier(
+  settings?: TerrainMaterialSettings,
+): MaterialSettingsModifier {
+  return {
+    id: 'terrain-material-settings',
+    type: 'material-settings',
+    enabled: true,
+    priority: 10_000,
+    bounds: {
+      min: { x: 0, y: 0, z: 0 },
+      max: { x: 0, y: 0, z: 0 },
+    },
+    settings: cloneTerrainMaterialSettings(settings),
+    transform: identityTransform(),
+  }
+}
+
 export function appendBrushPoint(
-  modifier: BrushStrokeModifier,
+  modifier: BrushStrokeModifier | WeightPaintModifier,
   point: Vec3Like,
   normal: Vec3Like = { x: 0, y: 1, z: 0 },
   weight = 1,
@@ -147,6 +230,7 @@ export function createTunnelModifier(options: {
 
 export function createBooleanVolumeModifier(options: {
   volumes: CutterVolume[]
+  operation?: CsgOperation
 }): BooleanVolumeModifier {
   const bounds = unionCutterBounds(options.volumes.map(cutterBounds)) ?? {
     min: { x: 0, y: 0, z: 0 },
@@ -155,7 +239,7 @@ export function createBooleanVolumeModifier(options: {
   return {
     id: createModifierId('volume'),
     type: 'boolean-volume',
-    operation: 'subtract',
+    operation: options.operation ?? 'subtract',
     enabled: true,
     priority: 190,
     volumes: options.volumes.map(cloneCutterVolume),

@@ -18,7 +18,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
   const controls = useRef<OrbitControlsImpl>(null)
   const camera = useThree((state) => state.camera)
   const canvas = useThree((state) => state.gl.domElement)
-  const { cameraMode } = useEditorSnapshot(editor)
+  const { cameraMode, dragging } = useEditorSnapshot(editor)
   const keys = useRef(new Set<string>())
   const forward = useRef(new Vector3())
   const right = useRef(new Vector3())
@@ -180,8 +180,15 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
       return
     }
 
-    controller.enabled = true
+    const transformDragging = editor.getSnapshot().dragging
+    controller.enabled = !transformDragging
     terrain.setViewTarget(controller.target)
+    if (transformDragging) {
+      controller.mouseButtons.LEFT = DISABLED_MOUSE_ACTION
+      controller.mouseButtons.MIDDLE = DISABLED_MOUSE_ACTION
+      controller.mouseButtons.RIGHT = DISABLED_MOUSE_ACTION
+      return
+    }
     const editing = editor.getSnapshot().tool !== 'select'
     const alternateOrbit = active.has('AltLeft') || active.has('AltRight')
     controller.mouseButtons.LEFT =
@@ -221,7 +228,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
     <OrbitControls
       ref={controls}
       makeDefault
-      enabled={cameraMode === 'orbit'}
+      enabled={cameraMode === 'orbit' && !dragging}
       target={[540, 190, 140]}
       enableDamping
       dampingFactor={0.075}

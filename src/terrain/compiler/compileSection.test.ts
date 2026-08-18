@@ -3,12 +3,19 @@ import {
   createBooleanVolumeModifier,
   createBrushStroke,
   createRemeshModifier,
+  createSculptLayerModifier,
   createTunnelModifier,
+  createWeightPaintStroke,
 } from '../modifiers/factories'
 import type { TerrainModifier } from '../modifiers/types'
 import { EditableMesh, EditableMeshSection } from '../mesh/EditableMesh'
 import { encodeModifiers, type CompileSectionRequest } from '../workers/protocol'
 import { compileTerrainSection, evaluateHeight } from './compileSection'
+import {
+  generateGraniteRock,
+  transformGraniteRockPositions,
+} from '../rocks/generateGraniteRock'
+import { randomGraniteRockParameters } from '../rocks/types'
 
 function requestWithTunnel(includeTunnel: boolean): CompileSectionRequest {
   const center = { x: 54, y: evaluateHeight(54, 52, 17, []), z: 52 }
@@ -139,6 +146,90 @@ describe('section compiler', () => {
     expect(compiled.lods[0].triangleCount).toBeGreaterThan(source.triangles.length / 3)
   })
 
+  it('unions an additive volume and keeps its transform non-destructive', () => {
+    const source = editableCubeSource()
+    const volume = createBooleanVolumeModifier({
+      operation: 'add',
+      volumes: [{
+        kind: 'ellipsoid',
+        center: { x: 82, y: 26, z: 64 },
+        radii: { x: 8, y: 8, z: 8 },
+        forward: { x: 1, y: 0, z: 0 },
+        surface: 'none',
+      }],
+    })
+    const request = requestFor({ x: 0, z: 0 }, [volume], 16)
+    request.source = source
+    const first = compileTerrainSection(request)
+
+    expect(first.metadata.hasArbitraryTopology).toBe(true)
+    expect(first.bounds.max.x).toBeGreaterThan(87)
+    expect(first.metadata.vertexCount).toBeGreaterThan(8)
+
+    volume.transform.offset.x = 10
+    request.modifiers = encodeModifiers([volume])
+    const moved = compileTerrainSection(request)
+    expect(moved.bounds.max.x).toBeGreaterThan(first.bounds.max.x + 8)
+  })
+
+  it('packs four-channel weight painting into every compiled vertex stream', () => {
+    const point = { x: 64, y: evaluateHeight(64, 64, 17, []), z: 64 }
+    const paint = createWeightPaintStroke({
+      point,
+      channel: 'channel2',
+      mode: 'add',
+      radius: 28,
+      strength: 1,
+      falloff: 0.4,
+    })
+    const compiled = compileTerrainSection(
+      requestFor({ x: 0, z: 0 }, [paint], 16),
+    )
+    const weights = compiled.lods[0].paintWeights!
+
+    expect(weights).toHaveLength((compiled.lods[0].positions.length / 3) * 4)
+    expect(Math.max(...weights.filter((_, index) => index % 4 === 2))).toBeGreaterThan(60_000)
+    expect(weights.every((value, index) => index % 4 === 2 || value === 0)).toBe(true)
+  })
+
+  it('applies sculpt-layer visibility and opacity without baking its strokes', () => {
+    const point = { x: 64, y: evaluateHeight(64, 64, 17, []), z: 64 }
+    const layer = createSculptLayerModifier('Detail')
+    const stroke = createBrushStroke({
+      point,
+      mode: 'raise',
+      radius: 24,
+      strength: 1,
+      falloff: 0.5,
+      sculptLayerId: layer.id,
+    })
+    const base = compileTerrainSection(requestFor({ x: 0, z: 0 }, [], 8))
+    layer.enabled = false
+    const hidden = compileTerrainSection(
+      requestFor({ x: 0, z: 0 }, [layer, stroke], 8),
+    )
+    expect(hidden.lods[0].positions).toEqual(base.lods[0].positions)
+
+    layer.enabled = true
+    layer.opacity = 0
+    const transparent = compileTerrainSection(
+      requestFor({ x: 0, z: 0 }, [layer, stroke], 8),
+    )
+    expect(transparent.lods[0].positions).toEqual(base.lods[0].positions)
+
+    layer.opacity = 0.5
+    const half = compileTerrainSection(
+      requestFor({ x: 0, z: 0 }, [layer, stroke], 8),
+    )
+    layer.opacity = 1
+    const full = compileTerrainSection(
+      requestFor({ x: 0, z: 0 }, [layer, stroke], 8),
+    )
+    const center = (4 * 9 + 4) * 3 + 1
+    expect(half.lods[0].positions[center]).toBeGreaterThan(base.lods[0].positions[center])
+    expect(half.lods[0].positions[center]).toBeLessThan(full.lods[0].positions[center])
+  })
+
   it('emits genuine non-heightfield tunnel topology', () => {
     const base = compileTerrainSection(requestWithTunnel(false))
     const tunnel = compileTerrainSection(requestWithTunnel(true))
@@ -185,6 +276,46 @@ describe('section compiler', () => {
     expect(carved.lods[0].triangleCount).toBeGreaterThan(0)
     expect(carved.bounds.max.x - carved.bounds.min.x).toBeCloseTo(128, 4)
     expect(carved.bounds.max.z - carved.bounds.min.z).toBeCloseTo(128, 4)
+  })
+
+  it('removes numerical CSG slivers where a granite cutter crosses a section seam', () => {
+    const seed = 13_371
+    const recipe = randomGraniteRockParameters(1_285_027_382)
+    const mesh = generateGraniteRock(recipe)
+    const x = 512
+    const z = 64
+    const surfaceY = evaluateHeight(x, z, seed, [])
+    const height = mesh.bounds.max.y - mesh.bounds.min.y
+    const positions = transformGraniteRockPositions(mesh.positions, {
+      position: {
+        x,
+        y: surfaceY - mesh.bounds.min.y - height * 0.06,
+        z,
+      },
+      rotation: {
+        x: 0,
+        y: ((recipe.seed * 0.618_033_988_75) % 1) * Math.PI * 2,
+        z: 0,
+      },
+      scale: 1,
+    })
+    const volume = createBooleanVolumeModifier({
+      operation: 'subtract',
+      volumes: [{
+        kind: 'mesh',
+        positions,
+        indices: Array.from(mesh.indices),
+        surface: 'none',
+      }],
+    })
+
+    for (const key of [{ x: 3, z: 0 }, { x: 4, z: 0 }]) {
+      const request = requestFor(key, [volume], 96)
+      request.config.seed = seed
+      const compiled = compileTerrainSection(request)
+      expect(compiled.metadata.validationWarnings).toBe(0)
+      expect(compiled.lods[0].triangleCount).toBeGreaterThan(0)
+    }
   })
 
   it('does not stretch a section toward a density modifier that only touches its halo', () => {

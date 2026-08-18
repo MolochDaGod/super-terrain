@@ -46,7 +46,8 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
           <HelpGroup
             title="Edit"
             rows={[
-              ['1—7', 'Select terrain tool'],
+              ['1—0', 'Select sculpt tools'],
+              ['P / G / T', 'Paint / density / tunnel'],
               ['LMB drag', 'Apply active brush'],
               ['[ / ]', 'Change brush radius'],
               ['H', 'Toggle telemetry'],
@@ -55,7 +56,7 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
           />
         </div>
         <div className="border-t border-white/[0.08] bg-white/[0.02] px-5 py-4 text-[10px] leading-relaxed text-white/38">
-          Heightfield strokes move along world Y. Mesh strokes follow the picked surface normal in XYZ. One press/drag creates one selectable modifier containing all sampled dabs; it can then be enabled, moved, rotated, scaled, or deleted. Workers recompile only dirty sections while the previous mesh remains visible.
+          Sculpt strokes belong to editable layers; paint writes one of four material weight channels. The Granite Rock Lab places seed-driven, watertight granite outcrops; select one to edit its formation and surface or snapshot its exact triangles as an independent add/subtract CSG modifier. Workers rebuild only dirty sections while the previous mesh remains visible.
         </div>
       </section>
     </div>

@@ -18,6 +18,7 @@ import type { TerrainOverlay } from '../editor/EditorStore'
 import type { TerrainSection } from '../partition/MeshPartition'
 import type {
   PreviewBrush,
+  PreviewWeightPaint,
   TerrainRaycastHit,
   TerrainRenderBackend,
   TerrainRenderStats,
@@ -29,6 +30,12 @@ import {
 import type { TerrainRenderMode } from './renderModes'
 import { createSectionGeometry } from './createSectionGeometry'
 import { invalidateTerrainShadows } from './environment/terrainShadowInvalidation'
+import {
+  cloneTerrainMaterialSettings,
+  DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+  paintChannelIndex,
+  type TerrainMaterialSettings,
+} from './materialSettings'
 
 interface RuntimeSection {
   section: TerrainSection
@@ -55,6 +62,9 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private deferredDisposals: DeferredGeometry[] = []
   private overlay: TerrainOverlay = 'none'
   private renderMode: TerrainRenderMode = 'preview'
+  private materialSettings = cloneTerrainMaterialSettings(
+    DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+  )
   private terrainMaterial: TerrainMaterialHandle
   private readonly lodMaterials: MeshStandardNodeMaterial[]
   private readonly densityMaterial: MeshStandardNodeMaterial
@@ -76,7 +86,11 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     this.surfaceRoot.name = 'terrain-static-surfaces'
     this.root.add(this.surfaceRoot)
     this.sectionSize = sectionSize
-    this.terrainMaterial = createTerrainMaterialForMode(this.renderMode)
+    this.terrainMaterial = createTerrainMaterialForMode(
+      this.renderMode,
+      'none',
+      this.materialSettings,
+    )
     this.lodMaterials = LOD_COLORS.map(
       (color) =>
         new MeshStandardNodeMaterial({
@@ -207,13 +221,30 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     if (this.renderMode === mode) return
     this.renderMode = mode
     const previous = this.terrainMaterial
-    this.terrainMaterial = createTerrainMaterialForMode(mode)
+    this.terrainMaterial = createTerrainMaterialForMode(
+      mode,
+      'none',
+      this.materialSettings,
+    )
     for (const runtime of this.runtime.values()) {
       const castsShadow = mode === 'full'
       runtime.mesh.castShadow = castsShadow
       runtime.mesh.receiveShadow = castsShadow
       this.applyMaterial(runtime)
     }
+    previous.dispose()
+    invalidateTerrainShadows()
+  }
+
+  setMaterialSettings(settings: TerrainMaterialSettings): void {
+    this.materialSettings = cloneTerrainMaterialSettings(settings)
+    const previous = this.terrainMaterial
+    this.terrainMaterial = createTerrainMaterialForMode(
+      this.renderMode,
+      'none',
+      this.materialSettings,
+    )
+    for (const runtime of this.runtime.values()) this.applyMaterial(runtime)
     previous.dispose()
     invalidateTerrainShadows()
   }
@@ -271,6 +302,51 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       if (maximumDisplacement > 0) {
         expandPreviewBounds(runtime.mesh.geometry, maximumDisplacement)
         this.queuePreviewRefresh(runtime.mesh.geometry)
+      }
+    }
+  }
+
+  previewWeightPaint(preview: PreviewWeightPaint): void {
+    if (preview.samples.length === 0) return
+    const samples = preview.samples.map(preparePreviewSample)
+    const channel = paintChannelIndex(preview.channel)
+    const minimumBrushX =
+      Math.min(...samples.map((sample) => sample.x)) - preview.radius
+    const maximumBrushX =
+      Math.max(...samples.map((sample) => sample.x)) + preview.radius
+    const minimumBrushZ =
+      Math.min(...samples.map((sample) => sample.z)) - preview.radius
+    const maximumBrushZ =
+      Math.max(...samples.map((sample) => sample.z)) + preview.radius
+    const minimumSectionX = Math.floor(minimumBrushX / this.sectionSize)
+    const maximumSectionX = Math.floor(maximumBrushX / this.sectionSize)
+    const minimumSectionZ = Math.floor(minimumBrushZ / this.sectionSize)
+    const maximumSectionZ = Math.floor(maximumBrushZ / this.sectionSize)
+
+    // Resolve only the section IDs overlapped by this dab. A large streamed
+    // world can have hundreds of resident meshes, but a normal brush touches
+    // one to four of them.
+    for (let z = minimumSectionZ; z <= maximumSectionZ; z += 1) {
+      for (let x = minimumSectionX; x <= maximumSectionX; x += 1) {
+        const runtime = this.runtime.get(`${x}:${z}` as SectionId)
+        if (!runtime) continue
+        const originX = x * this.sectionSize
+        const originZ = z * this.sectionSize
+        const sectionSamples = samples.filter(
+          (sample) =>
+            sample.x + preview.radius >= originX &&
+            sample.x - preview.radius <= originX + this.sectionSize &&
+            sample.z + preview.radius >= originZ &&
+            sample.z - preview.radius <= originZ + this.sectionSize,
+        )
+        applyWeightPreviewToGeometry(
+          runtime.mesh.geometry,
+          originX,
+          originZ,
+          preview,
+          sectionSamples,
+          channel,
+        )
       }
     }
   }
@@ -473,6 +549,75 @@ function preparePreviewSample(
   }
 }
 
+function applyWeightPreviewToGeometry(
+  geometry: BufferGeometry,
+  originX: number,
+  originZ: number,
+  preview: PreviewWeightPaint,
+  samples: readonly PreparedPreviewSample[],
+  channel: number,
+): number {
+  if (samples.length === 0) return 0
+  const position = geometry.getAttribute('position') as BufferAttribute
+  const weights = geometry.getAttribute(
+    'terrainPaintWeights',
+  ) as BufferAttribute | undefined
+  if (!weights) return 0
+  const positions = position.array as Float32Array
+  const values = weights.array as Uint16Array
+  const radius = Math.max(0.001, preview.radius)
+  const radiusSquared = radius * radius
+  const exponent = 1 + preview.falloff * 4
+  const signedStrength =
+    preview.strength * (preview.mode === 'subtract' ? -1 : 1)
+  let firstChangedVertex = Infinity
+  let lastChangedVertex = -1
+  let changedVertices = 0
+
+  for (let vertex = 0; vertex < position.count; vertex += 1) {
+    const offset = vertex * 3
+    const worldX = originX + positions[offset]
+    const worldY = positions[offset + 1]
+    const worldZ = originZ + positions[offset + 2]
+    let influence = 0
+    for (const sample of samples) {
+      const dx = worldX - sample.x
+      const dy = worldY - sample.y
+      const dz = worldZ - sample.z
+      const distanceSquared = dx * dx + dy * dy + dz * dz
+      if (distanceSquared >= radiusSquared) continue
+      const radial = 1 - Math.sqrt(distanceSquared) / radius
+      influence +=
+        smoothstep(0, 1, radial) ** exponent * sample.weight
+    }
+    if (influence <= 0) continue
+    const target = vertex * 4 + channel
+    const current = values[target]
+    const next = Math.round(
+      Math.max(
+        0,
+        Math.min(1, current / 65_535 + signedStrength * influence),
+      ) * 65_535,
+    )
+    if (next === current) continue
+    values[target] = next
+    firstChangedVertex = Math.min(firstChangedVertex, vertex)
+    lastChangedVertex = vertex
+    changedVertices += 1
+  }
+
+  if (changedVertices > 0) {
+    // Upload only the contiguous vertex span containing the changed weights;
+    // untouched section buffers never receive a version bump or GPU upload.
+    weights.addUpdateRange(
+      firstChangedVertex * 4,
+      (lastChangedVertex - firstChangedVertex + 1) * 4,
+    )
+    weights.needsUpdate = true
+  }
+  return changedVertices
+}
+
 function applyPreviewToGeometry(
   geometry: BufferGeometry,
   originX: number,
@@ -545,6 +690,69 @@ function applyPreviewToGeometry(
           positions[offset + 2] += sample.normalZ * displacement
           break
         }
+        case 'clay': {
+          const displacement = Math.min(
+            weight * 3.4,
+            radial * preview.strength * 1.5,
+          )
+          positions[offset] += sample.normalX * displacement
+          positions[offset + 1] += sample.normalY * displacement
+          positions[offset + 2] += sample.normalZ * displacement
+          break
+        }
+        case 'pinch': {
+          const towardX = -dx
+          const towardY = -dy
+          const towardZ = -dz
+          const normalComponent =
+            towardX * sample.normalX +
+            towardY * sample.normalY +
+            towardZ * sample.normalZ
+          const amount = Math.max(0, Math.min(0.45, weight * 0.32))
+          positions[offset] +=
+            (towardX - sample.normalX * normalComponent) * amount
+          positions[offset + 1] +=
+            (towardY - sample.normalY * normalComponent) * amount
+          positions[offset + 2] +=
+            (towardZ - sample.normalZ * normalComponent) * amount
+          break
+        }
+        case 'scrape': {
+          const planeDistance =
+            preview.domain === 'heightfield'
+              ? worldY - (preview.targetY ?? sample.y)
+              : dx * sample.normalX +
+                dy * sample.normalY +
+                dz * sample.normalZ
+          if (planeDistance <= 0) break
+          const displacement =
+            -planeDistance * Math.max(0, Math.min(1, weight * 0.7))
+          positions[offset] += sample.normalX * displacement
+          positions[offset + 1] += sample.normalY * displacement
+          positions[offset + 2] += sample.normalZ * displacement
+          break
+        }
+        case 'terrace': {
+          const step = Math.max(0.25, preview.terraceStep ?? 4)
+          const target = Math.round(worldY / step) * step
+          positions[offset + 1] +=
+            (target - worldY) * Math.max(0, Math.min(1, weight * 0.65))
+          break
+        }
+        case 'noise': {
+          const scale = Math.max(0.15, preview.noiseScale ?? 3)
+          const noise = previewHash3(
+            Math.floor(worldX / scale),
+            Math.floor(worldY / scale),
+            Math.floor(worldZ / scale),
+            preview.noiseSeed ?? 1,
+          ) * 2 - 1
+          const displacement = noise * weight * 3.2
+          positions[offset] += sample.normalX * displacement
+          positions[offset + 1] += sample.normalY * displacement
+          positions[offset + 2] += sample.normalZ * displacement
+          break
+        }
       }
       changed = true
       vertexChanged = true
@@ -564,6 +772,16 @@ function applyPreviewToGeometry(
   if (!changed) return 0
   attribute.needsUpdate = true
   return maximumDisplacement
+}
+
+function previewHash3(x: number, y: number, z: number, seed: number): number {
+  let value =
+    Math.imul(x, 374_761_393) ^
+    Math.imul(y, 668_265_263) ^
+    Math.imul(z, 2_147_483_647) ^
+    seed
+  value = Math.imul(value ^ (value >>> 13), 1_274_126_177)
+  return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295
 }
 
 function expandPreviewBounds(

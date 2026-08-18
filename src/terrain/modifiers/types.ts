@@ -1,12 +1,29 @@
 import type { AABB, Vec3Like } from '../core/types'
 import type { CutterVolume } from './boolean/CutterVolume'
+import type {
+  TerrainMaterialSettings,
+  TerrainPaintChannelId,
+} from '../rendering/materialSettings'
 
-export type BrushMode = 'raise' | 'lower' | 'smooth' | 'flatten'
+export type BrushMode =
+  | 'raise'
+  | 'lower'
+  | 'smooth'
+  | 'flatten'
+  | 'clay'
+  | 'pinch'
+  | 'scrape'
+  | 'terrace'
+  | 'noise'
 export type BrushDomain = 'heightfield' | 'mesh'
+export type PaintMode = 'add' | 'subtract'
+export type CsgOperation = 'subtract' | 'add'
 
 export interface ModifierTransform {
   offset: Vec3Like
   yaw: number
+  pitch?: number
+  roll?: number
   scale: number
 }
 
@@ -32,7 +49,32 @@ export interface BrushStrokeModifier extends ModifierBase {
   strength: number
   falloff: number
   targetY?: number
+  terraceStep?: number
+  noiseScale?: number
+  noiseSeed?: number
+  sculptLayerId?: string
   points: BrushSample[]
+}
+
+export interface WeightPaintModifier extends ModifierBase {
+  type: 'weight-paint'
+  channel: TerrainPaintChannelId
+  mode: PaintMode
+  radius: number
+  strength: number
+  falloff: number
+  points: BrushSample[]
+}
+
+export interface SculptLayerModifier extends ModifierBase {
+  type: 'sculpt-layer'
+  name: string
+  opacity: number
+}
+
+export interface MaterialSettingsModifier extends ModifierBase {
+  type: 'material-settings'
+  settings: TerrainMaterialSettings
 }
 
 export interface NoiseModifier extends ModifierBase {
@@ -79,16 +121,19 @@ export interface BooleanSubtractModifier extends ModifierBase {
   backend: string
 }
 
-/** A serializable set of arbitrary closed meshes removed by exact CSG. */
+/** Serializable closed meshes combined with the terrain by exact live CSG. */
 export interface BooleanVolumeModifier extends ModifierBase {
   type: 'boolean-volume'
-  operation: 'subtract'
+  operation: CsgOperation
   volumes: CutterVolume[]
   backend: string
 }
 
 export type TerrainModifier =
   | BrushStrokeModifier
+  | WeightPaintModifier
+  | SculptLayerModifier
+  | MaterialSettingsModifier
   | NoiseModifier
   | FieldDisplacementModifier
   | RemeshModifier

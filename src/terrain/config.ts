@@ -6,6 +6,8 @@ export interface TerrainConfig {
   workerCount: number
   targetFps: number
   baseLodErrorPixels: number
+  /** Finest-detail editing patch around the camera's terrain section. */
+  lod0FocusRadiusSections: number
   renderRadiusSections: number
   maxRenderRadiusSections: number
   prefetchSections: number
@@ -35,6 +37,9 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   workerCount: Math.max(2, Math.min(4, availableWorkers - 2)),
   targetFps: 30,
   baseLodErrorPixels: 2.2,
+  // Screen-error LOD alone demotes nearby terrain while the camera is elevated.
+  // Keep a 3x3 authoring patch under the camera genuinely at LOD0.
+  lod0FocusRadiusSections: 1.75,
   // The far-field proxy already carries the horizon. Keep only the nearest
   // kilometre of editable sections resident at launch; the projected-view
   // calculation still expands this radius automatically when the camera pulls

@@ -7,8 +7,14 @@ const TOOL_KEYS: Record<string, EditorTool> = {
   Digit3: 'lower',
   Digit4: 'smooth',
   Digit5: 'flatten',
-  Digit6: 'remesh',
-  Digit7: 'tunnel',
+  Digit6: 'clay',
+  Digit7: 'pinch',
+  Digit8: 'scrape',
+  Digit9: 'terrace',
+  Digit0: 'noise',
+  KeyP: 'paint',
+  KeyG: 'remesh',
+  KeyT: 'tunnel',
 }
 
 export function EditorShortcuts({ editor }: { editor: EditorStore }) {

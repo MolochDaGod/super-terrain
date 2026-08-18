@@ -15,8 +15,9 @@ export interface FarFieldMeshData {
  * The proxy must follow the base terrain closely enough to preserve the
  * distant silhouette. At the previous 96 x 96 resolution each edge covered
  * roughly 171 m of the default world, turning narrow valleys and ridges into
- * long flat chords. Visibility against streamed terrain is handled separately
- * by the backdrop depth in HorizonProxy, without falsifying world elevation.
+ * long flat chords. Its material uses normal perspective depth and a stencil
+ * mask written by resident terrain, so world elevation stays truthful while
+ * residents always win without sacrificing proxy front-to-back occlusion.
  */
 const FAR_FIELD_TARGET_EDGE_LENGTH = 64
 const FAR_FIELD_MIN_SEGMENTS = 96

@@ -7,7 +7,10 @@ import {
   Trash2,
 } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
-import type { EditorStore } from '../../terrain/editor/EditorStore'
+import type {
+  EditorStore,
+  TransformMode,
+} from '../../terrain/editor/EditorStore'
 import type { ModifierTransform, TerrainModifier } from '../../terrain/modifiers/types'
 import { normalizedTransform } from '../../terrain/modifiers/transform'
 import { tunnelPortalDistance } from '../../terrain/modifiers/tunnel'
@@ -25,7 +28,14 @@ interface ModifierStackPanelProps {
 function ModifierStackPanelView({ terrain, editor }: ModifierStackPanelProps) {
   useModifierRevision(terrain)
   const editorSnapshot = useEditorSnapshot(editor)
-  const modifiers = terrain.modifiers.snapshot().reverse()
+  const modifiers = terrain.modifiers
+    .snapshot()
+    .filter(
+      (modifier) =>
+        modifier.type !== 'sculpt-layer' &&
+        modifier.type !== 'material-settings',
+    )
+    .reverse()
   const selected = modifiers.find(
     (modifier) => modifier.id === editorSnapshot.selectedModifierId,
   )
@@ -56,6 +66,7 @@ function ModifierStackPanelView({ terrain, editor }: ModifierStackPanelProps) {
             onSelect={() =>
               editor.patch({
                 selectedModifierId: modifier.id,
+                selectedRockId: undefined,
                 status: `${modifierLabel(modifier)} modifier selected`,
               })
             }
@@ -85,6 +96,14 @@ function ModifierStackPanelView({ terrain, editor }: ModifierStackPanelProps) {
           onTunnelShapeChange={(values) => {
             terrain.updateTunnelShape(selected.id, values)
             editor.patch({ status: 'Tunnel shape changed · affected sections queued' })
+          }}
+          transformMode={editorSnapshot.transformMode}
+          onTransformModeChange={(transformMode) =>
+            editor.patch({ transformMode, tool: 'select' })
+          }
+          onCsgOperationChange={(operation) => {
+            terrain.updateCsgOperation(selected.id, operation)
+            editor.patch({ status: `CSG ${operation} queued` })
           }}
         />
       )}
@@ -140,6 +159,11 @@ function ModifierRow({
                 {modifier.points.length} {modifier.points.length === 1 ? 'sample' : 'samples'} · one stroke
               </span>
             )}
+            {modifier.type === 'weight-paint' && (
+              <span className="mt-0.5 block font-mono text-[7px] text-white/24">
+                {modifier.points.length} samples · {modifier.channel}
+              </span>
+            )}
             {modifier.type === 'boolean-subtract' && (
               <span className="mt-0.5 block font-mono text-[7px] text-white/24">
                 {tunnelPortalDistance(modifier).toFixed(0)} m path · r {modifier.radius.toFixed(1)} m
@@ -177,12 +201,18 @@ function ModifierTransformEditor({
   modifier,
   onChange,
   onTunnelShapeChange,
+  transformMode,
+  onTransformModeChange,
+  onCsgOperationChange,
 }: {
   modifier: TerrainModifier
   onChange: (transform: ModifierTransform) => void
   onTunnelShapeChange: (
     values: Partial<{ radius: number; depth: number }>,
   ) => void
+  transformMode: TransformMode
+  onTransformModeChange: (mode: TransformMode) => void
+  onCsgOperationChange: (operation: 'add' | 'subtract') => void
 }) {
   const transform = normalizedTransform(modifier.transform)
   const patchOffset = (axis: 'x' | 'y' | 'z', value: number) =>
@@ -196,6 +226,34 @@ function ModifierTransformEditor({
       <div className="flex items-center gap-2 text-[8px] font-semibold uppercase tracking-[0.14em] text-[#b7f6df]/55">
         <Move3D size={11} /> Transform selected modifier
       </div>
+      <div className="grid grid-cols-3 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
+        {(['translate', 'rotate', 'scale'] as const).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            data-active={transformMode === mode}
+            className="rounded-md px-1 py-1.5 text-[8px] capitalize transition"
+            onClick={() => onTransformModeChange(mode)}
+          >
+            {mode}
+          </button>
+        ))}
+      </div>
+      {modifier.type === 'boolean-volume' && (
+        <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
+          {(['subtract', 'add'] as const).map((operation) => (
+            <button
+              key={operation}
+              type="button"
+              data-active={modifier.operation === operation}
+              className="rounded-md px-1 py-1.5 text-[8px] capitalize transition"
+              onClick={() => onCsgOperationChange(operation)}
+            >
+              CSG {operation}
+            </button>
+          ))}
+        </div>
+      )}
       {modifier.type === 'boolean-subtract' && (
         <>
           <RangeField
@@ -230,6 +288,28 @@ function ModifierTransformEditor({
         unit="°"
         onChange={(value) => onChange({ ...transform, yaw: (value * Math.PI) / 180 })}
       />
+      <RangeField
+        label="Pitch"
+        value={((transform.pitch ?? 0) * 180) / Math.PI}
+        min={-180}
+        max={180}
+        step={1}
+        unit="°"
+        onChange={(value) =>
+          onChange({ ...transform, pitch: (value * Math.PI) / 180 })
+        }
+      />
+      <RangeField
+        label="Roll"
+        value={((transform.roll ?? 0) * 180) / Math.PI}
+        min={-180}
+        max={180}
+        step={1}
+        unit="°"
+        onChange={(value) =>
+          onChange({ ...transform, roll: (value * Math.PI) / 180 })
+        }
+      />
       <RangeField label="Scale" value={transform.scale} min={0.25} max={4} step={0.05} unit="×" onChange={(scale) => onChange({ ...transform, scale })} />
     </div>
   )
@@ -239,10 +319,16 @@ function modifierLabel(modifier: TerrainModifier): string {
   switch (modifier.type) {
     case 'brush-stroke':
       return `${modifier.domain === 'mesh' ? 'Mesh' : 'Height'} · ${modifier.mode}`
+    case 'weight-paint':
+      return `Paint · ${modifier.channel} ${modifier.mode}`
+    case 'sculpt-layer':
+      return `Layer · ${modifier.name}`
+    case 'material-settings':
+      return 'Terrain materials'
     case 'boolean-subtract':
       return 'Mesh · tunnel subtract'
     case 'boolean-volume':
-      return 'Mesh · volume subtract'
+      return `Mesh · volume ${modifier.operation}`
     case 'remesh':
       return 'Mesh · density'
     case 'tessellate':

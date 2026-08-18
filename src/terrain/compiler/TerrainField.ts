@@ -31,6 +31,9 @@ export function evaluateHeight(
           Math.sin(worldX * 0.018 + worldZ * 0.011) * modifier.scale * 0.5
         break
       case 'brush-stroke':
+      case 'weight-paint':
+      case 'sculpt-layer':
+      case 'material-settings':
       case 'boolean-subtract':
       case 'boolean-volume':
       case 'remesh':
@@ -103,6 +106,9 @@ export function evaluateEditableTerrainPoint(
       case 'brush-stroke':
         applyBrushToPoint(point, base, modifier)
         break
+      case 'weight-paint':
+      case 'sculpt-layer':
+      case 'material-settings':
       case 'boolean-subtract':
       case 'boolean-volume':
       case 'remesh':
@@ -140,7 +146,7 @@ function applyBrushToPoint(
     const radial = 1 - distance / modifier.radius
     const weight =
       smoothstep(0, 1, radial) ** (0.55 + modifier.falloff * 2.4) *
-      clamp(modifier.strength, 0.01, 1) *
+      clamp(modifier.strength, 0, 1) *
       Math.max(0, sample.weight ?? 1)
     const normal = sample.normal ?? { x: 0, y: 1, z: 0 }
     const normalLength = Math.hypot(normal.x, normal.y, normal.z) || 1
@@ -175,6 +181,58 @@ function applyBrushToPoint(
         if (!isHeightfield) point.z = lerp(point.z, base.z, amount)
         break
       }
+      case 'clay': {
+        // A broad, slightly flattened buildup like ZBrush/Blender clay strips.
+        const displacement = Math.min(weight * 3.4, radial * modifier.strength * 1.5)
+        point.x += nx * displacement
+        point.y += ny * displacement
+        point.z += nz * displacement
+        break
+      }
+      case 'pinch': {
+        // Pull vertices toward the dab center in the tangent plane while
+        // preserving the surface's normal depth.
+        const towardX = -dx
+        const towardY = -dy
+        const towardZ = -dz
+        const normalComponent = towardX * nx + towardY * ny + towardZ * nz
+        const amount = clamp(weight * 0.32, 0, 0.45)
+        point.x += (towardX - nx * normalComponent) * amount
+        point.y += (towardY - ny * normalComponent) * amount
+        point.z += (towardZ - nz * normalComponent) * amount
+        break
+      }
+      case 'scrape': {
+        const planeDistance = isHeightfield
+          ? point.y - (modifier.targetY ?? sample.y)
+          : dx * nx + dy * ny + dz * nz
+        if (planeDistance <= 0) break
+        const displacement = -planeDistance * clamp(weight * 0.7, 0, 1)
+        point.x += nx * displacement
+        point.y += ny * displacement
+        point.z += nz * displacement
+        break
+      }
+      case 'terrace': {
+        const step = Math.max(0.25, modifier.terraceStep ?? 4)
+        const target = Math.round(point.y / step) * step
+        point.y = lerp(point.y, target, clamp(weight * 0.65, 0, 1))
+        break
+      }
+      case 'noise': {
+        const scale = Math.max(0.15, modifier.noiseScale ?? 3)
+        const noise = hash3(
+          Math.floor(point.x / scale),
+          Math.floor(point.y / scale),
+          Math.floor(point.z / scale),
+          modifier.noiseSeed ?? 1,
+        ) * 2 - 1
+        const displacement = noise * weight * 3.2
+        point.x += nx * displacement
+        point.y += ny * displacement
+        point.z += nz * displacement
+        break
+      }
     }
   }
 }
@@ -205,5 +263,15 @@ function hash2(x: number, z: number, seed: number): number {
   let value = Math.imul(x, 374_761_393) + Math.imul(z, 668_265_263)
   value = (value ^ (value >>> 13)) + Math.imul(seed, 1_443_053)
   value = Math.imul(value ^ (value >>> 16), 1_274_126_177)
+  return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295
+}
+
+function hash3(x: number, y: number, z: number, seed: number): number {
+  let value =
+    Math.imul(x, 374_761_393) ^
+    Math.imul(y, 668_265_263) ^
+    Math.imul(z, 2_147_483_647) ^
+    seed
+  value = Math.imul(value ^ (value >>> 13), 1_274_126_177)
   return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295
 }

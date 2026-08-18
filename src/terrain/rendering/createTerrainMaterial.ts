@@ -15,6 +15,11 @@ import {
   triplanarTexture,
   vertexColor,
 } from 'three/tsl'
+import {
+  DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+  type TerrainMaterialSettings,
+} from './materialSettings'
+import { applyTerrainPaint } from './terrainPaintMaterial'
 
 export interface TerrainMaterialResources {
   material: MeshStandardNodeMaterial
@@ -26,7 +31,9 @@ export interface TerrainMaterialResources {
  * World coordinates make the projection continuous across section/LOD swaps;
  * the existing vertex color remains responsible for biome and cave coloring.
  */
-export function createTerrainMaterial(): TerrainMaterialResources {
+export function createTerrainMaterial(
+  settings: TerrainMaterialSettings = DEFAULT_TERRAIN_MATERIAL_SETTINGS,
+): TerrainMaterialResources {
   const detailTexture = createDetailTexture()
   const detail = triplanarTexture(
     texture(detailTexture),
@@ -41,7 +48,10 @@ export function createTerrainMaterial(): TerrainMaterialResources {
     metalness: 0,
     side: DoubleSide,
   })
-  material.colorNode = vertexColor().mul(detail.mul(0.32).add(0.78))
+  const baseColor = vertexColor().mul(detail.mul(0.32).add(0.78))
+  const painted = applyTerrainPaint(baseColor, float(0.94), settings)
+  material.colorNode = painted.color
+  material.roughnessNode = painted.roughness
   return {
     material,
     dispose() {

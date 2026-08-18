@@ -8,6 +8,8 @@ import { ModifierBounds } from './ModifierBounds'
 import { TerrainEnvironment } from './TerrainEnvironment'
 import { TerrainRenderPipeline } from './TerrainRenderPipeline'
 import { TerrainView } from './TerrainView'
+import { ModifierTransformGizmo } from './ModifierTransformGizmo'
+import { GraniteRockScene } from './GraniteRockScene'
 
 interface TerrainSceneProps {
   terrain: WorldTerrain
@@ -39,7 +41,9 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
         mode={renderMode}
       />
       <TerrainView terrain={terrain} editor={editor} />
+      <GraniteRockScene terrain={terrain} editor={editor} />
       <ModifierBounds terrain={terrain} editor={editor} />
+      <ModifierTransformGizmo terrain={terrain} editor={editor} />
       <EditorCamera terrain={terrain} editor={editor} />
       <TerrainRenderPipeline mode={renderMode} onCompilingChange={onCompilingChange} />
     </>

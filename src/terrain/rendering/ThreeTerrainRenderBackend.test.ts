@@ -42,6 +42,46 @@ describe('Three terrain render preview', () => {
     expect((mesh.geometry.getAttribute('normal') as BufferAttribute).version).toBeGreaterThan(0)
     backend.dispose()
   })
+
+  it('weight-paints only intersecting resident topology buffers', () => {
+    const root = new Group()
+    const backend = new ThreeTerrainRenderBackend(root, 128)
+    const partition = new MeshPartition({ sectionSize: 128, worldSize: 2048, seed: 1 })
+    const near = partition.getOrCreate({ x: 0, z: 0 })
+    const far = partition.getOrCreate({ x: 4, z: 4 })
+    backend.upload(near, planeSection())
+    backend.upload(far, planeSection())
+
+    backend.previewWeightPaint({
+      channel: 'channel2',
+      mode: 'add',
+      samples: [{
+        x: 5,
+        y: 0,
+        z: 5,
+        normal: { x: 0, y: 1, z: 0 },
+        weight: 1,
+      }],
+      radius: 6,
+      strength: 1,
+      falloff: 0.5,
+    })
+
+    const nearMesh = root.getObjectByName(`terrain-section-${near.id}`) as Mesh
+    const farMesh = root.getObjectByName(`terrain-section-${far.id}`) as Mesh
+    const nearWeights = nearMesh.geometry.getAttribute(
+      'terrainPaintWeights',
+    ) as BufferAttribute
+    const farWeights = farMesh.geometry.getAttribute(
+      'terrainPaintWeights',
+    ) as BufferAttribute
+    expect((nearWeights.array as Uint16Array)[4 * 4 + 2]).toBe(65_535)
+    expect(nearWeights.version).toBeGreaterThan(0)
+    expect(nearWeights.updateRanges.length).toBeGreaterThan(0)
+    expect(farWeights.version).toBe(0)
+    expect([...farWeights.array as Uint16Array].every((value) => value === 0)).toBe(true)
+    backend.dispose()
+  })
 })
 
 function planeSection(): CompiledSection {

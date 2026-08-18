@@ -2,6 +2,7 @@ import { intersects } from '../core/bounds'
 import type { AABB } from '../core/types'
 import { cloneCutterVolume } from './boolean/CutterVolume'
 import type { TerrainModifier } from './types'
+import { cloneTerrainMaterialSettings } from '../rendering/materialSettings'
 import { normalizeTunnelModifier } from './tunnel'
 import { modifierWorldBounds, normalizedTransform } from './transform'
 
@@ -60,7 +61,11 @@ export class ModifierStack {
 
   query(bounds: AABB): TerrainModifier[] {
     return this.modifiers.filter(
-      (modifier) => modifier.enabled && intersects(modifier.bounds, bounds),
+      (modifier) =>
+        modifier.type === 'sculpt-layer' ||
+        (modifier.enabled &&
+          modifier.type !== 'material-settings' &&
+          intersects(modifier.bounds, bounds)),
     )
   }
 
@@ -103,6 +108,28 @@ export function cloneModifier(modifier: TerrainModifier): TerrainModifier {
     clone.bounds = modifierWorldBounds(clone)
     return clone
   }
+  if (modifier.type === 'weight-paint') {
+    const clone: TerrainModifier = {
+      ...modifier,
+      transform,
+      bounds: { min: { ...modifier.bounds.min }, max: { ...modifier.bounds.max } },
+      points: modifier.points.map((point) => ({
+        ...point,
+        normal: { ...point.normal },
+        weight: point.weight ?? 1,
+      })),
+    }
+    clone.bounds = modifierWorldBounds(clone)
+    return clone
+  }
+  if (modifier.type === 'material-settings') {
+    return {
+      ...modifier,
+      transform,
+      bounds: { min: { ...modifier.bounds.min }, max: { ...modifier.bounds.max } },
+      settings: cloneTerrainMaterialSettings(modifier.settings),
+    }
+  }
   if (modifier.type === 'boolean-subtract') {
     const normalized = normalizeTunnelModifier(modifier)
     const clone: TerrainModifier = {
@@ -123,6 +150,7 @@ export function cloneModifier(modifier: TerrainModifier): TerrainModifier {
   if (modifier.type === 'boolean-volume') {
     const clone: TerrainModifier = {
       ...modifier,
+      operation: modifier.operation ?? 'subtract',
       transform,
       bounds: {
         min: { ...modifier.bounds.min },
