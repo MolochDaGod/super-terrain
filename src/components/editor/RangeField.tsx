@@ -20,9 +20,9 @@ export function RangeField({
   const progress = ((value - min) / (max - min)) * 100
   return (
     <label className="block space-y-2.5">
-      <span className="flex items-center justify-between gap-3 text-[11px] font-medium text-white/55">
+      <span className="flex items-center justify-between gap-3 text-[11px] text-white/55">
         <span>{label}</span>
-        <span className="font-mono text-[10px] tabular-nums text-[#b7f6df]">
+        <span className="font-mono text-[11px] tabular-nums text-[#b7f6df]">
           {formatValue(value, step)}{unit}
         </span>
       </span>

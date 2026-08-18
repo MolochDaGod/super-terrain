@@ -17,6 +17,26 @@ export const GRANITE_DETAIL_CELLS: Record<GraniteRockDetail, number> = {
   4: 44,
 }
 
+/**
+ * Dual-contour grid resolution for the mesh handed to exact CSG, in cells per
+ * axis. This is independent of `detail`, which only picks the baked render LOD.
+ *
+ * The analytic field carries three displacement bands (wavelengths 0.72, 0.23
+ * and 0.085) and `graniteOctaveBudget` drops any band the grid cannot resolve,
+ * so the tier decides how much small-scale worley fracture survives into the
+ * topology. Only 72 cells resolves the finest chip band, which is what a rock
+ * scaled far up for a CSG cut needs; cost rises with the cube of the tier.
+ */
+export const GRANITE_TOPOLOGY_CELLS = [20, 30, 44, 72] as const
+
+export type GraniteTopologyDetail = (typeof GRANITE_TOPOLOGY_CELLS)[number]
+
+/**
+ * Planting uses one fixed tier so that adding a rock, or raising its topology
+ * tier, never re-extracts a heavy grid just to measure the object's height.
+ */
+export const GRANITE_PLANTING_CELLS: GraniteTopologyDetail = 30
+
 export interface GraniteRockParameters {
   seed: number
   /** Independent material variation; does not alter CSG topology. */
@@ -29,12 +49,15 @@ export interface GraniteRockParameters {
   moss: number
   detailStrength: number
   detail: GraniteRockDetail
+  /** Grid resolution of the CSG mesh; see GRANITE_TOPOLOGY_CELLS. */
+  topologyDetail: GraniteTopologyDetail
 }
 
 export interface GraniteRockTransform {
   position: Vec3Like
   rotation: Vec3Like
-  scale: number
+  /** Per-axis object-local scale, so one gizmo handle stretches one axis. */
+  scale: Vec3Like
 }
 
 export interface GraniteRock {
@@ -63,6 +86,7 @@ export const DEFAULT_GRANITE_ROCK_PARAMETERS: GraniteRockParameters = {
   moss: 0.06,
   detailStrength: 0.72,
   detail: 3,
+  topologyDetail: 30,
 }
 
 export function graniteMassingPreset(
@@ -75,6 +99,7 @@ export function graniteMassingPreset(
     seed: graniteSeedForMassing(seed, massing),
     surfaceSeed: graniteSeedForMassing(seed, massing),
     detail,
+    topologyDetail: normalizeTopologyDetail(GRANITE_DETAIL_CELLS[detail]),
   }
 }
 
@@ -109,7 +134,20 @@ export function normalizeGraniteRockParameters(
       1,
     ),
     detail,
+    // Rocks saved before the tier existed took their grid from the render LOD.
+    topologyDetail: normalizeTopologyDetail(
+      parameters?.topologyDetail ?? GRANITE_DETAIL_CELLS[detail],
+    ),
   }
+}
+
+function normalizeTopologyDetail(value: number): GraniteTopologyDetail {
+  let closest: GraniteTopologyDetail = DEFAULT_GRANITE_ROCK_PARAMETERS.topologyDetail
+  if (!Number.isFinite(value)) return closest
+  for (const cells of GRANITE_TOPOLOGY_CELLS) {
+    if (Math.abs(cells - value) < Math.abs(closest - value)) closest = cells
+  }
+  return closest
 }
 
 export function randomGraniteRockParameters(seed: number): GraniteRockParameters {
@@ -124,6 +162,7 @@ export function randomGraniteRockParameters(seed: number): GraniteRockParameters
     snow: 0,
     detailStrength: snapHundredth(0.62 + randomUnit(normalizedSeed, 6) * 0.28),
     detail: 3,
+    topologyDetail: DEFAULT_GRANITE_ROCK_PARAMETERS.topologyDetail,
   })
 }
 
@@ -135,6 +174,7 @@ export function cloneGraniteRock(rock: GraniteRock): GraniteRock {
       ...rock.transform,
       position: { ...rock.transform.position },
       rotation: { ...rock.transform.rotation },
+      scale: { ...rock.transform.scale },
     },
   }
 }
@@ -153,8 +193,29 @@ export function normalizeGraniteRockTransform(
       y: finiteOr(transform?.rotation?.y, 0),
       z: finiteOr(transform?.rotation?.z, 0),
     },
-    scale: clampFinite(transform?.scale, 1, 0.05, 64),
+    scale: normalizeGraniteRockScale(transform?.scale),
   }
+}
+
+/** Accepts the uniform number that rocks saved before per-axis scale used. */
+export function normalizeGraniteRockScale(
+  scale: Vec3Like | number | undefined,
+): Vec3Like {
+  const axis = (value: number | undefined) => clampFinite(value, 1, 0.05, 64)
+  if (typeof scale === 'number') {
+    const uniform = axis(scale)
+    return { x: uniform, y: uniform, z: uniform }
+  }
+  return { x: axis(scale?.x), y: axis(scale?.y), z: axis(scale?.z) }
+}
+
+/**
+ * One representative scale for frequency-style inputs — triplanar detail and
+ * the placement scale fed to the rock material — that cannot take three axes.
+ * The geometric mean keeps detail density stable as a rock is stretched.
+ */
+export function graniteRockScaleMagnitude(scale: Vec3Like): number {
+  return Math.cbrt(Math.abs(scale.x * scale.y * scale.z)) || 1
 }
 
 export function graniteRockParameterKey(parameters: GraniteRockParameters): string {
@@ -167,6 +228,7 @@ export function graniteRockParameterKey(parameters: GraniteRockParameters): stri
     normalized.lichen.toFixed(4),
     normalized.moss.toFixed(4),
     normalized.detailStrength.toFixed(4),
+    normalized.detail,
   ].join(':')
 }
 
@@ -175,7 +237,7 @@ export function graniteRockTopologyKey(parameters: GraniteRockParameters): strin
   return [
     graniteSourceSeed(normalized.seed),
     normalized.placementScale.toFixed(4),
-    normalized.detail,
+    normalized.topologyDetail,
   ].join(':')
 }
 

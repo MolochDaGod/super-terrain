@@ -4,7 +4,6 @@ import { createGlacialGraniteField } from './glacialGraniteField'
 import { fbm, ridged, worleyBorder } from './glacialGraniteNoise'
 import { repairGraniteSurface } from './repairGraniteSurface'
 import {
-  GRANITE_DETAIL_CELLS,
   graniteRockTopologyKey,
   graniteSourceSeed,
   normalizeGraniteRockParameters,
@@ -12,6 +11,8 @@ import {
   type GraniteRockMesh,
   type GraniteRockParameters,
   type GraniteRockTransform,
+  type GraniteSourceSeed,
+  type GraniteTopologyDetail,
 } from './types'
 
 const topologyCache = new Map<string, GraniteSurface>()
@@ -66,22 +67,58 @@ export function generateGraniteRock(
 
 function sourceTopology(parameters: GraniteRockParameters): GraniteSurface {
   const sourceSeed = graniteSourceSeed(parameters.seed)
-  const key = [
-    sourceSeed,
-    parameters.detail,
-  ].join(':')
-  const cached = topologyCache.get(key)
+  const cells = parameters.topologyDetail
+  const cached = topologyCache.get(topologyCacheKey(sourceSeed, cells))
   if (cached) return cached
+  return primeGraniteTopology(
+    sourceSeed,
+    cells,
+    extractGraniteTopology(sourceSeed, cells),
+  )
+}
+
+function topologyCacheKey(
+  sourceSeed: GraniteSourceSeed,
+  cells: GraniteTopologyDetail,
+): string {
+  return `${sourceSeed}:${cells}`
+}
+
+/**
+ * Dual-contours and repairs one source archetype at one grid resolution. Pure
+ * and free of DOM access, so a worker can run the heavy tiers off the main
+ * thread and hand the result back through `primeGraniteTopology`.
+ */
+export function extractGraniteTopology(
+  sourceSeed: GraniteSourceSeed,
+  cells: GraniteTopologyDetail,
+): GraniteSurface {
   const extracted = extractGraniteSurface({
     field: createGlacialGraniteField(sourceSeed),
     seed: sourceSeed,
-    cells: GRANITE_DETAIL_CELLS[parameters.detail],
+    cells,
   })
   const repaired = repairGraniteSurface(extracted)
   assertCsgTopology(repaired.positions, repaired.indices)
-  topologyCache.set(key, repaired)
-  trimOldest(topologyCache, MAX_CACHED_TOPOLOGIES)
   return repaired
+}
+
+/** Inserts an already-extracted surface so the next generate call is a hit. */
+export function primeGraniteTopology(
+  sourceSeed: GraniteSourceSeed,
+  cells: GraniteTopologyDetail,
+  surface: GraniteSurface,
+): GraniteSurface {
+  topologyCache.set(topologyCacheKey(sourceSeed, cells), surface)
+  trimOldest(topologyCache, MAX_CACHED_TOPOLOGIES)
+  return surface
+}
+
+export function hasGraniteTopology(
+  sourceSeed: GraniteSourceSeed,
+  cells: GraniteTopologyDetail,
+): boolean {
+  return topologyCache.has(topologyCacheKey(sourceSeed, cells))
 }
 
 export function transformGraniteRockPositions(
@@ -97,9 +134,9 @@ export function transformGraniteRockPositions(
   const sz = Math.sin(transform.rotation.z)
   const cz = Math.cos(transform.rotation.z)
   for (let offset = 0; offset < positions.length; offset += 3) {
-    const x = Number(positions[offset]) * transform.scale
-    const y = Number(positions[offset + 1]) * transform.scale
-    const z = Number(positions[offset + 2]) * transform.scale
+    const x = Number(positions[offset]) * transform.scale.x
+    const y = Number(positions[offset + 1]) * transform.scale.y
+    const z = Number(positions[offset + 2]) * transform.scale.z
     const x1 = x
     const y1 = y * cx - z * sx
     const z1 = y * sx + z * cx

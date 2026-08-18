@@ -297,7 +297,7 @@ describe('section compiler', () => {
         y: ((recipe.seed * 0.618_033_988_75) % 1) * Math.PI * 2,
         z: 0,
       },
-      scale: 1,
+      scale: { x: 1, y: 1, z: 1 },
     })
     const volume = createBooleanVolumeModifier({
       operation: 'subtract',

@@ -163,3 +163,145 @@ button[data-active="true"] {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* --- Inspector primitives -------------------------------------------------
+   One typography scale (11px body / 10px meta), one padding rhythm, and one
+   implementation per repeated control. Panels compose these instead of
+   re-deriving borders, sizes and active states inline. */
+
+.panel-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.panel-meta {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.seg {
+  display: grid;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 0.5rem;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.seg > button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.seg > button:hover {
+  color: rgba(255, 255, 255, 0.78);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.list-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 0.375rem;
+  background: rgba(255, 255, 255, 0.018);
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.list-row[data-selected="true"] {
+  border-color: rgba(119, 232, 190, 0.3);
+  background: rgba(119, 232, 190, 0.07);
+}
+
+.icon-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 0.25rem;
+  color: rgba(255, 255, 255, 0.3);
+  transition: color 150ms ease, background 150ms ease;
+}
+
+.icon-button:hover {
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.icon-button[data-danger="true"]:hover {
+  color: #ff826f;
+  background: rgba(255, 130, 111, 0.1);
+}
+
+.icon-button:disabled {
+  opacity: 0.2;
+  cursor: default;
+}
+
+.text-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.375rem;
+  background: rgba(0, 0, 0, 0.15);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.72);
+  outline: none;
+}
+
+.text-input:focus {
+  border-color: rgba(119, 232, 190, 0.35);
+}
+
+.panel-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0.375rem;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.58);
+  transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
+}
+
+.panel-button:hover {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.panel-button[data-accent="mint"] {
+  border-color: rgba(119, 232, 190, 0.2);
+  background: rgba(119, 232, 190, 0.07);
+  color: #b7f6df;
+}
+
+.panel-button[data-accent="mint"]:hover {
+  background: rgba(119, 232, 190, 0.12);
+}
+
+.panel-button[data-accent="coral"] {
+  border-color: rgba(255, 157, 120, 0.2);
+  background: rgba(255, 157, 120, 0.06);
+  color: #ffc0aa;
+}
+
+.panel-button[data-accent="coral"]:hover {
+  background: rgba(255, 157, 120, 0.1);
+}

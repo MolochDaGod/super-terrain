@@ -39,6 +39,32 @@ export type TerrainOverlay =
 
 export type CameraMode = 'orbit' | 'fly'
 
+/** Scene sections in the inspector. One is open at a time. */
+export type InspectorSection =
+  | 'layers'
+  | 'materials'
+  | 'rocks'
+  | 'csg'
+  | 'modifiers'
+  | 'display'
+
+/**
+ * The section a tool needs. Switching tools opens it, so the panel below the
+ * tool parameters is always the one the current tool works with.
+ */
+export function inspectorSectionForTool(tool: EditorTool): InspectorSection {
+  switch (tool) {
+    case 'paint':
+      return 'materials'
+    case 'select':
+    case 'tunnel':
+    case 'remesh':
+      return 'modifiers'
+    default:
+      return 'layers'
+  }
+}
+
 export interface EditorSnapshot {
   tool: EditorTool
   brushDomain: BrushDomain
@@ -59,6 +85,8 @@ export interface EditorSnapshot {
   rockParameters: GraniteRockParameters
   transformMode: TransformMode
   overlay: TerrainOverlay
+  /** Undefined when every scene section is collapsed. */
+  openSection?: InspectorSection
   renderMode: TerrainRenderMode
   cameraMode: CameraMode
   showHud: boolean
@@ -92,6 +120,7 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   rockParameters: { ...DEFAULT_GRANITE_ROCK_PARAMETERS },
   transformMode: 'translate',
   overlay: 'none',
+  openSection: 'modifiers',
   renderMode: 'preview',
   cameraMode: 'orbit',
   showHud: true,

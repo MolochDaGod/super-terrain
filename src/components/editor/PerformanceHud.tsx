@@ -1,17 +1,24 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import {
   Activity,
   AlertTriangle,
   Cpu,
   Gauge,
   HardDrive,
+  Play,
   RefreshCw,
   Triangle,
   Upload,
 } from 'lucide-react'
-import type { WorldTerrain } from '../../terrain/WorldTerrain'
+import type { BenchmarkScenario, WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
 import { useEditorSnapshot, useTerrainMetrics } from '../../terrain/react/hooks'
+
+const BENCHMARKS: { id: BenchmarkScenario; label: string; hint: string }[] = [
+  { id: 'sculpt-torture', label: 'Sculpt', hint: 'Rapid edits across neighbouring sections' },
+  { id: 'rebuild-torture', label: 'Rebuild', hint: 'Coalescing, cancellation, atomic swaps' },
+  { id: 'streaming-torture', label: 'Stream', hint: 'Extreme fly-through and LRU pressure' },
+]
 
 interface PerformanceHudProps {
   terrain: WorldTerrain
@@ -28,6 +35,14 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
     historyRef.current.push(metrics.averageFrameMs)
     historyRef.current.shift()
   }
+
+  const previousBenchmark = useRef(metrics.activeBenchmark)
+  useEffect(() => {
+    if (previousBenchmark.current && !metrics.activeBenchmark) {
+      editor.patch({ status: 'Stress scenario complete · stream scheduler online' })
+    }
+    previousBenchmark.current = metrics.activeBenchmark
+  }, [editor, metrics.activeBenchmark])
 
   if (!editorSnapshot.showHud) return null
   const targetFrameMs = 1000 / terrain.config.targetFps
@@ -102,6 +117,12 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
           sub={`${metrics.sourceResidentSections} source sections`}
         />
         <HudStat
+          icon={Cpu}
+          label="Compile"
+          value={`${metrics.compileP50Ms.toFixed(1)} ms`}
+          sub={`p95 ${metrics.compileP95Ms.toFixed(1)} ms`}
+        />
+        <HudStat
           icon={Activity}
           label="Streaming"
           value={`${metrics.streamLoadsPerSecond.toFixed(0)} in / ${metrics.streamEvictionsPerSecond.toFixed(0)} out`}
@@ -109,7 +130,26 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
         />
       </div>
 
-      <div className="flex items-center justify-between border-t border-white/[0.07] px-3.5 py-2 font-mono text-[8px] text-white/28">
+      <div className="pointer-events-auto grid grid-cols-3 gap-1 border-t border-white/[0.07] px-3.5 py-2.5">
+        {BENCHMARKS.map(({ id, label, hint }) => (
+          <button
+            key={id}
+            type="button"
+            title={hint}
+            data-active={metrics.activeBenchmark === id}
+            className="panel-button justify-center"
+            onClick={() => {
+              terrain.startBenchmark(id)
+              editor.patch({ status: `${label} stress running for seven seconds` })
+            }}
+          >
+            <Play size={10} fill="currentColor" />
+            {metrics.activeBenchmark === id ? 'Running' : label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center justify-between border-t border-white/[0.07] px-3.5 py-2 font-mono text-[10px] text-white/28">
         <span>LOD {metrics.trianglesByLod.map(compactNumber).join(' · ')}</span>
         <span>Q {Math.round(metrics.qualityScale * 100)}%</span>
       </div>

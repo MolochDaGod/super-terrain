@@ -83,7 +83,9 @@ import {
   generateGraniteRock,
   transformGraniteRockPositions,
 } from './rocks/generateGraniteRock'
+import { ensureGraniteTopology } from './rocks/graniteTopologyLoader'
 import {
+  GRANITE_PLANTING_CELLS,
   normalizeGraniteRockParameters,
   normalizeGraniteRockTransform,
   type GraniteRockParameters,
@@ -134,6 +136,16 @@ function compiledGpuBytes(compiled: CompiledSection | undefined): number {
     (bytes, lod) => bytes + lod.gpuBytes,
     0,
   ) ?? 0
+}
+
+/**
+ * Height measuring for planting always uses one fixed grid so that raising a
+ * rock's CSG topology tier never blocks placement on a heavy re-extraction.
+ */
+function plantingRecipe(
+  parameters: GraniteRockParameters,
+): GraniteRockParameters {
+  return { ...parameters, topologyDetail: GRANITE_PLANTING_CELLS }
 }
 
 function requestedLevels(minimum: number, count: number): number[] {
@@ -695,7 +707,7 @@ export class WorldTerrain {
     surfacePoint: Vec3Like,
   ): string {
     const normalized = normalizeGraniteRockParameters(parameters)
-    const mesh = generateGraniteRock(normalized)
+    const mesh = generateGraniteRock(plantingRecipe(normalized))
     const localHeight = mesh.bounds.max.y - mesh.bounds.min.y
     const rock = this.rocks.create({
       parameters: normalized,
@@ -713,7 +725,7 @@ export class WorldTerrain {
           y: ((normalized.seed * 0.618_033_988_75) % 1) * Math.PI * 2,
           z: 0,
         },
-        scale: 1,
+        scale: { x: 1, y: 1, z: 1 },
       },
     })
     this.markPersistenceDirty()
@@ -727,8 +739,8 @@ export class WorldTerrain {
     const rock = this.rocks.get(id)
     if (!rock) return false
     const normalized = normalizeGraniteRockParameters(parameters)
-    const previousMesh = generateGraniteRock(rock.parameters)
-    const nextMesh = generateGraniteRock(normalized)
+    const previousMesh = generateGraniteRock(plantingRecipe(rock.parameters))
+    const nextMesh = generateGraniteRock(plantingRecipe(normalized))
     const nextTransform = normalizeGraniteRockTransform(rock.transform)
     // Keep an upright rock planted while its source recipe or scale changes. Once a
     // user has pitched or rolled it, preserving the authored pivot is safer.
@@ -744,7 +756,7 @@ export class WorldTerrain {
           previousHeight * GRANITE_PLANT_DEPTH_RATIO -
           nextMesh.bounds.min.y -
           nextHeight * GRANITE_PLANT_DEPTH_RATIO
-        ) * nextTransform.scale
+        ) * nextTransform.scale.y
     }
     this.rocks.updateParameters(id, normalized)
     this.rocks.updateTransform(id, nextTransform)
@@ -777,9 +789,16 @@ export class WorldTerrain {
    * Copies the selected rock's current world-space triangles into a live exact
    * CSG modifier. Later edits to the scene rock do not mutate this snapshot.
    */
-  applyGraniteRockAsCsg(id: string, operation: CsgOperation): string {
+  async applyGraniteRockAsCsg(
+    id: string,
+    operation: CsgOperation,
+  ): Promise<string> {
     const rock = this.rocks.get(id)
     if (!rock) throw new Error('Select a granite rock before applying CSG')
+    // The chosen tier decides how much fine worley fracture the cutter carries.
+    // Extracting it can take seconds, so warm the cache off the main thread
+    // before the synchronous snapshot below reads it.
+    await ensureGraniteTopology(rock.parameters)
     const mesh = generateGraniteRock(rock.parameters)
     const modifier = this.modifiers.add(
       createBooleanVolumeModifier({

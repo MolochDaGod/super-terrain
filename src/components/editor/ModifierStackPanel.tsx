@@ -1,31 +1,29 @@
 import { memo } from 'react'
-import {
-  Eye,
-  EyeOff,
-  Layers3,
-  Move3D,
-  Trash2,
-} from 'lucide-react'
+import { Layers } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
-import type {
-  EditorStore,
-  TransformMode,
-} from '../../terrain/editor/EditorStore'
-import type { ModifierTransform, TerrainModifier } from '../../terrain/modifiers/types'
-import { normalizedTransform } from '../../terrain/modifiers/transform'
-import { tunnelPortalDistance } from '../../terrain/modifiers/tunnel'
+import type { EditorStore } from '../../terrain/editor/EditorStore'
 import {
   useEditorSnapshot,
   useModifierRevision,
 } from '../../terrain/react/hooks'
-import { RangeField } from './RangeField'
+import { modifierLabel, modifierMeta } from './modifierLabel'
+import { CollapsibleSection } from './ui/Section'
+import { ListRow } from './ui/ListRow'
+import { EmptyHint } from './ui/EmptyHint'
 
 interface ModifierStackPanelProps {
   terrain: WorldTerrain
   editor: EditorStore
+  open: boolean
+  onToggle: () => void
 }
 
-function ModifierStackPanelView({ terrain, editor }: ModifierStackPanelProps) {
+function ModifierStackPanelView({
+  terrain,
+  editor,
+  open,
+  onToggle,
+}: ModifierStackPanelProps) {
   useModifierRevision(terrain)
   const editorSnapshot = useEditorSnapshot(editor)
   const modifiers = terrain.modifiers
@@ -36,78 +34,55 @@ function ModifierStackPanelView({ terrain, editor }: ModifierStackPanelProps) {
         modifier.type !== 'material-settings',
     )
     .reverse()
-  const selected = modifiers.find(
-    (modifier) => modifier.id === editorSnapshot.selectedModifierId,
-  )
 
   return (
-    <section className="border-b border-white/[0.07]">
-      <header className="flex items-center justify-between px-4 pb-3 pt-4">
-        <span className="flex items-center gap-2 text-[9px] font-semibold uppercase tracking-[0.15em] text-white/35">
-          <Layers3 size={12} strokeWidth={1.7} /> Modifier stack
-        </span>
-        <span className="font-mono text-[8px] text-white/25">
-          {modifiers.length} non-destructive
-        </span>
-      </header>
-
-      <div className="max-h-44 space-y-1 overflow-y-auto px-3.5 pb-3">
-        {modifiers.length === 0 && (
-          <p className="rounded-md border border-dashed border-white/[0.08] p-3 text-[9px] text-white/28">
-            A brush stroke or topology operation will appear here.
-          </p>
-        )}
-        {modifiers.map((modifier, index) => (
-          <ModifierRow
-            key={modifier.id}
-            modifier={modifier}
-            index={modifiers.length - index}
-            selected={modifier.id === selected?.id}
-            onSelect={() =>
-              editor.patch({
-                selectedModifierId: modifier.id,
-                selectedRockId: undefined,
-                status: `${modifierLabel(modifier)} modifier selected`,
-              })
-            }
-            onToggle={() => {
-              terrain.setModifierEnabled(modifier.id, !modifier.enabled)
-              editor.patch({
-                status: `${modifierLabel(modifier)} ${modifier.enabled ? 'disabled' : 'enabled'}`,
-              })
-            }}
-            onDelete={() => {
-              terrain.removeModifier(modifier.id)
-              if (selected?.id === modifier.id) {
-                editor.patch({ selectedModifierId: undefined })
+    <CollapsibleSection
+      icon={Layers}
+      title="Modifiers"
+      badge={modifiers.length}
+      open={open}
+      onToggle={onToggle}
+    >
+      {modifiers.length === 0 ? (
+        <EmptyHint>A brush stroke or topology operation appears here.</EmptyHint>
+      ) : (
+        <div className="max-h-56 space-y-1 overflow-y-auto">
+          {modifiers.map((modifier, index) => (
+            <ListRow
+              key={modifier.id}
+              title={modifierLabel(modifier)}
+              meta={modifierMeta(modifier)}
+              lead={
+                <span className="font-mono text-[10px] text-white/22">
+                  {(modifiers.length - index).toString().padStart(2, '0')}
+                </span>
               }
-            }}
-          />
-        ))}
-      </div>
-
-      {selected && (
-        <ModifierTransformEditor
-          modifier={selected}
-          onChange={(transform) => {
-            terrain.updateModifierTransform(selected.id, transform)
-            editor.patch({ status: 'Modifier transformed · affected sections queued' })
-          }}
-          onTunnelShapeChange={(values) => {
-            terrain.updateTunnelShape(selected.id, values)
-            editor.patch({ status: 'Tunnel shape changed · affected sections queued' })
-          }}
-          transformMode={editorSnapshot.transformMode}
-          onTransformModeChange={(transformMode) =>
-            editor.patch({ transformMode, tool: 'select' })
-          }
-          onCsgOperationChange={(operation) => {
-            terrain.updateCsgOperation(selected.id, operation)
-            editor.patch({ status: `CSG ${operation} queued` })
-          }}
-        />
+              selected={modifier.id === editorSnapshot.selectedModifierId}
+              visible={modifier.enabled}
+              onSelect={() =>
+                editor.patch({
+                  selectedModifierId: modifier.id,
+                  selectedRockId: undefined,
+                  status: `${modifierLabel(modifier)} selected`,
+                })
+              }
+              onToggleVisible={() => {
+                terrain.setModifierEnabled(modifier.id, !modifier.enabled)
+                editor.patch({
+                  status: `${modifierLabel(modifier)} ${modifier.enabled ? 'disabled' : 'enabled'}`,
+                })
+              }}
+              onDelete={() => {
+                terrain.removeModifier(modifier.id)
+                if (editorSnapshot.selectedModifierId === modifier.id) {
+                  editor.patch({ selectedModifierId: undefined })
+                }
+              }}
+            />
+          ))}
+        </div>
       )}
-    </section>
+    </CollapsibleSection>
   )
 }
 
@@ -118,224 +93,4 @@ const MemoizedModifierStackPanel = memo(ModifierStackPanelView)
 
 export function ModifierStackPanel(props: ModifierStackPanelProps) {
   return <MemoizedModifierStackPanel {...props} />
-}
-
-function ModifierRow({
-  modifier,
-  index,
-  selected,
-  onSelect,
-  onToggle,
-  onDelete,
-}: {
-  modifier: TerrainModifier
-  index: number
-  selected: boolean
-  onSelect: () => void
-  onToggle: () => void
-  onDelete: () => void
-}) {
-  return (
-    <div
-      className={`group flex items-center gap-1 rounded-md border px-1.5 py-1.5 transition ${
-        selected
-          ? 'border-[#77e8be]/30 bg-[#77e8be]/[0.07]'
-          : 'border-white/[0.06] bg-white/[0.018]'
-      }`}
-    >
-      <button
-        type="button"
-        className="min-w-0 flex-1 text-left"
-        onClick={onSelect}
-      >
-        <span className="flex items-center gap-2">
-          <span className="font-mono text-[8px] text-white/22">{index.toString().padStart(2, '0')}</span>
-          <span className="min-w-0">
-            <span className="block truncate text-[9px] text-white/68">
-              {modifierLabel(modifier)}
-            </span>
-            {modifier.type === 'brush-stroke' && (
-              <span className="mt-0.5 block font-mono text-[7px] text-white/24">
-                {modifier.points.length} {modifier.points.length === 1 ? 'sample' : 'samples'} · one stroke
-              </span>
-            )}
-            {modifier.type === 'weight-paint' && (
-              <span className="mt-0.5 block font-mono text-[7px] text-white/24">
-                {modifier.points.length} samples · {modifier.channel}
-              </span>
-            )}
-            {modifier.type === 'boolean-subtract' && (
-              <span className="mt-0.5 block font-mono text-[7px] text-white/24">
-                {tunnelPortalDistance(modifier).toFixed(0)} m path · r {modifier.radius.toFixed(1)} m
-              </span>
-            )}
-            {modifier.type === 'boolean-volume' && (
-              <span className="mt-0.5 block font-mono text-[7px] text-white/24">
-                {modifier.volumes.length} closed {modifier.volumes.length === 1 ? 'volume' : 'volumes'} · exact CSG
-              </span>
-            )}
-          </span>
-        </span>
-      </button>
-      <button
-        type="button"
-        aria-label={modifier.enabled ? 'Disable modifier' : 'Enable modifier'}
-        className="grid size-6 place-items-center rounded text-white/28 hover:bg-white/[0.06] hover:text-white/70"
-        onClick={onToggle}
-      >
-        {modifier.enabled ? <Eye size={11} /> : <EyeOff size={11} />}
-      </button>
-      <button
-        type="button"
-        aria-label="Delete modifier"
-        className="grid size-6 place-items-center rounded text-white/20 hover:bg-[#ff826f]/10 hover:text-[#ff826f]"
-        onClick={onDelete}
-      >
-        <Trash2 size={11} />
-      </button>
-    </div>
-  )
-}
-
-function ModifierTransformEditor({
-  modifier,
-  onChange,
-  onTunnelShapeChange,
-  transformMode,
-  onTransformModeChange,
-  onCsgOperationChange,
-}: {
-  modifier: TerrainModifier
-  onChange: (transform: ModifierTransform) => void
-  onTunnelShapeChange: (
-    values: Partial<{ radius: number; depth: number }>,
-  ) => void
-  transformMode: TransformMode
-  onTransformModeChange: (mode: TransformMode) => void
-  onCsgOperationChange: (operation: 'add' | 'subtract') => void
-}) {
-  const transform = normalizedTransform(modifier.transform)
-  const patchOffset = (axis: 'x' | 'y' | 'z', value: number) =>
-    onChange({
-      ...transform,
-      offset: { ...transform.offset, [axis]: value },
-    })
-
-  return (
-    <div className="space-y-3 border-t border-white/[0.06] bg-white/[0.018] px-4 py-3.5">
-      <div className="flex items-center gap-2 text-[8px] font-semibold uppercase tracking-[0.14em] text-[#b7f6df]/55">
-        <Move3D size={11} /> Transform selected modifier
-      </div>
-      <div className="grid grid-cols-3 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
-        {(['translate', 'rotate', 'scale'] as const).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            data-active={transformMode === mode}
-            className="rounded-md px-1 py-1.5 text-[8px] capitalize transition"
-            onClick={() => onTransformModeChange(mode)}
-          >
-            {mode}
-          </button>
-        ))}
-      </div>
-      {modifier.type === 'boolean-volume' && (
-        <div className="grid grid-cols-2 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
-          {(['subtract', 'add'] as const).map((operation) => (
-            <button
-              key={operation}
-              type="button"
-              data-active={modifier.operation === operation}
-              className="rounded-md px-1 py-1.5 text-[8px] capitalize transition"
-              onClick={() => onCsgOperationChange(operation)}
-            >
-              CSG {operation}
-            </button>
-          ))}
-        </div>
-      )}
-      {modifier.type === 'boolean-subtract' && (
-        <>
-          <RangeField
-            label="Portal radius"
-            value={modifier.radius}
-            min={2}
-            max={24}
-            step={0.5}
-            unit=" m"
-            onChange={(radius) => onTunnelShapeChange({ radius })}
-          />
-          <RangeField
-            label="Burial depth"
-            value={modifier.depth}
-            min={3}
-            max={48}
-            step={1}
-            unit=" m"
-            onChange={(depth) => onTunnelShapeChange({ depth })}
-          />
-        </>
-      )}
-      <RangeField label="Move X" value={transform.offset.x} min={-128} max={128} step={1} unit=" m" onChange={(value) => patchOffset('x', value)} />
-      <RangeField label="Move Y" value={transform.offset.y} min={-96} max={96} step={1} unit=" m" onChange={(value) => patchOffset('y', value)} />
-      <RangeField label="Move Z" value={transform.offset.z} min={-128} max={128} step={1} unit=" m" onChange={(value) => patchOffset('z', value)} />
-      <RangeField
-        label="Yaw"
-        value={(transform.yaw * 180) / Math.PI}
-        min={-180}
-        max={180}
-        step={1}
-        unit="°"
-        onChange={(value) => onChange({ ...transform, yaw: (value * Math.PI) / 180 })}
-      />
-      <RangeField
-        label="Pitch"
-        value={((transform.pitch ?? 0) * 180) / Math.PI}
-        min={-180}
-        max={180}
-        step={1}
-        unit="°"
-        onChange={(value) =>
-          onChange({ ...transform, pitch: (value * Math.PI) / 180 })
-        }
-      />
-      <RangeField
-        label="Roll"
-        value={((transform.roll ?? 0) * 180) / Math.PI}
-        min={-180}
-        max={180}
-        step={1}
-        unit="°"
-        onChange={(value) =>
-          onChange({ ...transform, roll: (value * Math.PI) / 180 })
-        }
-      />
-      <RangeField label="Scale" value={transform.scale} min={0.25} max={4} step={0.05} unit="×" onChange={(scale) => onChange({ ...transform, scale })} />
-    </div>
-  )
-}
-
-function modifierLabel(modifier: TerrainModifier): string {
-  switch (modifier.type) {
-    case 'brush-stroke':
-      return `${modifier.domain === 'mesh' ? 'Mesh' : 'Height'} · ${modifier.mode}`
-    case 'weight-paint':
-      return `Paint · ${modifier.channel} ${modifier.mode}`
-    case 'sculpt-layer':
-      return `Layer · ${modifier.name}`
-    case 'material-settings':
-      return 'Terrain materials'
-    case 'boolean-subtract':
-      return 'Mesh · tunnel subtract'
-    case 'boolean-volume':
-      return `Mesh · volume ${modifier.operation}`
-    case 'remesh':
-      return 'Mesh · density'
-    case 'tessellate':
-      return 'Mesh · tessellate'
-    case 'noise':
-      return 'Height · noise'
-    case 'field-displacement':
-      return 'Field displacement'
-  }
 }

@@ -216,7 +216,7 @@ describe('world terrain brush sessions', () => {
     terrain.dispose()
   })
 
-  it('places deterministic granite objects and snapshots their exact topology as CSG', () => {
+  it('places deterministic granite objects and snapshots their exact topology as CSG', async () => {
     const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
     const recipe = graniteMassingPreset('tor', 908, 3)
     const rockId = terrain.addGraniteRock(recipe, { x: 12, y: 30, z: -8 })
@@ -224,7 +224,7 @@ describe('world terrain brush sessions', () => {
 
     expect(terrain.rocks.count).toBe(1)
     expect(rock.parameters).toEqual(recipe)
-    const modifierId = terrain.applyGraniteRockAsCsg(rockId, 'subtract')
+    const modifierId = await terrain.applyGraniteRockAsCsg(rockId, 'subtract')
     const modifier = terrain.modifiers.get(modifierId)
     expect(modifier?.type).toBe('boolean-volume')
     if (modifier?.type !== 'boolean-volume') throw new Error('Missing rock CSG modifier')

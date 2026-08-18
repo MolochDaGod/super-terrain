@@ -16,7 +16,7 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
         <header className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
           <div>
             <h2 className="text-sm font-semibold text-white/88">World editor controls</h2>
-            <p className="mt-1 text-[10px] text-white/36">Designed to keep navigation and editing independent.</p>
+            <p className="mt-1 text-[11px] text-white/36">Designed to keep navigation and editing independent.</p>
           </div>
           <button
             type="button"
@@ -50,13 +50,13 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
               ['P / G / T', 'Paint / density / tunnel'],
               ['LMB drag', 'Apply active brush'],
               ['[ / ]', 'Change brush radius'],
-              ['H', 'Toggle telemetry'],
+              ['H', 'Toggle telemetry and stress tests'],
               ['Esc', 'Select / close dialog'],
             ]}
           />
         </div>
-        <div className="border-t border-white/[0.08] bg-white/[0.02] px-5 py-4 text-[10px] leading-relaxed text-white/38">
-          Sculpt strokes belong to editable layers; paint writes one of four material weight channels. The Granite Rock Lab places seed-driven, watertight granite outcrops; select one to edit its formation and surface or snapshot its exact triangles as an independent add/subtract CSG modifier. Workers rebuild only dirty sections while the previous mesh remains visible.
+        <div className="border-t border-white/[0.08] bg-white/[0.02] px-5 py-4 text-[11px] leading-relaxed text-white/38">
+          The inspector shows the active tool's parameters, then whatever is selected, then one scene section — switching tools opens the section that tool works with. Every edit stays non-destructive: strokes belong to layers, rocks and CSG volumes stay editable in the modifier stack, and workers rebuild only dirty sections while the previous mesh stays visible.
         </div>
       </section>
     </div>
@@ -66,12 +66,12 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
 function HelpGroup({ title, rows }: { title: string; rows: [string, string][] }) {
   return (
     <div>
-      <h3 className="mb-3 text-[9px] font-semibold uppercase tracking-[0.15em] text-[#a6f2d5]/70">{title}</h3>
+      <h3 className="mb-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-[#a6f2d5]/70">{title}</h3>
       <div className="space-y-2.5">
         {rows.map(([key, description]) => (
           <div key={key} className="flex items-center justify-between gap-3">
-            <kbd className="rounded border border-white/[0.09] bg-white/[0.04] px-1.5 py-1 font-mono text-[9px] text-white/60">{key}</kbd>
-            <span className="text-right text-[9px] text-white/34">{description}</span>
+            <kbd className="rounded border border-white/[0.09] bg-white/[0.04] px-1.5 py-1 font-mono text-[11px] text-white/60">{key}</kbd>
+            <span className="text-right text-[11px] text-white/34">{description}</span>
           </div>
         ))}
       </div>

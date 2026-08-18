@@ -12,7 +12,7 @@ export function StatusBar({ terrain, editor }: StatusBarProps) {
   const snapshot = useEditorSnapshot(editor)
   const metrics = useTerrainMetrics(terrain)
   return (
-    <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex h-7 items-center gap-3 border-t border-white/[0.08] bg-[#07100f]/92 px-3 font-mono text-[8px] uppercase tracking-[0.08em] text-white/32 backdrop-blur-xl">
+    <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex h-7 items-center gap-3 border-t border-white/[0.08] bg-[#07100f]/92 px-3 font-mono text-[10px] uppercase tracking-[0.08em] text-white/32 backdrop-blur-xl">
       <span className="flex items-center gap-1.5 text-[#9de7cd]/70">
         <span className="size-1 rounded-full bg-[#77e8be]" />
         WebGPU
@@ -22,13 +22,11 @@ export function StatusBar({ terrain, editor }: StatusBarProps) {
       <div className="ml-auto hidden items-center gap-3 sm:flex">
         {snapshot.selectedSection && <span>Section {snapshot.selectedSection}</span>}
         <span className="flex items-center gap-1.5">
-          <Database size={9} /> {metrics.sourceResidentSections} source
+          <Database size={10} /> {metrics.sourceResidentSections} source
         </span>
         <span className="flex items-center gap-1.5">
-          {snapshot.cameraMode === 'fly' ? <Plane size={9} /> : <Orbit size={9} />}
-          {snapshot.cameraMode === 'fly'
-            ? 'Fly · click capture · WASD · Shift boost · Esc release'
-            : 'Orbit · LMB rotate · RMB pan · WASD translate'}
+          {snapshot.cameraMode === 'fly' ? <Plane size={10} /> : <Orbit size={10} />}
+          {snapshot.cameraMode === 'fly' ? 'Fly' : 'Orbit'}
         </span>
       </div>
     </footer>

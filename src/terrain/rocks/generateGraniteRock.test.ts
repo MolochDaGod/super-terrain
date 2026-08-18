@@ -6,6 +6,8 @@ import {
 import {
   DEFAULT_GRANITE_ROCK_PARAMETERS,
   graniteMassingPreset,
+  normalizeGraniteRockParameters,
+  normalizeGraniteRockTransform,
 } from './types'
 
 describe('procedural granite topology', () => {
@@ -40,6 +42,33 @@ describe('procedural granite topology', () => {
     })
 
     expect(weathered).toBe(dry)
+  })
+
+  it('carries more small-scale fracture at a higher topology tier', () => {
+    const base = graniteMassingPreset('erratic', 1, 2)
+    const standard = generateGraniteRock({ ...base, topologyDetail: 30 })
+    const micro = generateGraniteRock({ ...base, topologyDetail: 72 })
+
+    expect(micro.indices.length).toBeGreaterThan(standard.indices.length * 3)
+  }, 120_000)
+
+  it('takes topology from the tier alone, not from the render LOD', () => {
+    const base = graniteMassingPreset('bench', 5, 2)
+    const draftLod = generateGraniteRock({ ...base, detail: 2, topologyDetail: 30 })
+    const fineLod = generateGraniteRock({ ...base, detail: 4, topologyDetail: 30 })
+
+    expect(fineLod).toBe(draftLod)
+  })
+
+  it('derives the tier from the render LOD for rocks saved before it existed', () => {
+    expect(normalizeGraniteRockParameters({ detail: 4 }).topologyDetail).toBe(44)
+    expect(normalizeGraniteRockParameters({ detail: 2 }).topologyDetail).toBe(20)
+    expect(
+      normalizeGraniteRockParameters({ detail: 2, topologyDetail: 72 }).topologyDetail,
+    ).toBe(72)
+    expect(
+      normalizeGraniteRockParameters({ topologyDetail: 999 as 72 }).topologyDetail,
+    ).toBe(72)
   })
 
   it('applies only the source metre conversion and uniform placement scale', () => {
@@ -126,9 +155,40 @@ describe('procedural granite topology', () => {
       transformGraniteRockPositions([1, 0, 0], {
         position: { x: 10, y: 3, z: -4 },
         rotation: { x: 0, y: Math.PI * 0.5, z: 0 },
-        scale: 2,
+        scale: { x: 2, y: 2, z: 2 },
       }),
     ).toEqual([10, 3, -6])
+  })
+
+  it('stretches one axis at a time, before rotation, in object space', () => {
+    expect(
+      transformGraniteRockPositions([1, 1, 1], {
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 3, y: 1, z: 1 },
+      }),
+    ).toEqual([3, 1, 1])
+
+    const [x, y, z] = transformGraniteRockPositions([1, 0, 0], {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: Math.PI * 0.5, z: 0 },
+      scale: { x: 4, y: 1, z: 1 },
+    })
+    expect(x).toBeCloseTo(0, 10)
+    expect(y).toBeCloseTo(0, 10)
+    expect(z).toBeCloseTo(-4, 10)
+  })
+
+  it('reads rocks saved with a single uniform scale number', () => {
+    expect(
+      normalizeGraniteRockTransform({
+        scale: 2.5 as unknown as { x: number; y: number; z: number },
+      }),
+    ).toEqual({
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 2.5, y: 2.5, z: 2.5 },
+    })
   })
 })
 

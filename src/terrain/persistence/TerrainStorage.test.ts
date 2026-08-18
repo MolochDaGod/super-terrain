@@ -22,7 +22,7 @@ describe('terrain persistence', () => {
       transform: {
         position: { x: 3, y: 8, z: -2 },
         rotation: { x: 0, y: 0.4, z: 0 },
-        scale: 1.2,
+        scale: { x: 1.2, y: 1.2, z: 1.2 },
       },
     }]
     const restored = deserializeWorld(serializeWorld('unit', modifiers, rocks))
@@ -48,7 +48,7 @@ describe('terrain persistence', () => {
       transform: {
         position: { x: 1, y: 4, z: 2 },
         rotation: { x: 0, y: 0, z: 0 },
-        scale: 1,
+        scale: { x: 1, y: 1, z: 1 },
       },
     }]
     await storage.save('alpha', modifiers, rocks)

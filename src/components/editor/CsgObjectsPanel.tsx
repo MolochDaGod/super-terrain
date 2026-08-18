@@ -5,26 +5,34 @@ import type {
   CsgPrimitive,
   EditorStore,
 } from '../../terrain/editor/EditorStore'
+import type { CsgOperation } from '../../terrain/modifiers/types'
 import { importCsgGlb } from '../../terrain/import/importCsgGlb'
 import { useEditorSnapshot } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
+import { CollapsibleSection } from './ui/Section'
+import { Segmented, type SegmentedOption } from './ui/Segmented'
 
-const PRIMITIVES: Array<{
-  id: CsgPrimitive
-  label: string
-  icon: typeof Box
-}> = [
-  { id: 'box', label: 'Box', icon: Box },
-  { id: 'sphere', label: 'Sphere', icon: Circle },
-  { id: 'capsule', label: 'Capsule', icon: Pill },
+const PRIMITIVES: SegmentedOption<CsgPrimitive>[] = [
+  { value: 'box', label: 'Box', icon: Box },
+  { value: 'sphere', label: 'Sphere', icon: Circle },
+  { value: 'capsule', label: 'Capsule', icon: Pill },
+]
+
+const OPERATIONS: SegmentedOption<CsgOperation>[] = [
+  { value: 'subtract', label: 'Subtract', hint: 'Cut the volume out of the terrain' },
+  { value: 'add', label: 'Add', hint: 'Union the volume into the terrain' },
 ]
 
 export function CsgObjectsPanel({
   terrain,
   editor,
+  open,
+  onToggle,
 }: {
   terrain: WorldTerrain
   editor: EditorStore
+  open: boolean
+  onToggle: () => void
 }) {
   const snapshot = useEditorSnapshot(editor)
 
@@ -70,63 +78,46 @@ export function CsgObjectsPanel({
   }
 
   return (
-    <section className="border-b border-white/[0.07] px-3.5 pb-4">
-      <header className="flex items-center gap-2 pb-3 pt-4 text-[9px] font-semibold uppercase tracking-[0.15em] text-white/35">
-        <Box size={12} /> Procedural CSG objects
-      </header>
-      <div className="grid grid-cols-3 gap-1">
-        {PRIMITIVES.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            type="button"
-            data-active={snapshot.csgPrimitive === id}
-            className="grid place-items-center gap-1 rounded-md border border-white/[0.07] px-1 py-2 text-[8px] transition"
-            onClick={() => editor.patch({ csgPrimitive: id })}
-          >
-            <Icon size={12} /> {label}
-          </button>
-        ))}
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
-        {(['subtract', 'add'] as const).map((operation) => (
-          <button
-            key={operation}
-            type="button"
-            data-active={snapshot.csgOperation === operation}
-            className="rounded-md px-2 py-1.5 text-[9px] capitalize transition"
-            onClick={() => editor.patch({ csgOperation: operation })}
-          >
-            {operation}
-          </button>
-        ))}
-      </div>
-      <div className="mt-3">
-        <RangeField
-          label="Object size"
-          value={snapshot.csgSize}
-          min={1}
-          max={96}
-          step={1}
-          unit=" m"
-          onChange={(csgSize) => editor.patch({ csgSize })}
-        />
-      </div>
-      <div className="mt-3 grid grid-cols-2 gap-1.5">
+    <CollapsibleSection icon={Box} title="CSG" open={open} onToggle={onToggle}>
+      <Segmented
+        ariaLabel="CSG primitive"
+        options={PRIMITIVES}
+        value={snapshot.csgPrimitive}
+        onChange={(csgPrimitive) => editor.patch({ csgPrimitive })}
+      />
+      <Segmented
+        ariaLabel="CSG operation"
+        options={OPERATIONS}
+        value={snapshot.csgOperation}
+        onChange={(csgOperation) => editor.patch({ csgOperation })}
+      />
+      <RangeField
+        label="Size"
+        value={snapshot.csgSize}
+        min={1}
+        max={96}
+        step={1}
+        unit=" m"
+        onChange={(csgSize) => editor.patch({ csgSize })}
+      />
+      <div className="grid grid-cols-2 gap-1.5">
         <button
           type="button"
-          className="rounded-md border border-[#77e8be]/20 bg-[#77e8be]/[0.07] px-2 py-2 text-[9px] text-[#b7f6df] hover:bg-[#77e8be]/[0.12]"
+          className="panel-button"
+          data-accent="mint"
+          title="Place the volume at the terrain cursor"
           onClick={addPrimitive}
         >
           Add at cursor
         </button>
-        <label className="flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-white/[0.09] px-2 py-2 text-[9px] text-white/55 hover:bg-white/[0.05]">
-          <FileUp size={11} /> Import GLB
+        <label
+          className="panel-button cursor-pointer"
+          title="Import a GLB mesh as an editable CSG volume"
+        >
+          <FileUp size={12} /> Import GLB
           <input type="file" accept=".glb,model/gltf-binary" hidden onChange={importMesh} />
         </label>
       </div>
-      <p className="mt-2 text-[8px] leading-relaxed text-white/25">
-        Click terrain to place. CSG stays live in the modifier stack after every move, rotation, or scale.
-      </p>
-    </section>
+    </CollapsibleSection>
   )
 }

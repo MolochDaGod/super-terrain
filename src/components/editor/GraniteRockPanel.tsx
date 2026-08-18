@@ -4,52 +4,70 @@ import {
   Combine,
   Copy,
   Dices,
-  Eye,
-  EyeOff,
   Mountain,
   RectangleHorizontal,
-  Trash2,
 } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
-import type {
-  EditorStore,
-  TransformMode,
-} from '../../terrain/editor/EditorStore'
+import type { EditorStore } from '../../terrain/editor/EditorStore'
 import {
   graniteMassingOfSeed,
   graniteSeedForMassing,
   normalizeGraniteRockParameters,
   randomGraniteRockParameters,
   type GraniteMassing,
-  type GraniteRock,
   type GraniteRockDetail,
   type GraniteRockParameters,
+  type GraniteTopologyDetail,
 } from '../../terrain/rocks/types'
 import {
   useEditorSnapshot,
   useGraniteRockRevision,
 } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
+import { CollapsibleSection } from './ui/Section'
+import { Segmented, type SegmentedOption } from './ui/Segmented'
+import { ListRow } from './ui/ListRow'
+import { EmptyHint } from './ui/EmptyHint'
 
-const MASSINGS: Array<{
-  id: GraniteMassing
-  label: string
-  icon: typeof Circle
-}> = [
-  { id: 'erratic', label: 'Erratic', icon: Circle },
-  { id: 'prow', label: 'Prow', icon: Mountain },
-  { id: 'arch', label: 'Arch', icon: Combine },
-  { id: 'tor', label: 'Tor', icon: Box },
-  { id: 'bench', label: 'Bench', icon: RectangleHorizontal },
-  { id: 'monolith', label: 'Monolith', icon: Mountain },
+const MASSINGS: SegmentedOption<GraniteMassing>[] = [
+  { value: 'erratic', label: 'Erratic', icon: Circle },
+  { value: 'prow', label: 'Prow', icon: Mountain },
+  { value: 'arch', label: 'Arch', icon: Combine },
+  { value: 'tor', label: 'Tor', icon: Box },
+  { value: 'bench', label: 'Bench', icon: RectangleHorizontal },
+  { value: 'monolith', label: 'Monolith', icon: Mountain },
 ]
+
+const DETAILS: SegmentedOption<`${GraniteRockDetail}`>[] = [
+  { value: '2', label: 'Draft', hint: 'Render LOD2 · procedural' },
+  { value: '3', label: 'Studio', hint: 'Render LOD1 · seam-safe baked surface' },
+  { value: '4', label: 'Fine', hint: 'Render LOD0 · full atlas' },
+]
+
+/**
+ * Grid resolution of the mesh handed to CSG. A rock scaled far up needs the
+ * finest tier or its cut reads as smooth facets with no small-scale fracture.
+ */
+const TOPOLOGIES: SegmentedOption<`${GraniteTopologyDetail}`>[] = [
+  { value: '20', label: 'Coarse', hint: '20³ grid · broad facets only, instant' },
+  { value: '30', label: 'Standard', hint: '30³ grid · adds joint-plane fracture' },
+  { value: '44', label: 'Fine', hint: '44³ grid · crisper facets and spall scars' },
+  { value: '72', label: 'Micro', hint: '72³ grid · adds the fine worley chip band, takes seconds to extract' },
+]
+
+/** The field's finest displacement band is only resolved by the 72³ grid. */
+const CHIP_BAND_CELLS = 72
 
 export function GraniteRockPanel({
   terrain,
   editor,
+  open,
+  onToggle,
 }: {
   terrain: WorldTerrain
   editor: EditorStore
+  open: boolean
+  onToggle: () => void
 }) {
   useGraniteRockRevision(terrain)
   const snapshot = useEditorSnapshot(editor)
@@ -70,6 +88,7 @@ export function GraniteRockPanel({
     key: Key,
     value: GraniteRockParameters[Key],
   ) => patchParameters({ ...parameters, [key]: value })
+
   const placementPoint = snapshot.cursorVisible
     ? snapshot.cursorPosition
     : {
@@ -91,328 +110,153 @@ export function GraniteRockPanel({
       status,
     })
   }
-  const addRandom = () => {
-    const recipe = randomGraniteRockParameters(randomSeed())
-    addRock(recipe, 'Random granite rock placed · translate gizmo active')
-  }
-  const addCurrent = () => {
-    addRock(
-      parameters,
-      selected
-        ? `${selected.name} duplicated at cursor`
-        : 'Granite rock placed · translate gizmo active',
-    )
-  }
 
   return (
-    <section className="border-b border-white/[0.07]">
-      <header className="flex items-center justify-between px-4 pb-3 pt-4">
-        <span className="flex items-center gap-2 text-[9px] font-semibold uppercase tracking-[0.15em] text-white/35">
-          <Mountain size={12} strokeWidth={1.7} /> Granite rock lab
-        </span>
-        <span className="font-mono text-[8px] text-white/25">
-          {rocks.length} placed
-        </span>
-      </header>
+    <CollapsibleSection
+      icon={Mountain}
+      title="Rocks"
+      badge={rocks.length}
+      open={open}
+      onToggle={onToggle}
+    >
+      <Segmented
+        ariaLabel="Rock massing"
+        columns={3}
+        options={MASSINGS}
+        value={graniteMassingOfSeed(parameters.seed)}
+        onChange={(massing) =>
+          patchParameter('seed', graniteSeedForMassing(parameters.seed, massing))
+        }
+      />
 
-      <div className="space-y-3 px-3.5 pb-4">
-        <div className="grid grid-cols-3 gap-1">
-          {MASSINGS.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              type="button"
-              data-active={graniteMassingOfSeed(parameters.seed) === id}
-              className="grid place-items-center gap-1 rounded-md border border-white/[0.07] px-1 py-2 text-[8px] transition"
-              onClick={() =>
-                patchParameter('seed', graniteSeedForMassing(parameters.seed, id))
+      <div className="flex gap-1.5">
+        <input
+          type="number"
+          min={1}
+          max={0x7fff_ffff}
+          aria-label="Deterministic seed"
+          title="Deterministic seed"
+          value={parameters.seed}
+          className="text-input font-mono"
+          onChange={(event) => patchParameter('seed', Number(event.target.value))}
+        />
+        <button
+          type="button"
+          aria-label="Randomize recipe"
+          title="Randomize recipe"
+          className="panel-button shrink-0 px-2.5"
+          onClick={() => {
+            const randomized = randomGraniteRockParameters(randomSeed())
+            patchParameters({ ...randomized, detail: parameters.detail })
+          }}
+        >
+          <Dices size={13} />
+        </button>
+      </div>
+
+      <div className="space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.018] p-2.5">
+        <RangeField label="World scale" value={parameters.placementScale} min={0.25} max={16} step={0.05} unit="×" onChange={(value) => patchParameter('placementScale', value)} />
+        <RangeField label="Relief" value={parameters.detailStrength} min={0} max={1} step={0.01} onChange={(value) => patchParameter('detailStrength', value)} />
+        <RangeField label="Wetness" value={parameters.wetness} min={0} max={1} step={0.01} onChange={(value) => patchParameter('wetness', value)} />
+        <RangeField label="Lichen" value={parameters.lichen} min={0} max={1} step={0.01} onChange={(value) => patchParameter('lichen', value)} />
+        <RangeField label="Moss" value={parameters.moss} min={0} max={1} step={0.01} onChange={(value) => patchParameter('moss', value)} />
+        <RangeField label="Snow" value={parameters.snow} min={0} max={1} step={0.01} onChange={(value) => patchParameter('snow', value)} />
+      </div>
+
+      <Segmented
+        ariaLabel="Render detail"
+        options={DETAILS}
+        value={`${parameters.detail}` as `${GraniteRockDetail}`}
+        onChange={(detail) =>
+          patchParameter('detail', Number(detail) as GraniteRockDetail)
+        }
+      />
+
+      <div>
+        <Segmented
+          ariaLabel="CSG topology detail"
+          columns={2}
+          options={TOPOLOGIES}
+          value={`${parameters.topologyDetail}` as `${GraniteTopologyDetail}`}
+          onChange={(topologyDetail) =>
+            patchParameter(
+              'topologyDetail',
+              Number(topologyDetail) as GraniteTopologyDetail,
+            )
+          }
+        />
+        <p className="mt-1.5 font-mono text-[10px] text-white/28">
+          CSG mesh {parameters.topologyDetail}³ ·{' '}
+          {parameters.topologyDetail >= CHIP_BAND_CELLS
+            ? 'chip band on'
+            : 'chip band off'}
+        </p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-1.5">
+        <button
+          type="button"
+          className="panel-button"
+          data-accent="mint"
+          onClick={() =>
+            addRock(
+              randomGraniteRockParameters(randomSeed()),
+              'Random granite rock placed · translate gizmo active',
+            )
+          }
+        >
+          <Dices size={12} /> Random
+        </button>
+        <button
+          type="button"
+          className="panel-button"
+          onClick={() =>
+            addRock(
+              parameters,
+              selected
+                ? `${selected.name} duplicated at cursor`
+                : 'Granite rock placed · translate gizmo active',
+            )
+          }
+        >
+          {selected ? <Copy size={12} /> : <Mountain size={12} />}
+          {selected ? 'Duplicate' : 'Add current'}
+        </button>
+      </div>
+
+      {rocks.length === 0 ? (
+        <EmptyHint>No rocks placed yet.</EmptyHint>
+      ) : (
+        <div className="max-h-40 space-y-1 overflow-y-auto">
+          {rocks.map((rock) => (
+            <ListRow
+              key={rock.id}
+              title={rock.name}
+              meta={`${graniteMassingOfSeed(rock.parameters.seed)} · seed ${rock.parameters.seed}`}
+              selected={rock.id === selected?.id}
+              visible={rock.visible}
+              onSelect={() =>
+                editor.patch({
+                  selectedRockId: rock.id,
+                  selectedModifierId: undefined,
+                  tool: 'select',
+                  status: `${rock.name} selected`,
+                })
               }
-            >
-              <Icon size={12} /> {label}
-            </button>
+              onToggleVisible={() =>
+                terrain.setGraniteRockVisible(rock.id, !rock.visible)
+              }
+              onDelete={() => {
+                terrain.removeGraniteRock(rock.id)
+                if (selected?.id === rock.id) {
+                  editor.patch({ selectedRockId: undefined })
+                }
+              }}
+            />
           ))}
         </div>
-
-        <div className="flex items-end gap-1.5">
-          <label className="min-w-0 flex-1">
-            <span className="mb-1.5 block text-[9px] font-medium uppercase tracking-[0.12em] text-white/30">
-              Deterministic seed
-            </span>
-            <input
-              type="number"
-              min={1}
-              max={0x7fff_ffff}
-              value={parameters.seed}
-              className="h-8 w-full rounded-md border border-white/[0.08] bg-black/15 px-2 font-mono text-[10px] text-white/68"
-              onChange={(event) => patchParameter('seed', Number(event.target.value))}
-            />
-          </label>
-          <button
-            type="button"
-            aria-label="Randomize current rock recipe"
-            title="Randomize recipe"
-            className="grid size-8 shrink-0 place-items-center rounded-md border border-white/[0.08] text-white/45 hover:bg-white/[0.05] hover:text-white/80"
-            onClick={() => {
-              const randomized = randomGraniteRockParameters(randomSeed())
-              patchParameters({ ...randomized, detail: parameters.detail })
-            }}
-          >
-            <Dices size={13} />
-          </button>
-        </div>
-
-        <div className="space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.018] p-3">
-          <RangeField label="World scale" value={parameters.placementScale} min={0.25} max={16} step={0.05} unit="×" onChange={(value) => patchParameter('placementScale', value)} />
-          <RangeField label="Relief detail" value={parameters.detailStrength} min={0} max={1} step={0.01} onChange={(value) => patchParameter('detailStrength', value)} />
-          <RangeField label="Wetness" value={parameters.wetness} min={0} max={1} step={0.01} onChange={(value) => patchParameter('wetness', value)} />
-          <RangeField label="Lichen" value={parameters.lichen} min={0} max={1} step={0.01} onChange={(value) => patchParameter('lichen', value)} />
-          <RangeField label="Moss" value={parameters.moss} min={0} max={1} step={0.01} onChange={(value) => patchParameter('moss', value)} />
-          <RangeField label="Snow" value={parameters.snow} min={0} max={1} step={0.01} onChange={(value) => patchParameter('snow', value)} />
-        </div>
-
-        <div>
-          <div className="mb-2 flex items-center justify-between text-[9px] font-medium uppercase tracking-[0.12em] text-white/30">
-            <span>Source high-to-low</span>
-            <span className="font-mono normal-case tracking-normal text-white/22">
-              {parameters.detail === 4
-                ? 'LOD0 · full atlas'
-                : parameters.detail === 3
-                  ? 'LOD1 · seam-safe baked surface'
-                  : 'LOD2 · procedural'}
-            </span>
-          </div>
-          <div className="grid grid-cols-3 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
-            {([2, 3, 4] as GraniteRockDetail[]).map((detail) => (
-              <button
-                key={detail}
-                type="button"
-                data-active={parameters.detail === detail}
-                className="rounded-md px-1 py-1.5 text-[8px] transition"
-                onClick={() => patchParameter('detail', detail)}
-              >
-                {detail === 2 ? 'Draft' : detail === 3 ? 'Studio' : 'Fine'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-1.5">
-          <button
-            type="button"
-            className="flex items-center justify-center gap-1.5 rounded-md border border-[#77e8be]/20 bg-[#77e8be]/[0.07] px-2 py-2 text-[9px] text-[#b7f6df] hover:bg-[#77e8be]/[0.12]"
-            onClick={addRandom}
-          >
-            <Dices size={11} /> Add random
-          </button>
-          <button
-            type="button"
-            className="flex items-center justify-center gap-1.5 rounded-md border border-white/[0.09] px-2 py-2 text-[9px] text-white/55 hover:bg-white/[0.05]"
-            onClick={addCurrent}
-          >
-            {selected ? <Copy size={11} /> : <Mountain size={11} />}
-            {selected ? 'Duplicate here' : 'Add current'}
-          </button>
-        </div>
-
-        <p className="text-[8px] leading-relaxed text-white/25">
-          Original scifi-kit compiled topology, surface atlas, shared triplanar crystal detail, and granite biome shader.
-        </p>
-      </div>
-
-      <RockList
-        rocks={rocks}
-        selectedId={selected?.id}
-        onSelect={(rock) =>
-          editor.patch({
-            selectedRockId: rock.id,
-            selectedModifierId: undefined,
-            tool: 'select',
-            status: `${rock.name} selected · edit recipe or transform`,
-          })
-        }
-        onToggle={(rock) => terrain.setGraniteRockVisible(rock.id, !rock.visible)}
-        onDelete={(rock) => {
-          terrain.removeGraniteRock(rock.id)
-          if (selected?.id === rock.id) editor.patch({ selectedRockId: undefined })
-        }}
-      />
-
-      {selected && (
-        <SelectedRockEditor
-          rock={selected}
-          transformMode={snapshot.transformMode}
-          onTransformModeChange={(transformMode) =>
-            editor.patch({ transformMode, tool: 'select' })
-          }
-          onTransformChange={(transform) =>
-            terrain.updateGraniteRockTransform(selected.id, transform)
-          }
-          onApplyCsg={(operation) => {
-            const modifierId = terrain.applyGraniteRockAsCsg(selected.id, operation)
-            editor.patch({
-              selectedRockId: undefined,
-              selectedModifierId: modifierId,
-              tool: 'select',
-              status: `${selected.name} hidden · topology snapshotted as CSG ${operation}`,
-            })
-          }}
-        />
       )}
-    </section>
-  )
-}
-
-function RockList({
-  rocks,
-  selectedId,
-  onSelect,
-  onToggle,
-  onDelete,
-}: {
-  rocks: GraniteRock[]
-  selectedId?: string
-  onSelect: (rock: GraniteRock) => void
-  onToggle: (rock: GraniteRock) => void
-  onDelete: (rock: GraniteRock) => void
-}) {
-  return (
-    <div className="border-t border-white/[0.06] px-3.5 py-3">
-      <div className="mb-2 text-[8px] font-semibold uppercase tracking-[0.14em] text-white/28">
-        Scene rocks
-      </div>
-      <div className="max-h-36 space-y-1 overflow-y-auto">
-        {rocks.length === 0 && (
-          <p className="rounded-md border border-dashed border-white/[0.08] p-3 text-[9px] text-white/28">
-            No authored rocks yet. Add a random mass or tune the current recipe.
-          </p>
-        )}
-        {rocks.map((rock) => (
-          <div
-            key={rock.id}
-            className={`flex items-center gap-1 rounded-md border px-1.5 py-1.5 ${
-              rock.id === selectedId
-                ? 'border-[#77e8be]/30 bg-[#77e8be]/[0.07]'
-                : 'border-white/[0.06] bg-white/[0.018]'
-            }`}
-          >
-            <button type="button" className="min-w-0 flex-1 text-left" onClick={() => onSelect(rock)}>
-              <span className="block truncate text-[9px] text-white/68">{rock.name}</span>
-              <span className="mt-0.5 block font-mono text-[7px] capitalize text-white/24">
-                {graniteMassingOfSeed(rock.parameters.seed)} · seed {rock.parameters.seed} · LOD{4 - rock.parameters.detail}
-              </span>
-            </button>
-            <button
-              type="button"
-              aria-label={rock.visible ? 'Hide rock' : 'Show rock'}
-              className="grid size-6 place-items-center rounded text-white/28 hover:bg-white/[0.06] hover:text-white/70"
-              onClick={() => onToggle(rock)}
-            >
-              {rock.visible ? <Eye size={11} /> : <EyeOff size={11} />}
-            </button>
-            <button
-              type="button"
-              aria-label="Delete rock"
-              className="grid size-6 place-items-center rounded text-white/20 hover:bg-[#ff826f]/10 hover:text-[#ff826f]"
-              onClick={() => onDelete(rock)}
-            >
-              <Trash2 size={11} />
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function SelectedRockEditor({
-  rock,
-  transformMode,
-  onTransformModeChange,
-  onTransformChange,
-  onApplyCsg,
-}: {
-  rock: GraniteRock
-  transformMode: TransformMode
-  onTransformModeChange: (mode: TransformMode) => void
-  onTransformChange: (transform: GraniteRock['transform']) => void
-  onApplyCsg: (operation: 'subtract' | 'add') => void
-}) {
-  const transform = rock.transform
-  return (
-    <div className="space-y-3 border-t border-white/[0.06] bg-white/[0.018] px-4 py-3.5">
-      <div className="grid grid-cols-3 gap-1 rounded-lg border border-white/[0.07] bg-black/10 p-1">
-        {(['translate', 'rotate', 'scale'] as const).map((mode) => (
-          <button
-            key={mode}
-            type="button"
-            data-active={transformMode === mode}
-            className="rounded-md px-1 py-1.5 text-[8px] capitalize transition"
-            onClick={() => onTransformModeChange(mode)}
-          >
-            {mode}
-          </button>
-        ))}
-      </div>
-      <RangeField
-        label="Elevation"
-        value={transform.position.y}
-        min={-64}
-        max={192}
-        step={0.5}
-        unit=" m"
-        onChange={(value) =>
-          onTransformChange({
-            ...transform,
-            position: { ...transform.position, y: value },
-          })
-        }
-      />
-      <RangeField
-        label="Yaw"
-        value={(transform.rotation.y * 180) / Math.PI}
-        min={-180}
-        max={180}
-        step={1}
-        unit="°"
-        onChange={(value) =>
-          onTransformChange({
-            ...transform,
-            rotation: { ...transform.rotation, y: (value * Math.PI) / 180 },
-          })
-        }
-      />
-      <RangeField
-        label="Object scale"
-        value={transform.scale}
-        min={0.1}
-        max={6}
-        step={0.05}
-        onChange={(scale) => onTransformChange({ ...transform, scale })}
-      />
-      <div>
-        <div className="mb-2 flex items-center gap-2 text-[8px] font-semibold uppercase tracking-[0.14em] text-[#b7f6df]/55">
-          <Combine size={11} /> Snapshot this topology as CSG
-        </div>
-        <div className="grid grid-cols-2 gap-1.5">
-          <button
-            type="button"
-            className="rounded-md border border-[#ff9d78]/20 bg-[#ff9d78]/[0.06] px-2 py-2 text-[9px] text-[#ffc0aa] hover:bg-[#ff9d78]/[0.1]"
-            onClick={() => onApplyCsg('subtract')}
-          >
-            Subtract rock
-          </button>
-          <button
-            type="button"
-            className="rounded-md border border-[#77e8be]/20 bg-[#77e8be]/[0.06] px-2 py-2 text-[9px] text-[#b7f6df] hover:bg-[#77e8be]/[0.1]"
-            onClick={() => onApplyCsg('add')}
-          >
-            Union rock
-          </button>
-        </div>
-        <p className="mt-2 text-[8px] leading-relaxed text-white/24">
-          The source rock is hidden, not deleted, so the cut or union stays visible. Its scene-list entry and editable recipe remain intact.
-        </p>
-      </div>
-    </div>
+    </CollapsibleSection>
   )
 }
 

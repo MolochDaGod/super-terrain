@@ -1,21 +1,6 @@
 import { useEffect } from 'react'
-import type { EditorStore, EditorTool } from '../../terrain/editor/EditorStore'
-
-const TOOL_KEYS: Record<string, EditorTool> = {
-  Digit1: 'select',
-  Digit2: 'raise',
-  Digit3: 'lower',
-  Digit4: 'smooth',
-  Digit5: 'flatten',
-  Digit6: 'clay',
-  Digit7: 'pinch',
-  Digit8: 'scrape',
-  Digit9: 'terrace',
-  Digit0: 'noise',
-  KeyP: 'paint',
-  KeyG: 'remesh',
-  KeyT: 'tunnel',
-}
+import type { EditorStore } from '../../terrain/editor/EditorStore'
+import { TOOL_BY_ID, TOOL_BY_KEY_CODE } from './tools'
 
 export function EditorShortcuts({ editor }: { editor: EditorStore }) {
   useEffect(() => {
@@ -26,9 +11,10 @@ export function EditorShortcuts({ editor }: { editor: EditorStore }) {
       ) {
         return
       }
-      const tool = TOOL_KEYS[event.code]
-      if (tool) editor.patch({ tool, status: `${tool} tool active` })
-      else if (event.code === 'KeyH') {
+      const tool = TOOL_BY_KEY_CODE[event.code]
+      if (tool) {
+        editor.patch({ tool, status: `${TOOL_BY_ID[tool].label} tool active` })
+      } else if (event.code === 'KeyH') {
         editor.patch({ showHud: !editor.getSnapshot().showHud })
       } else if (event.code === 'BracketLeft') {
         editor.patch({ brushRadius: Math.max(4, editor.getSnapshot().brushRadius - 2) })

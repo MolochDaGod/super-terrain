@@ -34,7 +34,9 @@ import {
   type GraniteRockResources,
 } from '../rocks/graniteRockResources'
 import {
+  graniteRockScaleMagnitude,
   graniteSourceSeed,
+  normalizeGraniteRockScale,
   type GraniteRock,
 } from '../rocks/types'
 import {
@@ -102,7 +104,8 @@ function GraniteRockObject({
   const sourceSeed = graniteSourceSeed(rock.parameters.seed)
   const lodLevel = graniteLodForDetail(rock.parameters.detail)
   const effectivePlacementScale =
-    rock.parameters.placementScale * rock.transform.scale
+    rock.parameters.placementScale *
+    graniteRockScaleMagnitude(rock.transform.scale)
   const {
     detailStrength,
     lichen,
@@ -241,11 +244,14 @@ function GraniteRockObject({
 
   const commitTransform = () => {
     if (!target) return
-    const uniformScale = Math.max(
-      0.05,
-      (target.scale.x + target.scale.y + target.scale.z) / 3,
-    )
-    target.scale.setScalar(uniformScale)
+    // TransformControls scales in the object's local space, so each handle
+    // already writes its own axis. Keep all three instead of averaging them.
+    const scale = normalizeGraniteRockScale({
+      x: target.scale.x,
+      y: target.scale.y,
+      z: target.scale.z,
+    })
+    target.scale.set(scale.x, scale.y, scale.z)
     terrain.updateGraniteRockTransform(rock.id, {
       position: {
         x: target.position.x,
@@ -257,7 +263,7 @@ function GraniteRockObject({
         y: target.rotation.y,
         z: target.rotation.z,
       },
-      scale: uniformScale,
+      scale,
     })
   }
   const { begin, finish, isActive } = useTransformDragSession({
@@ -281,7 +287,11 @@ function GraniteRockObject({
       rock.transform.rotation.z,
       'XYZ',
     )
-    target.scale.setScalar(rock.transform.scale)
+    target.scale.set(
+      rock.transform.scale.x,
+      rock.transform.scale.y,
+      rock.transform.scale.z,
+    )
     target.updateMatrixWorld(true)
   }, [
     isActive,
@@ -291,7 +301,9 @@ function GraniteRockObject({
     rock.transform.rotation.x,
     rock.transform.rotation.y,
     rock.transform.rotation.z,
-    rock.transform.scale,
+    rock.transform.scale.x,
+    rock.transform.scale.y,
+    rock.transform.scale.z,
     target,
   ])
 
