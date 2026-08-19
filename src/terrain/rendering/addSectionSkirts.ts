@@ -162,6 +162,10 @@ function createDefaultSurfaceFields(vertexCount: number): readonly [
       fields[field][offset + 2] = 32_768
       fields[field][offset + 3] = 32_768
     }
+    fields[0][offset] = 0x8080
+    fields[0][offset + 1] = 0x8080
+    fields[0][offset + 2] = 0x8080
+    fields[2][offset + 1] = 0x8080
     fields[4][offset + 1] = 65_535
   }
   return fields

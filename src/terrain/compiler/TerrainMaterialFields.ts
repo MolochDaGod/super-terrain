@@ -27,6 +27,18 @@ export interface TerrainMaterialFields {
   flow: number
 }
 
+/** Final broad material coverage baked into each compiled terrain vertex. */
+export interface TerrainLayerWeights {
+  grass: number
+  meadow: number
+  soil: number
+  scree: number
+  rock: number
+  snow: number
+  slope: number
+  lichen: number
+}
+
 interface Point3 {
   x: number
   y: number
@@ -133,6 +145,93 @@ export function evaluateTerrainMaterialFields(
   }
 }
 
+/**
+ * Evaluates the stable layer-classification portion of the full material once
+ * during section compilation. The former fragment implementation ran these
+ * eight Perlin taps for every covered pixel on every frame, even though the
+ * inputs only change when the mesh is rebuilt.
+ */
+export function evaluateTerrainLayerWeights(
+  x: number,
+  y: number,
+  z: number,
+  normalY: number,
+  curvature: number,
+  fields: TerrainMaterialFields,
+): TerrainLayerWeights {
+  const slope = clamp(1 - normalY, 0, 1)
+  const regional = fields.regional * 0.5
+
+  let raw = 0
+  if (slope < 0.58) {
+    raw = fbm2(x + y * 0.37, z + y * 0.21, 3, 4) - 0.5
+  }
+  if (slope > 0.32) {
+    const volumeFray = fbm({ x, y, z }, 3, 4) - 0.5
+    raw = lerp(raw, volumeFray, smoothstep(0.32, 0.58, slope))
+  }
+  const fray = raw * 0.22
+
+  const regolith = clamp(
+    falloff(0.44, 0.1, slope + fray * 0.6) *
+      falloff(0.85, 0.12, curvature) *
+      (fields.deposition * 0.6 + 0.45),
+    0,
+    1,
+  )
+  const rock = 1 - regolith
+  const repose =
+    smoothstep(0.075, 0.17, slope + fray * 0.5) *
+    falloff(0.46, 0.24, slope)
+  const scree =
+    regolith *
+    repose *
+    (falloff(0.5, -0.3, curvature) * 0.7 + 0.3)
+  const remaining = regolith * (1 - scree)
+  const alpineFade = falloff(
+    412,
+    268,
+    y + regional * 44 + fray * 26,
+  )
+  const plantable =
+    smoothstep(0.2, 0.52, fields.moisture + raw * 0.28) *
+    alpineFade *
+    falloff(0.38, 0.1, slope + fray)
+  const soil = remaining * (1 - plantable)
+  const vegetated = remaining * plantable
+  const lush = smoothstep(
+    0.3,
+    0.66,
+    fields.moisture * 0.6 + fields.flow * 0.55 + raw * 0.3,
+  )
+  const grass = vegetated * lush
+  const meadow = vegetated * (1 - lush)
+
+  const snowEdge = raw * 30 + curvature * -46
+  const snow =
+    smoothstep(
+      286,
+      412,
+      y + regional * 44 + fray * 30 + snowEdge,
+    ) * falloff(0.5, 0.12, slope + snowEdge * 0.01)
+  const snowFree = 1 - snow
+  const lichen =
+    fields.lichen *
+    smoothstep(0.26, 0.7, fields.moisture) *
+    falloff(0.6, -0.2, curvature)
+
+  return {
+    grass: grass * snowFree,
+    meadow: meadow * snowFree,
+    soil: soil * snowFree,
+    scree: scree * snowFree,
+    rock: rock * snowFree,
+    snow,
+    slope,
+    lichen,
+  }
+}
+
 function fbm(position: Point3, wavelength: number, octaves: number): number {
   let sum = 0
   let total = 0.0001
@@ -144,6 +243,25 @@ function fbm(position: Point3, wavelength: number, octaves: number): number {
       position.y * scale,
       position.z * scale,
     ) * amplitude
+    total += amplitude
+    amplitude *= 0.52
+    scale *= 2.07
+  }
+  return clamp(sum / total * 0.5 + 0.5, 0, 1)
+}
+
+function fbm2(
+  x: number,
+  y: number,
+  wavelength: number,
+  octaves: number,
+): number {
+  let sum = 0
+  let total = 0.0001
+  let amplitude = 1
+  let scale = 1 / wavelength
+  for (let octave = 0; octave < octaves; octave += 1) {
+    sum += perlin2(x * scale, y * scale) * amplitude
     total += amplitude
     amplitude *= 0.52
     scale *= 2.07
@@ -217,6 +335,28 @@ function perlin3(x: number, y: number, z: number): number {
   return lerp(lerp(x00, x10, v), lerp(x01, x11, v), w) * 0.982
 }
 
+function perlin2(x: number, y: number): number {
+  const ix = Math.floor(x)
+  const iy = Math.floor(y)
+  const fx = x - ix
+  const fy = y - iy
+  const u = fade(fx)
+  const v = fade(fy)
+
+  const n00 = gradient2(hash2(ix, iy), fx, fy)
+  const n10 = gradient2(hash2(ix + 1, iy), fx - 1, fy)
+  const n01 = gradient2(hash2(ix, iy + 1), fx, fy - 1)
+  const n11 = gradient2(hash2(ix + 1, iy + 1), fx - 1, fy - 1)
+  return lerp(lerp(n00, n10, u), lerp(n01, n11, u), v) * 0.6616
+}
+
+function gradient2(hash: number, x: number, y: number): number {
+  const h = hash & 7
+  const u = h < 4 ? x : y
+  const v = 2 * (h < 4 ? y : x)
+  return (h & 1 ? -u : u) + (h & 2 ? -v : v)
+}
+
 function gradient(hash: number, x: number, y: number, z: number): number {
   const h = hash & 15
   const u = h < 8 ? x : y
@@ -231,6 +371,19 @@ function hash3(x: number, y: number, z: number): number {
     (seed + (y >>> 0)) >>> 0,
     (seed + (z >>> 0)) >>> 0,
   )
+}
+
+function hash2(x: number, y: number): number {
+  const seed = (0xdeadbeef + (2 << 2) + 13) >>> 0
+  return bjFinal(
+    (seed + (x >>> 0)) >>> 0,
+    (seed + (y >>> 0)) >>> 0,
+    seed,
+  )
+}
+
+function falloff(high: number, low: number, value: number): number {
+  return 1 - smoothstep(low, high, value)
 }
 
 function bjFinal(initialA: number, initialB: number, initialC: number): number {

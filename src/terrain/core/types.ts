@@ -33,7 +33,7 @@ export interface CompiledLOD {
   stableVertexIds?: Uint32Array
   normals: Float32Array
   colors: Float32Array
-  /** Five normalized u16 vec4 streams containing cached broad material fields. */
+  /** Five normalized u16 vec4 streams containing packed material fields and layer weights. */
   surfaceFields?: readonly [
     Uint16Array,
     Uint16Array,

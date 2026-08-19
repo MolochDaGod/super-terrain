@@ -23,7 +23,20 @@ export interface TerrainConfig {
 }
 
 const availableWorkers =
-  typeof navigator === 'undefined' ? 2 : navigator.hardwareConcurrency ?? 4
+  typeof navigator === 'undefined' ? 4 : navigator.hardwareConcurrency ?? 4
+
+/**
+ * Terrain compilation is embarrassingly parallel across sections, but using
+ * every logical core makes camera input and WebGPU command submission compete
+ * with the workers. Keep roughly one quarter of the machine available and cap
+ * the pool to avoid excessive per-worker module and scratch-memory overhead.
+ */
+export function recommendedTerrainWorkerCount(logicalCores: number): number {
+  const cores = Number.isFinite(logicalCores)
+    ? Math.max(1, Math.floor(logicalCores))
+    : 4
+  return Math.max(2, Math.min(8, Math.floor(cores * 0.75)))
+}
 
 export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   worldSize: 16_384,
@@ -34,7 +47,7 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   // nominal target. 96 segments over 128 m is ~1.3 m source topology.
   lodResolutions: [96, 48, 24, 12, 6],
   operationHalo: 12,
-  workerCount: Math.max(2, Math.min(4, availableWorkers - 2)),
+  workerCount: recommendedTerrainWorkerCount(availableWorkers),
   targetFps: 30,
   baseLodErrorPixels: 2.2,
   // Screen-error LOD alone demotes nearby terrain while the camera is elevated.

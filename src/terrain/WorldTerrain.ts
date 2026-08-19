@@ -69,6 +69,7 @@ import {
 import { MeshPartition, type TerrainSection } from './partition/MeshPartition'
 import { IndexedDbTerrainStorage, type TerrainStorage } from './persistence/TerrainStorage'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
+import { HorizonProxyMask } from './rendering/HorizonProxyMask'
 import {
   cloneTerrainMaterialSettings,
   DEFAULT_TERRAIN_MATERIAL_SETTINGS,
@@ -207,6 +208,7 @@ export class WorldTerrain {
   private activeBenchmark?: ActiveBenchmark
   private latestCamera: Vec3Like = { x: 0, y: 0, z: 0 }
   private viewTarget?: Vec3Like
+  private readonly horizonProxyMask: HorizonProxyMask
   private viewSignature?: TerrainViewSignature
   private cachedCandidateMap = new Map<string, StreamCandidate>()
   private terrainStateRevision = 0
@@ -219,6 +221,10 @@ export class WorldTerrain {
     storage: TerrainStorage = new IndexedDbTerrainStorage(),
   ) {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config }
+    this.horizonProxyMask = new HorizonProxyMask(
+      this.config.worldSize,
+      this.config.sectionSize,
+    )
     this.storage = storage
     this.partition = new MeshPartition({
       sectionSize: this.config.sectionSize,
@@ -269,6 +275,7 @@ export class WorldTerrain {
 
   attachRenderer(renderer: TerrainRenderBackend): void {
     this.renderer = renderer
+    this.horizonProxyMask.clear()
     renderer.setOverlay(this.overlay)
     renderer.setMaterialSettings(this.getMaterialSettings())
     // A renderer can be recreated during development or device recovery while
@@ -284,7 +291,10 @@ export class WorldTerrain {
   }
 
   detachRenderer(renderer: TerrainRenderBackend): void {
-    if (this.renderer === renderer) this.renderer = undefined
+    if (this.renderer === renderer) {
+      this.renderer = undefined
+      this.horizonProxyMask.clear()
+    }
   }
 
   update(input: TerrainUpdateInput): void {
@@ -407,6 +417,10 @@ export class WorldTerrain {
 
     this.schedulingMs = performance.now() - scheduleStart
     this.scheduler.runFrame()
+    this.horizonProxyMask.update(
+      candidateMap.values(),
+      (id) => this.renderer?.has(id) === true,
+    )
     this.processedTerrainStateRevision = this.terrainStateRevision
     this.hasPendingTerrainWork = this.detectPendingTerrainWork()
     this.updateMetrics(input.frameMs, now, candidateMap)
@@ -950,6 +964,10 @@ export class WorldTerrain {
     } else {
       this.viewTarget = { ...target }
     }
+  }
+
+  getHorizonProxyMask(): Readonly<HorizonProxyMask> {
+    return this.horizonProxyMask
   }
 
   updateModifierTransform(id: string, transform: ModifierTransform): boolean {

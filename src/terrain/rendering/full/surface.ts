@@ -7,11 +7,11 @@ import {
   dFdy,
   dot,
   float,
+  floor,
   max,
   mix,
   normalize,
   smoothstep,
-  vec2,
   vec3,
   vec4,
   varying,
@@ -24,7 +24,6 @@ import {
   fadeToMean,
   falloff,
   fbm1,
-  fbmLod,
   fbmLodBands,
   lodDeadFootprint,
   ridgedLod,
@@ -134,17 +133,20 @@ export interface LayerWeights {
  * noise evaluations in the fragment stage.
  */
 export interface TerrainSlowFields {
-  regional: any
-  /** Regolith depth: where loose material can rest. Replaces a noise mask. */
-  deposition: any
   moisture: any
+  grass: any
+  meadow: any
+  soil: any
+  scree: any
+  rock: any
+  snow: any
+  bakedLichen: any
   /** Unit normal of the bedding planes the mesh itself was terraced along. */
   beddingNormal: any
   bedThickness: any
   bedExposure: any
   jointing: any
   macro: any
-  lichen: any
   /** Signed mean curvature: +1 convex rib, -1 concave hollow. */
   curvature: any
   bedded: any
@@ -157,17 +159,36 @@ export interface TerrainSlowFields {
 }
 
 export function terrainSlowFields(position: any): TerrainSlowFields {
-  const layer = varying(
-    vec4(attribute('terrainSurface0', 'vec4') as any),
-    'terrainSlowLayer',
+  // Coverage needs six interpolated values, but WebGPU guarantees only eight
+  // vertex buffers and the material already uses all of them. Decode two u8
+  // fields from each normalized u16 component in the vertex stage, then pass
+  // the individual values to fragments as ordinary varyings. This keeps the
+  // existing five-buffer geometry layout and is amply precise for soft masks.
+  const layerAttribute = vec4(attribute('terrainSurface0', 'vec4') as any)
+  const grassMeadow = unpackUnitPair(layerAttribute.x)
+  const soilScree = unpackUnitPair(layerAttribute.y)
+  const rockSnow = unpackUnitPair(layerAttribute.z)
+  const bakedCoverage = varying(
+    vec4(grassMeadow.low, grassMeadow.high, soilScree.low, soilScree.high),
+    'terrainBakedCoverage',
+  )
+  const bakedCoverageAndMacro = varying(
+    vec4(rockSnow.low, rockSnow.high, layerAttribute.w, 0),
+    'terrainBakedCoverageAndMacro',
   )
   const bedding = varying(
     vec4(attribute('terrainSurface1', 'vec4') as any),
     'terrainSlowBedding',
   )
+  const materialAttribute = vec4(attribute('terrainSurface2', 'vec4') as any)
+  const moistureLichen = unpackUnitPair(materialAttribute.y)
   const material = varying(
-    vec4(attribute('terrainSurface2', 'vec4') as any),
+    materialAttribute,
     'terrainSlowMaterial',
+  )
+  const bakedMoistureLichen = varying(
+    vec4(moistureLichen.low, moistureLichen.high, 0, 0),
+    'terrainBakedMoistureLichen',
   )
   const warpedAndTint = varying(
     vec4(attribute('terrainSurface3', 'vec4') as any),
@@ -178,10 +199,15 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
     'terrainSlowRelief',
   )
   return {
-    regional: layer.x.mul(2).sub(1),
-    deposition: layer.y,
-    moisture: layer.z,
-    macro: layer.w,
+    grass: bakedCoverage.x,
+    meadow: bakedCoverage.y,
+    soil: bakedCoverage.z,
+    scree: bakedCoverage.w,
+    rock: bakedCoverageAndMacro.x,
+    snow: bakedCoverageAndMacro.y,
+    macro: bakedCoverageAndMacro.z,
+    moisture: bakedMoistureLichen.x,
+    bakedLichen: bakedMoistureLichen.y,
     // Interpolating the plane normal directly avoids the wrap discontinuity an
     // interpolated strike azimuth would carry across every 360-degree seam.
     beddingNormal: normalize(bedding.xyz.mul(2).sub(1)),
@@ -192,7 +218,6 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
     ),
     bedExposure: relief.w,
     jointing: material.x,
-    lichen: material.y,
     curvature: material.z.mul(2).sub(1),
     mottle: material.w,
     bedded: position.add(warpedAndTint.xyz.mul(2).sub(1).mul(16)),
@@ -203,144 +228,32 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
   }
 }
 
-/**
- * Layer coverage from the physical state of the ground.
- *
- * Nothing here is a noise field pushed through a threshold. Every layer is
- * decided by whether its material could actually be at that point: whether
- * loose debris can rest on that gradient, whether the curvature strips the
- * surface or collects onto it, whether water reaches it, whether it is above
- * the line where plants stop growing. Those quantities come from the same
- * height stack the mesh was built from, so the material agrees with the
- * landform instead of being sprinkled over it.
- *
- * The noise that remains does one job: it frays the *edges*. Real boundaries
- * between turf and scree are ragged at every scale, and a boundary between two
- * smooth fields is not, however carefully the fields are chosen.
- */
-export function layerWeights(
-  position: any,
-  normal: any,
-  footprint: any,
-  slow: TerrainSlowFields,
-): LayerWeights {
-  // `slope` is 1 - cos(gradient): 0.06 at 20 degrees, 0.18 at 35, 0.29 at 45,
-  // 0.5 at 60. The angle of repose for talus sits near 0.19, and that number
-  // decides most of what follows.
-  const slope = clamp(normal.y.oneMinus(), 0, 1).toVar('slope')
-  const altitude = position.y
-
-  const regional = slow.regional.mul(0.5)
-  const curvature = slow.curvature.toVar('curvature')
-  const flow = slow.flow.toVar('flow')
-  const moisture = slow.moisture.toVar('moisture')
-
-  // One ragged-edge field, reused by every boundary in this function. Separate
-  // break-up noises at neighbouring frequencies cost several times as much and
-  // are indistinguishable once they are all multiplied into masks.
-  const raw = float(0).toVar('rawFray')
-  // Coverage fray follows the surface on holdable ground. Sampling a volume
-  // there performs a full 3D lattice search even though the material has only
-  // two spatial degrees of freedom; steep faces retain the volumetric field.
-  If(slope.lessThan(0.58), () => {
-    const surfacePosition = position.xz.add(position.yy.mul(vec2(0.37, 0.21)))
-    raw.assign(fbmLod(surfacePosition, float(3.0), 4, footprint).sub(0.5))
-  })
-  If(slope.greaterThan(0.32), () => {
-    const volumeFray = fbmLod(position, float(3.0), 4, footprint).sub(0.5)
-    raw.assign(mix(raw, volumeFray, smoothstep(0.32, 0.58, slope)))
-  })
-  const fray = raw.mul(0.22).toVar('fray')
-
-  // How much loose material the ground can actually hold. Gradient sets the
-  // ceiling; convexity strips it (a rib nose sheds everything, which is why
-  // ribs are the bare rock on an otherwise grassy slope) and hollows keep it.
-  const regolith = falloff(0.44, 0.1, slope.add(fray.mul(0.6)))
-    .mul(falloff(0.85, 0.12, curvature))
-    .mul(slow.deposition.mul(0.6).add(0.45))
-    .clamp(0, 1)
-    .toVar('regolith')
-
-  // Bedrock is simply what is left where nothing can lie on top of it.
-  const rock = regolith.oneMinus().toVar('wRock')
-  const covered = regolith.toVar('covered')
-
-  // Talus: angular debris shed by the faces above, resting at its angle of
-  // repose. It needs ground steep enough to be fed and shallow enough to hold —
-  // a narrow band around 30-40 degrees — and it banks up where the slope is
-  // concave, which is exactly the foot of every cliff.
-  const repose = smoothstep(0.075, 0.17, slope.add(fray.mul(0.5)))
-    .mul(falloff(0.46, 0.24, slope))
-    .toVar('repose')
-  const scree = covered
-    .mul(repose)
-    .mul(falloff(0.5, float(-0.3), curvature).mul(0.7).add(0.3))
-    .toVar('wScree')
-
-  const remaining = covered.mul(scree.oneMinus()).toVar('remaining')
-
-  // Above the treeline, and on ground too dry or too mobile, the regolith stays
-  // bare mineral soil and gravel.
-  const alpineFade = falloff(
-    412,
-    268,
-    altitude.add(regional.mul(44)).add(fray.mul(26)),
-  ).toVar('alpineFade')
-  const plantable = smoothstep(0.2, 0.52, moisture.add(raw.mul(0.28)))
-    .mul(alpineFade)
-    .mul(falloff(0.38, 0.1, slope.add(fray)))
-    .toVar('plantable')
-
-  const soil = remaining.mul(plantable.oneMinus()).toVar('wSoil')
-  const vegetated = remaining.mul(plantable).toVar('vegetated')
-
-  // Lush green follows the water: the drainage lines, the seepage below a
-  // snowfield, the flat ground where it pools. Everywhere else the same turf is
-  // a dry straw-coloured sward. That single correlation does more for realism
-  // than any amount of colour noise, because it is the pattern the eye already
-  // knows from every photograph of a mountainside.
-  const lush = smoothstep(
-    0.3,
-    0.66,
-    moisture.mul(0.6).add(flow.mul(0.55)).add(raw.mul(0.3)),
-  ).toVar('lush')
-  const grass = vegetated.mul(lush).toVar('wGrass')
-  const meadow = vegetated.mul(lush.oneMinus()).toVar('wMeadow')
-
-  // Snow holds high up, on ground flat enough to keep it, and drifts deepest in
-  // the hollows — so the snow line is not a contour but a ragged edge that runs
-  // low in every gully and high on every rib.
-  const snowEdge = raw.mul(30).add(curvature.mul(-46)).toVar('snowEdge')
-  // Coverage is deliberately wide-blended in both altitude and slope. A narrow
-  // threshold snaps to whatever resolution the underlying quantity has — here
-  // the interpolated vertex normal — and the patches come out as flat polygons
-  // with aliased straight edges.
-  const snow = smoothstep(
-    286,
-    412,
-    altitude.add(regional.mul(44)).add(fray.mul(30)).add(snowEdge),
-  )
-    .mul(falloff(0.5, 0.12, slope.add(snowEdge.mul(0.01))))
-    .toVar('wSnow')
-
-  const snowFree = snow.oneMinus()
-  // Lichen grows on stable, damp, shaded rock and is absent from freshly
-  // fractured faces and from anything a rockfall keeps scouring.
-  const lichen = slow.lichen
-    .mul(smoothstep(0.26, 0.7, moisture))
-    .mul(falloff(0.6, float(-0.2), curvature))
-    .toVar('lichen')
-
+function unpackUnitPair(packed: any): { low: any; high: any } {
+  const bits = floor(packed.mul(65_535).add(0.5))
+  const highByte = floor(bits.div(256))
   return {
-    grass: grass.mul(snowFree),
-    meadow: meadow.mul(snowFree),
-    soil: soil.mul(snowFree),
-    scree: scree.mul(snowFree),
-    rock: rock.mul(snowFree),
-    snow,
-    slope,
-    moisture,
-    lichen,
+    low: bits.sub(highByte.mul(256)).div(255),
+    high: highByte.div(255),
+  }
+}
+
+/**
+ * Layer coverage is compiled from the physical state of the ground by the
+ * terrain worker. Rendering only interpolates those stable results; the cheap
+ * slope expression stays here because double-sided tunnel faces must flip the
+ * normal according to the face being drawn.
+ */
+export function layerWeights(normal: any, slow: TerrainSlowFields): LayerWeights {
+  return {
+    grass: slow.grass,
+    meadow: slow.meadow,
+    soil: slow.soil,
+    scree: slow.scree,
+    rock: slow.rock,
+    snow: slow.snow,
+    slope: clamp(normal.y.oneMinus(), 0, 1),
+    moisture: slow.moisture,
+    lichen: slow.bakedLichen,
   }
 }
 

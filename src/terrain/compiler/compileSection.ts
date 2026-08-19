@@ -32,6 +32,7 @@ import {
   hasLateralDisplacement,
 } from './TerrainField'
 import {
+  evaluateTerrainLayerWeights,
   evaluateTerrainMaterialFields,
   type TerrainMaterialFields,
 } from './TerrainMaterialFields'
@@ -1146,10 +1147,19 @@ function calculateSurfaceFields(
       cache.set(key, fields)
     }
 
+    const weights = evaluateTerrainLayerWeights(
+      x,
+      y,
+      z,
+      normals[source + 1],
+      curvature[vertex],
+      fields,
+    )
+
     packed[0].set([
-      packUnit(fields.regional * 0.5 + 0.5),
-      packUnit(fields.deposition),
-      packUnit(fields.moisture),
+      packUnitPair(weights.grass, weights.meadow),
+      packUnitPair(weights.soil, weights.scree),
+      packUnitPair(weights.rock, weights.snow),
       packUnit(fields.macro),
     ], target)
     packed[1].set([
@@ -1160,7 +1170,7 @@ function calculateSurfaceFields(
     ], target)
     packed[2].set([
       packUnit(fields.jointing),
-      packUnit(fields.lichen),
+      packUnitPair(fields.moisture, weights.lichen),
       packUnit(curvature[vertex] * 0.5 + 0.5),
       packUnit(fields.mottle),
     ], target)
@@ -1357,6 +1367,12 @@ function smoothstepNumber(low: number, high: number, value: number): number {
 
 function packUnit(value: number): number {
   return Math.round(clamp(value, 0, 1) * PACKED_UNIT_MAX)
+}
+
+function packUnitPair(low: number, high: number): number {
+  const lowByte = Math.round(clamp(low, 0, 1) * 255)
+  const highByte = Math.round(clamp(high, 0, 1) * 255)
+  return lowByte | (highByte << 8)
 }
 
 function packSigned(value: number, range: number): number {

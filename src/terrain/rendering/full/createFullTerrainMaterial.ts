@@ -149,7 +149,7 @@ export function createFullTerrainMaterial(
       .toVar('pixelFootprint')
 
     const slow = terrainSlowFields(position)
-    const weights = layerWeights(position, geometricNormal, footprint, slow)
+    const weights = layerWeights(geometricNormal, slow)
     const facing = clamp(dot(geometricNormal, view), 0, 1).toVar('surfaceFacing')
 
     const parallaxAmount = parallaxStrength(viewDistance, facing)
