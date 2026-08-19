@@ -202,6 +202,7 @@ function RockEditor({
       editor.patch({
         selectedRockId: undefined,
         selectedModifierId: modifierId,
+        selectedLightId: undefined,
         tool: 'select',
         status: `${rock.name} hidden · topology snapshotted as CSG ${operation}`,
       })

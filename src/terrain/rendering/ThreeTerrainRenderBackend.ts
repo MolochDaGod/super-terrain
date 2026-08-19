@@ -1,6 +1,8 @@
 import {
+  Box3,
   BufferAttribute,
   BufferGeometry,
+  type Camera,
   DoubleSide,
   Group,
   LineBasicMaterial,
@@ -10,6 +12,8 @@ import {
   MeshStandardNodeMaterial,
   Matrix3,
   Raycaster,
+  type Renderer,
+  type Scene,
   Vector3,
 } from 'three/webgpu'
 import { smoothstep } from '../core/bounds'
@@ -29,6 +33,12 @@ import {
 } from './createTerrainMaterialForMode'
 import type { TerrainRenderMode } from './renderModes'
 import { createSectionGeometry } from './createSectionGeometry'
+import {
+  createTerrainBrickGeometries,
+  expandTerrainBrickBounds,
+  type TerrainBrickGeometry,
+} from './TerrainBricks'
+import { TerrainHiZOcclusion } from './TerrainHiZOcclusion'
 import { invalidateTerrainShadows } from './environment/terrainShadowInvalidation'
 import {
   cloneTerrainMaterialSettings,
@@ -37,10 +47,19 @@ import {
   type TerrainMaterialSettings,
 } from './materialSettings'
 
+interface RuntimeBrick extends TerrainBrickGeometry {
+  id: string
+  mesh: Mesh
+}
+
+interface RuntimeLod {
+  source: BufferGeometry
+  bricks: RuntimeBrick[]
+}
+
 interface RuntimeSection {
   section: TerrainSection
-  mesh: Mesh
-  geometries: Map<number, BufferGeometry>
+  lods: Map<number, RuntimeLod>
   boundary: LineSegments
   gpuBytes: number
   lod: number
@@ -58,6 +77,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private readonly root: Group
   private readonly surfaceRoot: Group
   private readonly sectionSize: number
+  private readonly brickSize: number
+  private readonly occlusion = new TerrainHiZOcclusion()
   private runtime = new Map<SectionId, RuntimeSection>()
   private deferredDisposals: DeferredGeometry[] = []
   private overlay: TerrainOverlay = 'none'
@@ -86,6 +107,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     this.surfaceRoot.name = 'terrain-static-surfaces'
     this.root.add(this.surfaceRoot)
     this.sectionSize = sectionSize
+    this.brickSize = Math.max(16, sectionSize / 2)
     this.terrainMaterial = createTerrainMaterialForMode(
       this.renderMode,
       'none',
@@ -113,40 +135,30 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       (bytes, lod) => bytes + lod.gpuBytes,
       0,
     )
-    const geometries = new Map(
+    const lods = new Map(
       compiled.lods.map((lod) => [
         lod.level,
-        createSectionGeometry(lod, this.sectionSize),
+        this.createRuntimeLod(
+          section,
+          lod.level,
+          createSectionGeometry(lod, this.sectionSize),
+        ),
       ]),
     )
     let runtime = this.runtime.get(section.id)
     if (runtime) {
-      const previousMesh = runtime.mesh
-      this.deferGeometries([...runtime.geometries.values()])
-      runtime.geometries = geometries
+      this.detachActiveLod(runtime)
+      this.deferRuntimeLods(runtime.lods)
+      runtime.lods = lods
       runtime.gpuBytes = gpuBytes
       runtime.section = section
-      runtime.lod = closestAvailableLod(geometries, runtime.lod)
-      runtime.mesh = createTerrainMesh(
-        section,
-        geometries.get(runtime.lod)!,
-        this.terrainMaterial.material,
-        this.sectionSize,
-      )
-      runtime.mesh.visible = runtime.visible
-      this.surfaceRoot.remove(previousMesh)
-      this.surfaceRoot.add(runtime.mesh)
+      runtime.lod = closestAvailableLod(lods, runtime.lod)
+      this.attachActiveLod(runtime)
       this.updateBoundary(runtime, compiled)
     } else {
       const initialLod = closestAvailableLod(
-        geometries,
+        lods,
         section.requestedLod,
-      )
-      const mesh = createTerrainMesh(
-        section,
-        geometries.get(initialLod)!,
-        this.terrainMaterial.material,
-        this.sectionSize,
       )
       const boundary = createBoundary(
         section,
@@ -154,18 +166,17 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
         this.boundaryMaterials.clean,
         this.sectionSize,
       )
-      this.surfaceRoot.add(mesh)
       this.root.add(boundary)
       runtime = {
         section,
-        mesh,
-        geometries,
+        lods,
         boundary,
         gpuBytes,
         lod: initialLod,
         visible: true,
       }
       this.runtime.set(section.id, runtime)
+      this.attachActiveLod(runtime)
     }
     this.applyMaterial(runtime)
     this.setSectionState(section)
@@ -180,11 +191,12 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   setLod(sectionId: SectionId, lod: number): void {
     const runtime = this.runtime.get(sectionId)
     if (!runtime) return
-    const next = closestAvailableLod(runtime.geometries, lod)
+    const next = closestAvailableLod(runtime.lods, lod)
     if (next === runtime.lod) return
+    this.detachActiveLod(runtime)
     runtime.lod = next
     runtime.section.activeLod = next
-    runtime.mesh.geometry = runtime.geometries.get(next)!
+    this.attachActiveLod(runtime)
     this.applyMaterial(runtime)
     invalidateTerrainShadows()
   }
@@ -193,7 +205,9 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     const runtime = this.runtime.get(sectionId)
     if (!runtime || runtime.visible === visible) return
     runtime.visible = visible
-    runtime.mesh.visible = visible
+    for (const brick of this.activeBricks(runtime)) {
+      this.occlusion.setStreamVisible(brick.id, visible)
+    }
     runtime.boundary.visible = visible && this.overlay !== 'none'
     invalidateTerrainShadows()
   }
@@ -228,8 +242,12 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     )
     for (const runtime of this.runtime.values()) {
       const castsShadow = mode === 'full'
-      runtime.mesh.castShadow = castsShadow
-      runtime.mesh.receiveShadow = castsShadow
+      for (const lod of runtime.lods.values()) {
+        for (const brick of lod.bricks) {
+          brick.mesh.castShadow = castsShadow
+          brick.mesh.receiveShadow = castsShadow
+        }
+      }
       this.applyMaterial(runtime)
     }
     previous.dispose()
@@ -247,6 +265,10 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const runtime of this.runtime.values()) this.applyMaterial(runtime)
     previous.dispose()
     invalidateTerrainShadows()
+  }
+
+  updateOcclusion(renderer: Renderer, camera: Camera, scene: Scene): void {
+    this.occlusion.update(renderer, camera, scene)
   }
 
   setOverlay(overlay: TerrainOverlay): void {
@@ -292,16 +314,21 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       )
       // Only the displayed LOD needs a speculative mutation. The worker swap
       // replaces every LOD authoritatively, while keeping pointer events cheap.
+      const activeLod = runtime.lods.get(runtime.lod)!
       const maximumDisplacement = applyPreviewToGeometry(
-        runtime.mesh.geometry,
+        activeLod.source,
         minX,
         minZ,
         preview,
         sectionSamples,
       )
       if (maximumDisplacement > 0) {
-        expandPreviewBounds(runtime.mesh.geometry, maximumDisplacement)
-        this.queuePreviewRefresh(runtime.mesh.geometry)
+        expandPreviewBounds(activeLod.source, maximumDisplacement)
+        expandTerrainBrickBounds(activeLod.bricks, maximumDisplacement)
+        for (const brick of activeLod.bricks) {
+          this.occlusion.expandBounds(brick.id, maximumDisplacement)
+        }
+        this.queuePreviewRefresh(activeLod.source)
       }
     }
   }
@@ -340,7 +367,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
             sample.z - preview.radius <= originZ + this.sectionSize,
         )
         applyWeightPreviewToGeometry(
-          runtime.mesh.geometry,
+          runtime.lods.get(runtime.lod)!.source,
           originX,
           originZ,
           preview,
@@ -393,12 +420,10 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   evict(sectionId: SectionId): void {
     const runtime = this.runtime.get(sectionId)
     if (!runtime) return
-    this.surfaceRoot.remove(runtime.mesh)
+    this.detachActiveLod(runtime)
     this.root.remove(runtime.boundary)
-    this.deferGeometries([
-      ...runtime.geometries.values(),
-      runtime.boundary.geometry,
-    ])
+    this.deferRuntimeLods(runtime.lods)
+    this.deferGeometries([runtime.boundary.geometry])
     this.runtime.delete(sectionId)
     invalidateTerrainShadows()
   }
@@ -411,9 +436,15 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const runtime of this.runtime.values()) {
       gpuBytes += runtime.gpuBytes
       if (!runtime.visible) continue
+      const visibleBricks = this.activeBricks(runtime).filter(
+        (brick) => brick.mesh.visible,
+      )
+      if (visibleBricks.length === 0) continue
       visibleSections += 1
-      const count = runtime.mesh.geometry.getIndex()?.count ?? 0
-      const sectionTriangles = count / 3
+      const sectionTriangles = visibleBricks.reduce(
+        (sum, brick) => sum + brick.triangleCount,
+        0,
+      )
       triangles += sectionTriangles
       trianglesByLod[runtime.lod] =
         (trianglesByLod[runtime.lod] ?? 0) + sectionTriangles
@@ -439,6 +470,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const id of [...this.runtime.keys()]) this.evict(id)
     for (const pending of this.deferredDisposals) pending.geometry.dispose()
     this.deferredDisposals.length = 0
+    this.occlusion.dispose()
     this.root.remove(this.surfaceRoot)
     this.terrainMaterial.dispose()
     this.densityMaterial.dispose()
@@ -447,12 +479,72 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   private applyMaterial(runtime: RuntimeSection): void {
-    if (this.overlay === 'lod') {
-      runtime.mesh.material =
-        this.lodMaterials[runtime.lod] ?? this.lodMaterials.at(-1)!
+    for (const [level, lod] of runtime.lods) {
+      const material = this.overlay === 'lod'
+        ? this.lodMaterials[level] ?? this.lodMaterials.at(-1)!
+        : this.overlay === 'density'
+          ? this.densityMaterial
+          : this.terrainMaterial.material
+      for (const brick of lod.bricks) brick.mesh.material = material
     }
-    else if (this.overlay === 'density') runtime.mesh.material = this.densityMaterial
-    else runtime.mesh.material = this.terrainMaterial.material
+  }
+
+  private createRuntimeLod(
+    section: TerrainSection,
+    level: number,
+    source: BufferGeometry,
+  ): RuntimeLod {
+    const bricks = createTerrainBrickGeometries(source, this.brickSize).map(
+      (brick, index): RuntimeBrick => {
+        const id = `${section.id}/${level}/${brick.cellKey}`
+        const mesh = createTerrainMesh(
+          section,
+          brick.geometry,
+          this.terrainMaterial.material,
+          this.sectionSize,
+        )
+        mesh.name = index === 0
+          ? `terrain-section-${section.id}`
+          : `terrain-section-${section.id}-brick-${brick.cellKey}`
+        mesh.userData.terrainBrickId = id
+        const castsShadow = this.renderMode === 'full'
+        mesh.castShadow = castsShadow
+        mesh.receiveShadow = castsShadow
+        return { ...brick, id, mesh }
+      },
+    )
+    return { source, bricks }
+  }
+
+  private activeBricks(runtime: RuntimeSection): RuntimeBrick[] {
+    return runtime.lods.get(runtime.lod)?.bricks ?? []
+  }
+
+  private attachActiveLod(runtime: RuntimeSection): void {
+    for (const brick of this.activeBricks(runtime)) {
+      this.surfaceRoot.add(brick.mesh)
+      const worldBounds = brick.geometry.boundingBox
+        ? brick.geometry.boundingBox.clone().translate(brick.mesh.position)
+        : new Box3().setFromObject(brick.mesh)
+      this.occlusion.register(brick.id, brick.mesh, worldBounds)
+      this.occlusion.setStreamVisible(brick.id, runtime.visible)
+    }
+  }
+
+  private detachActiveLod(runtime: RuntimeSection): void {
+    for (const brick of this.activeBricks(runtime)) {
+      this.occlusion.unregister(brick.id)
+      this.surfaceRoot.remove(brick.mesh)
+    }
+  }
+
+  private deferRuntimeLods(lods: ReadonlyMap<number, RuntimeLod>): void {
+    const geometries: BufferGeometry[] = []
+    for (const lod of lods.values()) {
+      geometries.push(lod.source)
+      for (const brick of lod.bricks) geometries.push(brick.geometry)
+    }
+    this.deferGeometries(geometries)
   }
 
   private updateBoundary(runtime: RuntimeSection, compiled: CompiledSection): void {
@@ -505,7 +597,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
 }
 
 function closestAvailableLod(
-  geometries: ReadonlyMap<number, BufferGeometry>,
+  geometries: ReadonlyMap<number, unknown>,
   requested: number,
 ): number {
   let closest = 0

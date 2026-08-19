@@ -4,6 +4,7 @@ import type { TransformControls as TransformControlsImpl } from 'three-stdlib'
 
 interface TransformControlsRuntime {
   dragging: boolean
+  onPointerDown: (event: PointerEvent) => void
   pointerMove: (pointer: { x: number; y: number; button: number }) => void
 }
 
@@ -19,6 +20,21 @@ export function useTransformControlsPointerBridge(
   const canvas = useThree((state) => state.gl.domElement)
 
   useEffect(() => {
+    const claimTransformPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || !event.isPrimary) return
+      const controls = controlsRef.current as unknown as TransformControlsRuntime | null
+      if (!controls) return
+
+      // TransformControls normally listens on the canvas bubble phase. By
+      // then R3F objects or editor hit proxies may already have handled the
+      // pointer. Probe the gizmo in capture phase and, only when it starts a
+      // drag, keep the event away from terrain, CSG previews and camera input.
+      controls.onPointerDown(event)
+      if (!controls.dragging) return
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }
+
     const forwardPointerMove = (event: PointerEvent) => {
       const controls = controlsRef.current as unknown as TransformControlsRuntime | null
       if (!controls?.dragging) return
@@ -33,7 +49,11 @@ export function useTransformControlsPointerBridge(
       })
     }
 
+    canvas.addEventListener('pointerdown', claimTransformPointerDown, true)
     window.addEventListener('pointermove', forwardPointerMove, true)
-    return () => window.removeEventListener('pointermove', forwardPointerMove, true)
+    return () => {
+      canvas.removeEventListener('pointerdown', claimTransformPointerDown, true)
+      window.removeEventListener('pointermove', forwardPointerMove, true)
+    }
   }, [canvas, controlsRef])
 }

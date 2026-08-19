@@ -46,6 +46,7 @@ export function CsgObjectsPanel({
     editor.patch({
       selectedModifierId: id,
       selectedRockId: undefined,
+      selectedLightId: undefined,
       tool: 'select',
       status: `Editable CSG ${snapshot.csgOperation} object added`,
     })
@@ -67,6 +68,7 @@ export function CsgObjectsPanel({
       editor.patch({
         selectedModifierId: id,
         selectedRockId: undefined,
+        selectedLightId: undefined,
         tool: 'select',
         status: `${file.name} added as editable CSG ${snapshot.csgOperation}`,
       })

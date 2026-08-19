@@ -48,7 +48,7 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
   const targetFrameMs = 1000 / terrain.config.targetFps
   const violated = metrics.averageFrameMs > targetFrameMs * 1.08
   return (
-    <section className="pointer-events-none absolute bottom-10 left-[68px] z-20 w-[252px] overflow-hidden rounded-xl border border-white/[0.09] bg-[#08110f]/88 shadow-2xl shadow-black/25 backdrop-blur-xl sm:w-[286px]">
+    <section className="pointer-events-none absolute bottom-10 left-[68px] z-20 hidden w-[286px] overflow-hidden rounded-xl border border-white/[0.09] bg-[#08110f]/88 shadow-2xl shadow-black/25 backdrop-blur-xl lg:block">
       <div className="flex items-center justify-between border-b border-white/[0.07] px-3.5 py-2.5">
         <div className="flex items-center gap-2 text-[9px] font-semibold uppercase tracking-[0.14em] text-white/42">
           <Gauge size={12} />

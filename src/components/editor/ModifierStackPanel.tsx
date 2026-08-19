@@ -63,6 +63,7 @@ function ModifierStackPanelView({
                 editor.patch({
                   selectedModifierId: modifier.id,
                   selectedRockId: undefined,
+                  selectedLightId: undefined,
                   status: `${modifierLabel(modifier)} selected`,
                 })
               }

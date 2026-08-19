@@ -5,14 +5,20 @@ import {
   WebGPURenderer,
   type WebGPURendererParameters,
 } from 'three/webgpu'
+import { installClusteredWebgpuLighting } from '@workspace/clustered-webgpu-lighting'
 
-export function WebGpuCanvas({ children }: PropsWithChildren) {
+interface WebGpuCanvasProps extends PropsWithChildren {
+  dpr: number
+}
+
+export function WebGpuCanvas({ children, dpr }: WebGpuCanvasProps) {
   const rendererPromise = useRef<Promise<WebGPURenderer> | null>(null)
+  const initialDpr = useRef(dpr)
   const createRenderer = useCallback((canvas: HTMLCanvasElement) => {
     // R3F v9 can re-enter an async gl factory while it is still resolving.
     // Returning one in-flight renderer prevents two WebGPU contexts from
     // racing to own the same canvas with differently sized depth targets.
-    rendererPromise.current ??= createWebGpuRenderer(canvas)
+    rendererPromise.current ??= createWebGpuRenderer(canvas, initialDpr.current)
     return rendererPromise.current
   }, [])
 
@@ -27,7 +33,7 @@ export function WebGpuCanvas({ children }: PropsWithChildren) {
         near: 0.5,
         far: 80_000,
       }}
-      dpr={[1, 1.6]}
+      dpr={dpr}
       frameloop="always"
       performance={{ min: 0.5, max: 1, debounce: 300 }}
     >
@@ -36,7 +42,7 @@ export function WebGpuCanvas({ children }: PropsWithChildren) {
   )
 }
 
-async function createWebGpuRenderer(canvas: HTMLCanvasElement) {
+async function createWebGpuRenderer(canvas: HTMLCanvasElement, dpr: number) {
   if (!navigator.gpu) throw new Error('WebGPU is unavailable in this browser')
   const parameters: WebGPURendererParameters = {
     canvas,
@@ -47,21 +53,22 @@ async function createWebGpuRenderer(canvas: HTMLCanvasElement) {
   const renderer = new WebGPURenderer(parameters)
   renderer.toneMapping = ACESFilmicToneMapping
   renderer.toneMappingExposure = 1.08
-  sizeRendererToCanvas(renderer, canvas)
+  sizeRendererToCanvas(renderer, canvas, dpr)
   await renderer.init()
+  installClusteredWebgpuLighting(renderer)
   // The CSS layout may settle while requestAdapter/requestDevice is pending.
   // Refresh every attachment before R3F submits the first render pass.
-  sizeRendererToCanvas(renderer, canvas)
+  sizeRendererToCanvas(renderer, canvas, dpr)
   return renderer
 }
 
 function sizeRendererToCanvas(
   renderer: WebGPURenderer,
   canvas: HTMLCanvasElement,
+  dpr: number,
 ): void {
   const bounds = canvas.getBoundingClientRect()
-  const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.6)
-  renderer.setPixelRatio(pixelRatio)
+  renderer.setPixelRatio(dpr)
   renderer.setSize(
     Math.max(1, Math.round(bounds.width)),
     Math.max(1, Math.round(bounds.height)),

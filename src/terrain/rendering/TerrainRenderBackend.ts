@@ -1,4 +1,4 @@
-import type { Raycaster, Vector3 } from 'three'
+import type { Camera, Raycaster, Renderer, Scene, Vector3 } from 'three/webgpu'
 import type {
   BrushDomain,
   BrushMode,
@@ -61,6 +61,8 @@ export interface TerrainRenderBackend {
   setOverlay(overlay: TerrainOverlay): void
   setRenderMode(mode: TerrainRenderMode): void
   setMaterialSettings(settings: TerrainMaterialSettings): void
+  /** Builds current-camera depth from last-visible bricks and applies Hi-Z. */
+  updateOcclusion(renderer: Renderer, camera: Camera, scene: Scene): void
   previewBrush(preview: PreviewBrush): void
   previewWeightPaint(preview: PreviewWeightPaint): void
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined

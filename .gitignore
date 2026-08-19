@@ -9,6 +9,9 @@ lerna-debug.log*
 
 node_modules
 dist
+!packages/clustered-webgpu-lighting/dist/
+!packages/clustered-webgpu-lighting/dist/index.js
+!packages/clustered-webgpu-lighting/dist/index.d.ts
 dist-ssr
 *.local
 

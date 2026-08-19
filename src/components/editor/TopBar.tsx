@@ -9,6 +9,8 @@ import {
   RotateCcw,
   Save,
   Sparkles,
+  Eye,
+  Wrench,
 } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
@@ -42,6 +44,7 @@ export function TopBar({ terrain, editor }: TopBarProps) {
       activeSculptLayerId: terrain.getSculptLayers()[0]?.id,
       selectedModifierId: undefined,
       selectedRockId: undefined,
+      selectedLightId: undefined,
       status: 'Terrain reset; sections rebuilding asynchronously',
     })
   }
@@ -109,7 +112,37 @@ export function TopBar({ terrain, editor }: TopBarProps) {
             <Gem size={12} /> Full
           </RenderModeButton>
         </div>
-        <div className="mr-1 hidden items-center gap-2 rounded-md border border-white/[0.07] bg-white/[0.035] px-2.5 py-1.5 lg:flex">
+        <div
+          className="mr-1 flex items-center gap-0.5 rounded-md border border-white/[0.07] bg-white/[0.035] p-0.5"
+          role="group"
+          aria-label="Viewport pixel ratio"
+        >
+          <span className="hidden px-1 font-mono text-[8px] uppercase tracking-[0.1em] text-white/28 2xl:inline">
+            DPR
+          </span>
+          <RenderModeButton
+            active={editorSnapshot.dprMode === 'low'}
+            label="Low DPR — 0.75×"
+            onClick={() => editor.patch({ dprMode: 'low' })}
+          >
+            Low
+          </RenderModeButton>
+          <RenderModeButton
+            active={editorSnapshot.dprMode === 'medium'}
+            label="Medium DPR — 1×"
+            onClick={() => editor.patch({ dprMode: 'medium' })}
+          >
+            Med
+          </RenderModeButton>
+          <RenderModeButton
+            active={editorSnapshot.dprMode === 'full'}
+            label="Full DPR — native display resolution"
+            onClick={() => editor.patch({ dprMode: 'full' })}
+          >
+            Full
+          </RenderModeButton>
+        </div>
+        <div className="mr-1 hidden items-center gap-2 rounded-md border border-white/[0.07] bg-white/[0.035] px-2.5 py-1.5 2xl:flex">
           <Activity size={12} className="text-[#77e8be]" />
           <span className="font-mono text-[9px] tabular-nums text-white/55">
             {metrics.fps.toFixed(0)} FPS
@@ -137,6 +170,26 @@ export function TopBar({ terrain, editor }: TopBarProps) {
         >
           <HelpCircle size={14} />
         </TopButton>
+        <div
+          className="ml-1 flex items-center gap-0.5 rounded-md border border-white/[0.09] bg-white/[0.045] p-0.5"
+          role="group"
+          aria-label="UI view mode"
+        >
+          <RenderModeButton
+            active={editorSnapshot.uiViewMode === 'editor'}
+            label="Editor overlays"
+            onClick={() => editor.patch({ uiViewMode: 'editor' })}
+          >
+            <Wrench size={12} /> <span className="hidden xl:inline">Editor</span>
+          </RenderModeButton>
+          <RenderModeButton
+            active={editorSnapshot.uiViewMode === 'clean'}
+            label="Clean viewport — hide editor overlays"
+            onClick={() => editor.patch({ uiViewMode: 'clean' })}
+          >
+            <Eye size={12} /> <span className="hidden xl:inline">Clean</span>
+          </RenderModeButton>
+        </div>
       </div>
     </header>
   )

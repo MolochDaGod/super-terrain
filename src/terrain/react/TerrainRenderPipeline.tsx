@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { ACESFilmicToneMapping, AgXToneMapping, PCFSoftShadowMap } from 'three/webgpu'
-import type { Renderer, Scene } from 'three/webgpu'
+import type { Camera, Renderer, Scene } from 'three/webgpu'
 import { createTerrainRenderPipeline } from '../rendering/post/createTerrainRenderPipeline'
 import type { TerrainRenderMode } from '../rendering/renderModes'
 
 export interface TerrainRenderPipelineProps {
   mode: TerrainRenderMode
   onCompilingChange?: (compiling: boolean) => void
+  beforeRender?: (renderer: Renderer, scene: Scene, camera: Camera) => void
 }
 
 /**
@@ -25,6 +26,7 @@ export interface TerrainRenderPipelineProps {
 export function TerrainRenderPipeline({
   mode,
   onCompilingChange,
+  beforeRender,
 }: TerrainRenderPipelineProps) {
   const { gl, scene, camera, size } = useThree()
   const [readyMode, setReadyMode] = useState<TerrainRenderMode | null>(null)
@@ -81,6 +83,11 @@ export function TerrainRenderPipeline({
     // Holding the previous frame for a moment is a far better failure mode than
     // submitting work that outlives the watchdog.
     if (readyMode !== mode) return
+    beforeRender?.(
+      gl as unknown as Renderer,
+      scene as unknown as Scene,
+      camera,
+    )
     rendering.pipeline.render()
   }, 1)
 

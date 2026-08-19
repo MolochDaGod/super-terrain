@@ -105,6 +105,7 @@ export function GraniteRockPanel({
       rockParameters: { ...recipe },
       selectedRockId: id,
       selectedModifierId: undefined,
+      selectedLightId: undefined,
       tool: 'select',
       transformMode: 'translate',
       status,
@@ -239,6 +240,7 @@ export function GraniteRockPanel({
                 editor.patch({
                   selectedRockId: rock.id,
                   selectedModifierId: undefined,
+                  selectedLightId: undefined,
                   tool: 'select',
                   status: `${rock.name} selected`,
                 })

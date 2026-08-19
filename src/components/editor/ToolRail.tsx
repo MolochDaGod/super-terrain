@@ -22,7 +22,11 @@ export function ToolRail({ editor }: { editor: EditorStore }) {
             className="tool-button group relative"
             data-active={snapshot.tool === tool.id}
             onClick={() =>
-              editor.patch({ tool: tool.id, status: `${tool.label} tool active` })
+              editor.patch({
+                tool: tool.id,
+                selectedLightId: undefined,
+                status: `${tool.label} tool active`,
+              })
             }
           >
             <tool.icon size={17} strokeWidth={1.7} />

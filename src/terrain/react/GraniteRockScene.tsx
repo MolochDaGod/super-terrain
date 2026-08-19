@@ -65,10 +65,14 @@ export function GraniteRockScene({
           rock={rock}
           terrain={terrain}
           editor={editor}
-          selected={editorSnapshot.selectedRockId === rock.id}
+          selected={
+            editorSnapshot.uiViewMode === 'editor' &&
+            editorSnapshot.selectedRockId === rock.id
+          }
           transformMode={editorSnapshot.transformMode}
           editable={
             editorSnapshot.tool === 'select' &&
+            editorSnapshot.uiViewMode === 'editor' &&
             editorSnapshot.cameraMode === 'orbit'
           }
         />
@@ -236,7 +240,11 @@ function GraniteRockObject({
     const drawable = drawableGraniteLodWeights(materialBundle.weights)
     for (let level = 0; level < 3; level += 1) {
       const mesh = lodMeshes.current[level]
-      if (mesh) mesh.visible = drawable[level]! > 0.002
+      if (mesh) {
+        const visible = drawable[level]! > 0.002
+        mesh.userData.hizDesiredVisible = visible
+        mesh.visible = visible
+      }
     }
     materialBundle.boundaries.first.value = drawable[0]
     materialBundle.boundaries.second.value = drawable[0] + drawable[1]
@@ -314,12 +322,17 @@ function GraniteRockObject({
         name={rock.name}
         visible={rock.visible}
         onPointerDown={(event) => {
+          if (editor.getSnapshot().uiViewMode === 'clean') return
           event.stopPropagation()
-          editor.patch({
-            tool: 'select',
-            selectedRockId: rock.id,
-            selectedModifierId: undefined,
-            status: `${rock.name} selected · topology is CSG-ready`,
+          queueMicrotask(() => {
+            if (editor.getSnapshot().dragging) return
+            editor.patch({
+              tool: 'select',
+              selectedRockId: rock.id,
+              selectedModifierId: undefined,
+              selectedLightId: undefined,
+              status: `${rock.name} selected · topology is CSG-ready`,
+            })
           })
         }}
       >
@@ -337,6 +350,10 @@ function GraniteRockObject({
                 renderOrder={level}
                 castShadow
                 receiveShadow
+                userData={{
+                  hizCullable: true,
+                  hizDesiredVisible: level === lodLevel,
+                }}
               />
             ))}
             {selected && (

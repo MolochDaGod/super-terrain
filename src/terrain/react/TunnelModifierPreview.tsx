@@ -12,6 +12,7 @@ import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
 import { transformedTunnel } from '../modifiers/transform'
 import { tunnelPathPoints } from '../modifiers/tunnel'
+import { ignoreRaycast } from './ignoreRaycast'
 
 const SEGMENT_COUNT = 3
 const CONTROL_POINT_COUNT = 4
@@ -102,6 +103,7 @@ export function TunnelModifierPreview({
           }}
           geometry={cylinder}
           material={material}
+          raycast={ignoreRaycast}
         />
       ))}
       {Array.from({ length: CONTROL_POINT_COUNT }, (_, index) => (
@@ -112,6 +114,7 @@ export function TunnelModifierPreview({
           }}
           geometry={sphere}
           material={material}
+          raycast={ignoreRaycast}
         />
       ))}
     </group>

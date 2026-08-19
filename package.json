@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -16,6 +19,7 @@
     "survey": "vite build --config tools/capture/vite.config.ts --ssr tools/capture/survey.ts --outDir .capture/survey && node .capture/survey/capture.mjs"
   },
   "dependencies": {
+    "@workspace/clustered-webgpu-lighting": "workspace:*",
     "@react-three/drei": "^10.7.8",
     "@react-three/fiber": "^9.7.0",
     "lucide-react": "^1.31.0",
@@ -24,7 +28,8 @@
     "react-dom": "^19.2.8",
     "three": "^0.185.1",
     "three-bvh-csg": "^0.0.18",
-    "three-mesh-bvh": "^0.9.14"
+    "three-mesh-bvh": "^0.9.14",
+    "three-stdlib": "^2.36.1"
   },
   "devDependencies": {
     "@kmamal/gpu": "0.1.6",

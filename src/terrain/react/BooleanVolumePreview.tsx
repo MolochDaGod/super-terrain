@@ -8,6 +8,7 @@ import {
   useEditorSnapshot,
   useModifierRevision,
 } from './hooks'
+import { ignoreRaycast } from './ignoreRaycast'
 
 export function BooleanVolumePreview({
   terrain,
@@ -62,7 +63,7 @@ export function BooleanVolumePreview({
   return (
     <group renderOrder={9_998}>
       {meshes.map((mesh, index) => (
-        <primitive key={index} object={mesh} />
+        <primitive key={index} object={mesh} raycast={ignoreRaycast} />
       ))}
     </group>
   )

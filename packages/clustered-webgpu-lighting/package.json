@@ -1,0 +1,22 @@
+{
+  "name": "@workspace/clustered-webgpu-lighting",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target browser --format esm --external three --external three/webgpu --external three/tsl"
+  },
+  "peerDependencies": {
+    "three": "^0.185.0"
+  },
+  "devDependencies": {
+    "three": "^0.185.0",
+    "typescript": "~6"
+  }
+}

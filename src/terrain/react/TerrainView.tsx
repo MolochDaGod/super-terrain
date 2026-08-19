@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
-import { Group, PerspectiveCamera, Vector2 } from 'three/webgpu'
+import { PerspectiveCamera, Vector2, type Group } from 'three/webgpu'
 import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
 import { ThreeTerrainRenderBackend } from '../rendering/ThreeTerrainRenderBackend'
@@ -10,14 +10,16 @@ import { useEditorSnapshot } from './hooks'
 interface TerrainViewProps {
   terrain: WorldTerrain
   editor: EditorStore
+  group: Group
+  backend: ThreeTerrainRenderBackend
 }
 
-export function TerrainView({ terrain, editor }: TerrainViewProps) {
-  const group = useMemo(() => new Group(), [])
-  const backend = useMemo(
-    () => new ThreeTerrainRenderBackend(group, terrain.config.sectionSize),
-    [group, terrain.config.sectionSize],
-  )
+export function TerrainView({
+  terrain,
+  editor,
+  group,
+  backend,
+}: TerrainViewProps) {
   const { camera, gl, raycaster, size } = useThree()
   const { cameraMode, renderMode } = useEditorSnapshot(editor)
   const pointer = useMemo(() => new Vector2(), [])
@@ -51,7 +53,7 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
 
     const onPointerMove = (event: PointerEvent) => {
       const snapshot = editor.getSnapshot()
-      if (snapshot.cameraMode === 'fly') {
+      if (snapshot.cameraMode === 'fly' || snapshot.uiViewMode === 'clean') {
         editor.hideCursor()
         return
       }
@@ -75,7 +77,11 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
 
     const onPointerDown = (event: PointerEvent) => {
       const snapshot = editor.getSnapshot()
-      if (snapshot.cameraMode === 'fly' || snapshot.dragging) return
+      if (
+        snapshot.cameraMode === 'fly' ||
+        snapshot.uiViewMode === 'clean' ||
+        snapshot.dragging
+      ) return
       if (
         event.button !== 0 ||
         event.altKey ||
@@ -97,7 +103,11 @@ export function TerrainView({ terrain, editor }: TerrainViewProps) {
       canvas.setPointerCapture(event.pointerId)
       const modifierId = terrain.beginStroke(hit.point, hit.normal, snapshot)
       if (modifierId) {
-        editor.patch({ selectedModifierId: modifierId, selectedRockId: undefined })
+        editor.patch({
+          selectedModifierId: modifierId,
+          selectedRockId: undefined,
+          selectedLightId: undefined,
+        })
       }
     }
 

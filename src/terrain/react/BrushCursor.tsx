@@ -42,7 +42,10 @@ export function BrushCursor({ editor }: BrushCursorProps) {
     const cursor = mesh.current
     if (!cursor) return
     const snapshot = editor.getSnapshot()
-    cursor.visible = snapshot.cursorVisible && snapshot.tool !== 'select'
+    cursor.visible =
+      snapshot.uiViewMode === 'editor' &&
+      snapshot.cursorVisible &&
+      snapshot.tool !== 'select'
     cursorNormal
       .set(
         snapshot.brushDomain === 'mesh' || snapshot.tool === 'paint'

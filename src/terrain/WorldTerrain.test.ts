@@ -271,6 +271,7 @@ function fakeRenderer(
     setOverlay() {},
     setRenderMode() {},
     setMaterialSettings() {},
+    updateOcclusion() {},
     previewBrush,
     previewWeightPaint,
     raycast: () => undefined,

@@ -11,6 +11,13 @@ import {
   DEFAULT_GRANITE_ROCK_PARAMETERS,
   type GraniteRockParameters,
 } from '../rocks/types'
+import {
+  createEditorLight,
+  patchEditorLight,
+  type EditorLight,
+  type EditorLightPatch,
+  type EditorLightType,
+} from './lights'
 
 export type EditorTool =
   | 'select'
@@ -38,6 +45,8 @@ export type TerrainOverlay =
   | 'streaming'
 
 export type CameraMode = 'orbit' | 'fly'
+export type UiViewMode = 'editor' | 'clean'
+export type DprMode = 'low' | 'medium' | 'full'
 
 /** Scene sections in the inspector. One is open at a time. */
 export type InspectorSection =
@@ -89,6 +98,8 @@ export interface EditorSnapshot {
   openSection?: InspectorSection
   renderMode: TerrainRenderMode
   cameraMode: CameraMode
+  uiViewMode: UiViewMode
+  dprMode: DprMode
   showHud: boolean
   showHelp: boolean
   cursorPosition: Vec3Like
@@ -98,6 +109,8 @@ export interface EditorSnapshot {
   selectedSection?: SectionId
   selectedModifierId?: string
   selectedRockId?: string
+  selectedLightId?: string
+  lights: readonly EditorLight[]
   status: string
 }
 
@@ -123,14 +136,19 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   openSection: 'modifiers',
   renderMode: 'preview',
   cameraMode: 'orbit',
+  uiViewMode: 'editor',
+  dprMode: 'medium',
   showHud: true,
   showHelp: false,
   cursorPosition: { x: 0, y: 0, z: 0 },
   cursorNormal: { x: 0, y: 1, z: 0 },
   cursorVisible: false,
   dragging: false,
+  lights: [],
   status: 'World ready',
 }
+
+let nextLightId = 1
 
 export class EditorStore extends ExternalStore<EditorSnapshot> {
   constructor() {
@@ -156,5 +174,67 @@ export class EditorStore extends ExternalStore<EditorSnapshot> {
 
   hideCursor(): void {
     this.patch({ cursorVisible: false })
+  }
+
+  addLight(type: EditorLightType): string {
+    const snapshot = this.getSnapshot()
+    const position = snapshot.cursorVisible
+      ? {
+          x: snapshot.cursorPosition.x,
+          y: snapshot.cursorPosition.y + 18,
+          z: snapshot.cursorPosition.z,
+        }
+      : { x: 0, y: 80, z: 0 }
+    const typeIndex =
+      snapshot.lights.filter((light) => light.type === type).length + 1
+    const id = `light-${nextLightId++}`
+    const light = createEditorLight(type, id, typeIndex, position)
+    this.patch({
+      lights: [...snapshot.lights, light],
+      selectedLightId: id,
+      selectedModifierId: undefined,
+      selectedRockId: undefined,
+      tool: 'select',
+      transformMode: 'translate',
+      status: `${light.name} added at ${snapshot.cursorVisible ? 'terrain cursor' : 'world origin'}`,
+    })
+    return id
+  }
+
+  updateLight(id: string, values: EditorLightPatch): void {
+    const snapshot = this.getSnapshot()
+    this.patch({
+      lights: snapshot.lights.map((light) =>
+        light.id === id ? patchEditorLight(light, values) : light,
+      ),
+    })
+  }
+
+  selectLight(id: string): void {
+    const light = this.getSnapshot().lights.find((entry) => entry.id === id)
+    if (!light) return
+    this.patch({
+      selectedLightId: id,
+      selectedModifierId: undefined,
+      selectedRockId: undefined,
+      tool: 'select',
+      transformMode:
+        light.type === 'spot' && this.getSnapshot().transformMode === 'rotate'
+          ? 'rotate'
+          : 'translate',
+      status: `${light.name} selected`,
+    })
+  }
+
+  removeLight(id: string): void {
+    const snapshot = this.getSnapshot()
+    const light = snapshot.lights.find((entry) => entry.id === id)
+    if (!light) return
+    this.patch({
+      lights: snapshot.lights.filter((entry) => entry.id !== id),
+      selectedLightId:
+        snapshot.selectedLightId === id ? undefined : snapshot.selectedLightId,
+      status: `${light.name} removed`,
+    })
   }
 }

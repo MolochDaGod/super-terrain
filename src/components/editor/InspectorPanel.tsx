@@ -19,6 +19,7 @@ import { SelectionPanel } from './SelectionPanel'
 import { Section, CollapsibleSection } from './ui/Section'
 import { Segmented, type SegmentedOption } from './ui/Segmented'
 import { TOOL_BY_ID } from './tools'
+import { LightInspectorSection } from './LightInspectorSection'
 
 const OVERLAYS: SegmentedOption<TerrainOverlay>[] = [
   { value: 'none', label: 'Clean' },
@@ -47,6 +48,9 @@ export function InspectorPanel({
 }) {
   const snapshot = useEditorSnapshot(editor)
   const tool = TOOL_BY_ID[snapshot.tool]
+  const selectedLight = snapshot.selectedLightId
+    ? snapshot.lights.find((light) => light.id === snapshot.selectedLightId)
+    : undefined
 
   // Switching tools reveals the section that tool works with, so the panel
   // under the parameters is always the relevant one without any scrolling.
@@ -72,6 +76,9 @@ export function InspectorPanel({
 
   return (
     <aside className="pointer-events-auto absolute bottom-9 right-3 top-[68px] z-20 hidden w-[268px] overflow-y-auto rounded-xl border border-white/[0.09] bg-[#0b1312]/92 shadow-2xl shadow-black/30 backdrop-blur-xl md:block">
+      {selectedLight ? (
+        <LightInspectorSection light={selectedLight} editor={editor} />
+      ) : (
       <Section icon={tool.icon} title={tool.label} badge={tool.shortcut}>
         <div className="flex items-start gap-2 text-[11px] leading-relaxed text-white/34">
           <Info size={12} className="mt-0.5 shrink-0 text-white/22" />
@@ -190,6 +197,7 @@ export function InspectorPanel({
           </>
         )}
       </Section>
+      )}
 
       <SelectionPanel terrain={terrain} editor={editor} />
 

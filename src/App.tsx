@@ -3,6 +3,7 @@ import { AlertTriangle, Cpu } from 'lucide-react'
 import { EditorShortcuts } from './components/editor/EditorShortcuts'
 import { HelpOverlay } from './components/editor/HelpOverlay'
 import { InspectorPanel } from './components/editor/InspectorPanel'
+import { LightsPanel } from './components/editor/LightsPanel'
 import { PerformanceHud } from './components/editor/PerformanceHud'
 import { StatusBar } from './components/editor/StatusBar'
 import { ToolRail } from './components/editor/ToolRail'
@@ -11,10 +12,13 @@ import { WorldTerrain } from './terrain/WorldTerrain'
 import { EditorStore } from './terrain/editor/EditorStore'
 import { TerrainScene } from './terrain/react/TerrainScene'
 import { WebGpuCanvas } from './terrain/react/WebGpuCanvas'
+import { useEditorSnapshot } from './terrain/react/hooks'
 
 function App() {
   const terrain = useMemo(() => new WorldTerrain(), [])
   const editor = useMemo(() => new EditorStore(), [])
+  const editorSnapshot = useEditorSnapshot(editor)
+  const editorUiVisible = editorSnapshot.uiViewMode === 'editor'
   const webGpuAvailable = typeof navigator !== 'undefined' && Boolean(navigator.gpu)
 
   useEffect(() => {
@@ -33,11 +37,15 @@ function App() {
     }
   }, [editor, terrain])
 
+  useEffect(() => {
+    terrain.setOverlay(editorUiVisible ? editorSnapshot.overlay : 'none')
+  }, [editorSnapshot.overlay, editorUiVisible, terrain])
+
   return (
     <main className="relative h-svh w-full overflow-hidden bg-[#07100f] text-white">
       {webGpuAvailable ? (
         <div className="absolute inset-0">
-          <WebGpuCanvas>
+          <WebGpuCanvas dpr={dprForMode(editorSnapshot.dprMode)}>
             <TerrainScene terrain={terrain} editor={editor} />
           </WebGpuCanvas>
         </div>
@@ -45,17 +53,30 @@ function App() {
         <WebGpuUnavailable />
       )}
 
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,transparent_35%,rgba(2,8,7,0.34)_100%)]" />
+      {editorUiVisible && (
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,transparent_35%,rgba(2,8,7,0.34)_100%)]" />
+      )}
       <TopBar terrain={terrain} editor={editor} />
-      <ToolRail editor={editor} />
-      <InspectorPanel terrain={terrain} editor={editor} />
-      <PerformanceHud terrain={terrain} editor={editor} />
+      {editorUiVisible && (
+        <>
+          <ToolRail editor={editor} />
+          <LightsPanel editor={editor} />
+          <InspectorPanel terrain={terrain} editor={editor} />
+          <PerformanceHud terrain={terrain} editor={editor} />
+          <HelpOverlay editor={editor} />
+          <EditorShortcuts editor={editor} />
+        </>
+      )}
       <StatusBar terrain={terrain} editor={editor} />
-      <HelpOverlay editor={editor} />
-      <EditorShortcuts editor={editor} />
-
     </main>
   )
+}
+
+function dprForMode(mode: 'low' | 'medium' | 'full'): number {
+  const nativeDpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1
+  if (mode === 'low') return Math.min(nativeDpr, 0.75)
+  if (mode === 'medium') return Math.min(nativeDpr, 1)
+  return nativeDpr
 }
 
 function WebGpuUnavailable() {
