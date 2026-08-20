@@ -39,7 +39,13 @@ export function recommendedTerrainWorkerCount(logicalCores: number): number {
 }
 
 export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
-  worldSize: 16_384,
+  // 4 km x 4 km. The demo world only ever authors and renders the massif
+  // around the origin, and a 16 km logical extent bought nothing for it: the
+  // far-field proxy mesh scaled with the square of the world size, the horizon
+  // residency mask grew with it, and every metre past the haze horizon is
+  // invisible anyway. Four kilometres still puts the far ridges beyond where
+  // aerial perspective has dissolved them.
+  worldSize: 4_096,
   sectionSize: 128,
   // The finest resolution creates the authoritative section mesh. Coarser
   // values define QEM triangle-count targets; borders and authored features

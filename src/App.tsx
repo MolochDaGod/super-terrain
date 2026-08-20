@@ -13,17 +13,32 @@ import { EditorStore } from './terrain/editor/EditorStore'
 import { TerrainScene } from './terrain/react/TerrainScene'
 import { WebGpuCanvas } from './terrain/react/WebGpuCanvas'
 import { useEditorSnapshot } from './terrain/react/hooks'
+import { currentViewUrlState } from './terrain/react/viewUrlState'
 
 function App() {
   const terrain = useMemo(() => new WorldTerrain(), [])
   const editor = useMemo(() => new EditorStore(), [])
+  const view = useMemo(() => currentViewUrlState(), [])
   const editorSnapshot = useEditorSnapshot(editor)
-  const editorUiVisible = editorSnapshot.uiViewMode === 'editor'
+  const editorUiVisible = editorSnapshot.uiViewMode === 'editor' && !view.hideUi
   const webGpuAvailable = typeof navigator !== 'undefined' && Boolean(navigator.gpu)
+
+  // A URL viewpoint is how the browser review harness reproduces a frame, and
+  // the render mode has to come with it: `preview` is a different material.
+  useEffect(() => {
+    if (view.quality) editor.patch({ renderMode: view.quality })
+    // `clean` is what actually removes the in-scene overlays — modifier bounds,
+    // CSG volume previews, brush cursor. Hiding only the panels leaves those
+    // floating in the frame, which is how a review capture ends up with
+    // translucent lenses hanging over the terrain.
+    if (view.hideUi) editor.patch({ cursorVisible: false, uiViewMode: 'clean' })
+  }, [editor, view])
 
   useEffect(() => {
     let active = true
-    void terrain.initialize().then(() => {
+    // `?reset=1` discards the saved world, so the frame is of the shipped scene
+    // and not of whatever this browser profile cached from an earlier build.
+    void terrain.initialize({ discardSavedWorld: view.reset }).then(() => {
       if (active) {
         editor.patch({
           activeSculptLayerId: terrain.getSculptLayers()[0]?.id,
@@ -34,6 +49,17 @@ function App() {
     return () => {
       active = false
       terrain.dispose()
+    }
+  }, [editor, terrain, view])
+
+  // Handle for the screenshot harness: it polls streaming telemetry to know
+  // when a frame has actually settled instead of guessing with a timeout.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const globals = globalThis as Record<string, unknown>
+    globals.__meshterrain = { terrain, editor }
+    return () => {
+      delete globals.__meshterrain
     }
   }, [editor, terrain])
 
@@ -56,7 +82,7 @@ function App() {
       {editorUiVisible && (
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,transparent_35%,rgba(2,8,7,0.34)_100%)]" />
       )}
-      <TopBar terrain={terrain} editor={editor} />
+      {!view.hideUi && <TopBar terrain={terrain} editor={editor} />}
       {editorUiVisible && (
         <>
           <ToolRail editor={editor} />
@@ -67,7 +93,7 @@ function App() {
           <EditorShortcuts editor={editor} />
         </>
       )}
-      <StatusBar terrain={terrain} editor={editor} />
+      {!view.hideUi && <StatusBar terrain={terrain} editor={editor} />}
     </main>
   )
 }

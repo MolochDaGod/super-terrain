@@ -32,7 +32,7 @@ export interface TerrainEnvironment {
 
 const SKY_SCALE = 45_000
 /** Divides the Preetham dome down into the scene's linear lighting range. */
-const SKY_INTENSITY = 0.1
+const SKY_INTENSITY = 0.078
 
 export interface TerrainEnvironmentOptions {
   /** Cascaded shadows. Disable to fall back to one wide shadow frustum. */
@@ -84,10 +84,13 @@ function createFullEnvironment(
   sky.material.colorNode = (sky.material.colorNode as any).mul(skyIntensity)
   group.add(sky)
 
-  const sun = new DirectionalLight(0xffeec4, 1.15)
+  // A 7-degree sun has lost most of its blue to the long atmospheric path, and
+  // what is left is strong: the reference frame's lit rock is a warm gold at
+  // several times the brightness of its own sky-lit shade.
+  const sun = new DirectionalLight(0xffb578, 2.6)
   sun.position.copy(DEFAULT_SUN.direction).multiplyScalar(2_400)
   sun.castShadow = options.shadows ?? true
-  sun.shadow.mapSize.set(2048, 2048)
+  sun.shadow.mapSize.set(1536, 1536)
   sun.shadow.bias = -0.0004
   sun.shadow.normalBias = 0.35
   // The terrain, sun and camera are persistent. Redrawing four 2048² maps
@@ -100,9 +103,13 @@ function createFullEnvironment(
   // Sky bounce. Ground colour is the average of the dry-grass and rock albedo
   // so shadowed slopes pick up the same family of hues as the lit ones, and
   // the sky colour is what keeps shadows blue instead of merely dark.
-  const skyFill = new HemisphereLight(0x86b6ec, 0x413c2d, 0.16)
+  // At sunset the sky is the *only* light on everything the sun cannot see,
+  // which is most of the frame. Underfilling it is what turns a backlit valley
+  // into a black cut-out: the reference keeps readable blue-grey texture in
+  // every shadow, and this is where that comes from.
+  const skyFill = new HemisphereLight(0x7ea6dc, 0x5a4a35, 2.0)
   group.add(skyFill)
-  const ambient = new AmbientLight(0x4a5a74, 0.035)
+  const ambient = new AmbientLight(0x50628a, 0.4)
   group.add(ambient)
 
   // Cascades. One shadow map stretched over kilometres gives metre-wide texels
@@ -113,8 +120,8 @@ function createFullEnvironment(
   let cascades: CSMShadowNode | undefined
   if (sun.castShadow && (options.cascadedShadows ?? true)) {
     cascades = new CSMShadowNode(sun, {
-      cascades: 4,
-      maxFar: 3_000,
+      cascades: 3,
+      maxFar: 2_200,
       mode: 'practical',
       lightMargin: 800,
     })

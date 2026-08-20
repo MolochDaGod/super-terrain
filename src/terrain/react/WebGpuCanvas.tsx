@@ -6,6 +6,7 @@ import {
   type WebGPURendererParameters,
 } from 'three/webgpu'
 import { installClusteredWebgpuLighting } from '@workspace/clustered-webgpu-lighting'
+import { currentViewUrlState } from './viewUrlState'
 
 interface WebGpuCanvasProps extends PropsWithChildren {
   dpr: number
@@ -14,6 +15,7 @@ interface WebGpuCanvasProps extends PropsWithChildren {
 export function WebGpuCanvas({ children, dpr }: WebGpuCanvasProps) {
   const rendererPromise = useRef<Promise<WebGPURenderer> | null>(null)
   const initialDpr = useRef(dpr)
+  const view = useRef(currentViewUrlState())
   const createRenderer = useCallback((canvas: HTMLCanvasElement) => {
     // R3F v9 can re-enter an async gl factory while it is still resolving.
     // Returning one in-flight renderer prevents two WebGPU contexts from
@@ -28,12 +30,19 @@ export function WebGpuCanvas({ children, dpr }: WebGpuCanvasProps) {
         createRenderer(defaults.canvas as HTMLCanvasElement)
       }
       camera={{
-        position: [230, 280, -90],
-        fov: 48,
+        position: view.current.position ?? [230, 280, -90],
+        fov: view.current.fov ?? 48,
         near: 0.5,
         far: 80_000,
       }}
       dpr={dpr}
+      // R3F owns this. It writes `gl.shadowMap.enabled` from this prop inside
+      // its own `configure` pass, which runs after component effects — so a
+      // component that enables shadows itself has them switched back off a
+      // moment later and the whole scene renders unshadowed with every mesh
+      // still dutifully flagged `castShadow`. Declaring it here is the only
+      // place the setting survives.
+      shadows="soft"
       frameloop="always"
       performance={{ min: 0.5, max: 1, debounce: 300 }}
     >
@@ -55,7 +64,12 @@ async function createWebGpuRenderer(canvas: HTMLCanvasElement, dpr: number) {
   renderer.toneMappingExposure = 1.08
   sizeRendererToCanvas(renderer, canvas, dpr)
   await renderer.init()
-  installClusteredWebgpuLighting(renderer)
+  // `?noclustered` falls back to three's own lighting for A/B checks: when a
+  // frame looks wrong, the first question is always whether the clustered path
+  // is the reason, and rebuilding to answer it is far too slow a loop.
+  if (!new URLSearchParams(location.search).has('noclustered')) {
+    installClusteredWebgpuLighting(renderer)
+  }
   // The CSS layout may settle while requestAdapter/requestDevice is pending.
   // Refresh every attachment before R3F submits the first render pass.
   sizeRendererToCanvas(renderer, canvas, dpr)

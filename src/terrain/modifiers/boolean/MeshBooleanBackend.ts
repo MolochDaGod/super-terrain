@@ -394,10 +394,32 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
 }
 
 /**
+ * Metres. A triangle longer than this in its longest edge is longer than any
+ * grid cell the terrain is compiled at, so it can only have come from an
+ * intersection curve rather than from the base grid.
+ */
+const NEEDLE_EDGE_METRES = 3
+/**
+ * Ratio of a triangle's height to its longest edge, below which it is a
+ * needle. An equilateral triangle scores 0.87; a grid quad's halves score 0.7;
+ * the spikes this exists to remove score under 0.01.
+ */
+const NEEDLE_THINNESS = 0.03
+
+/**
  * Exact triangle intersections can leave zero-area numerical shards, especially
  * after a seam coordinate is snapped to its authoritative section plane. They
  * carry no visible surface but fail the authoritative mesh validator and can
  * otherwise put a section into an endless rebuild loop.
+ *
+ * They can also leave shards that are *not* numerically zero: where a cutter's
+ * face runs nearly tangent to the grid, the intersection can produce a triangle
+ * metres long and centimetres wide. Those have plenty of area to survive an
+ * area test, and they are the bright needles seen hanging in the air off every
+ * authored landform — lit edge-on by a low sun, against fog, at ten times the
+ * brightness of anything behind them. Length alone is not the tell and thinness
+ * alone is not either: the seam between two solids is legitimately made of thin
+ * triangles, and they are short. Both together is.
  */
 export function removeBooleanSliverTriangles(
   result: BooleanMeshBuffers,
@@ -421,11 +443,22 @@ export function removeBooleanSliverTriangles(
     const crossX = aby * acz - abz * acy
     const crossY = abz * acx - abx * acz
     const crossZ = abx * acy - aby * acx
-    if (
-      crossX * crossX + crossY * crossY + crossZ * crossZ <
-      minimumDoubleAreaSquared
-    ) {
-      continue
+    const doubleAreaSquared = crossX * crossX + crossY * crossY + crossZ * crossZ
+    if (doubleAreaSquared < minimumDoubleAreaSquared) continue
+
+    const bcx = result.positions[ci]! - result.positions[bi]!
+    const bcy = result.positions[ci + 1]! - result.positions[bi + 1]!
+    const bcz = result.positions[ci + 2]! - result.positions[bi + 2]!
+    const longestEdgeSquared = Math.max(
+      abx * abx + aby * aby + abz * abz,
+      acx * acx + acy * acy + acz * acz,
+      bcx * bcx + bcy * bcy + bcz * bcz,
+    )
+    if (longestEdgeSquared > NEEDLE_EDGE_METRES * NEEDLE_EDGE_METRES) {
+      // Height above the longest edge, over that edge's length. Both sides are
+      // squared, so no square roots are taken on the hot path.
+      const thinnessSquared = doubleAreaSquared / (longestEdgeSquared * longestEdgeSquared)
+      if (thinnessSquared < NEEDLE_THINNESS * NEEDLE_THINNESS) continue
     }
     indices.push(a, b, c)
   }

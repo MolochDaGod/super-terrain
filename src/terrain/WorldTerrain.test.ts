@@ -32,6 +32,28 @@ describe('world terrain brush sessions', () => {
     globalThis.Worker = OriginalWorker
   })
 
+  it('restores the whole shipped demo scene on reset, erratics included', async () => {
+    const terrain = new WorldTerrain({}, memoryStorage)
+    await terrain.initialize()
+    const plantedIds = terrain.rocks.snapshot().map((rock) => rock.id)
+    expect(plantedIds.length).toBeGreaterThan(0)
+
+    terrain.removeGraniteRock(plantedIds[0])
+    expect(terrain.rocks.snapshot()).toHaveLength(plantedIds.length - 1)
+
+    await terrain.resetEdits()
+
+    // A reset world has to be indistinguishable from a first load; leaving the
+    // rocks out produced a scene no fresh load ever produces.
+    expect(terrain.rocks.snapshot()).toHaveLength(plantedIds.length)
+    expect(
+      terrain.modifiers
+        .snapshot()
+        .some((modifier) => modifier.id === 'demo-v3-hero-shard-mass'),
+    ).toBe(true)
+    terrain.dispose()
+  })
+
   it('stores one uninterrupted press and drag as one modifier', () => {
     const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
     const previewBrush = vi.fn()

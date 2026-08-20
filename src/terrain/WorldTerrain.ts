@@ -28,6 +28,7 @@ import {
   createDemoTerrainModifiers,
   upgradeLegacyDemoTerrainModifiers,
 } from './demo/createDemoModifiers'
+import { createDemoGraniteRocks } from './demo/createDemoRocks'
 import type { EditorSnapshot, TerrainOverlay } from './editor/EditorStore'
 import {
   cameraSectionDistance,
@@ -267,9 +268,20 @@ export class WorldTerrain {
     }
   }
 
-  initialize(): Promise<void> {
+  /**
+   * `discardSavedWorld` throws the persisted stack away *before* the world is
+   * built, rather than resetting afterwards. Resetting after the fact races the
+   * load it is trying to undo — the initial world is still streaming when every
+   * section is marked dirty under it — and the observable result is a scene
+   * that has meshes, sections and a camera but never presents a frame.
+   */
+  initialize(options: { discardSavedWorld?: boolean } = {}): Promise<void> {
     if (this.initializePromise) return this.initializePromise
-    this.initializePromise = this.loadPersistedWorld()
+    this.initializePromise = options.discardSavedWorld
+      ? this.storage
+          .clear('default')
+          .then(() => this.loadPersistedWorld())
+      : this.loadPersistedWorld()
     return this.initializePromise
   }
 
@@ -1054,6 +1066,10 @@ export class WorldTerrain {
     this.modifiers.clear()
     this.rocks.clear()
     this.installDemoModifiers()
+    // Reset restores the shipped demo scene, and the erratics are part of it.
+    // Leaving them out made "Reset edits" produce a world that no fresh load
+    // ever produces.
+    this.installDemoRocks()
     this.ensureDocumentModifiers()
     this.renderer?.setMaterialSettings(this.getMaterialSettings())
     const now = performance.now()
@@ -1147,6 +1163,7 @@ export class WorldTerrain {
         this.installDemoModifiers()
       }
       this.rocks.replace(savedRocks ?? [])
+      if (!saved?.length && !savedRocks?.length) this.installDemoRocks()
       this.ensureDocumentModifiers()
       this.renderer?.setMaterialSettings(this.getMaterialSettings())
       this.savedModifierRevision = this.modifiers.sourceRevision
@@ -1159,6 +1176,21 @@ export class WorldTerrain {
   private installDemoModifiers(): void {
     for (const modifier of createDemoTerrainModifiers(this.config.seed)) {
       this.modifiers.add(modifier)
+    }
+  }
+
+  /**
+   * Plants the demo's erratics. Runs only for a world that had nothing saved,
+   * so it can never add rocks to a scene someone has already worked on.
+   */
+  private installDemoRocks(): void {
+    for (const placement of createDemoGraniteRocks()) {
+      const point = {
+        x: placement.point.x,
+        y: this.sampleHeight(placement.point.x, placement.point.z),
+        z: placement.point.z,
+      }
+      this.addGraniteRock(placement.parameters, point)
     }
   }
 

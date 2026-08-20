@@ -25,7 +25,6 @@ import {
   fadeToMean,
   falloff,
   fbm1,
-  fbmLod,
   fbmLodBands,
   lodDeadFootprint,
   ridgedLod,
@@ -970,6 +969,11 @@ export function shadeSurface(
   const arid = detail.arid
 
   // --- rock --------------------------------------------------------------
+  // Reflectances are the measured dry-rock range: fresh granite and pale
+  // limestone sit near 0.30-0.40, and the weathering, bedding, block and crack
+  // terms below only ever subtract from that. Stacking five such multipliers on
+  // a 0.17 base drove finished rock to about 0.03 — darker than fresh asphalt —
+  // which is why the massif read as a silhouette under any amount of sky.
   // One lithology per region, varying slowly, rather than a different rock type
   // in every bed. A sequence of beds is deposited in one basin from one source,
   // so successive beds differ in grain, cement and weathering — a matter of ten
@@ -977,8 +981,8 @@ export function shadeSurface(
   // shale and a white dolomite bed by bed is what turns strata into humbug
   // stripes, and it is the single loudest tell of a procedural cliff.
   const bedType = detail.bedHardness
-  const carbonate = vec3(0.345, 0.330, 0.292)
-  const silicate = vec3(0.168, 0.163, 0.166)
+  const carbonate = vec3(0.412, 0.394, 0.348)
+  const silicate = vec3(0.298, 0.290, 0.292)
 
   // The alpine sequence below keeps its bed-to-bed colour spread deliberately
   // tiny, because a limestone or granite sequence really does differ only in
@@ -1033,7 +1037,7 @@ export function shadeSurface(
   // dirt; it is the line the eye actually reads as bedding.
   const parting = falloff(0.35, 0.0, detail.bedProfile)
     .mul(detail.bedExposure)
-    .mul(0.42)
+    .mul(0.26)
   const mottle = slow.mottle
   // Limonite staining bleeds downwards from iron-bearing beds and concentrates
   // where water has run over the face, so it is keyed to flow, not to noise.
@@ -1049,8 +1053,8 @@ export function shadeSurface(
     vec3(mix(float(0.86), float(1.1), detail.crossBedding)),
     arid,
   )
-  const blockShade = mix(float(0.78), float(1.08), detail.blocks)
-  const buttressShade = mix(float(0.74), float(1.06), detail.buttress)
+  const blockShade = mix(float(0.86), float(1.08), detail.blocks)
+  const buttressShade = mix(float(0.84), float(1.06), detail.buttress)
 
   // The variation that actually survives a kilometre of air is none of the
   // above — every one of those bands is finer than a pixel by then, and their
@@ -1061,8 +1065,8 @@ export function shadeSurface(
   // gives a distant face light and shade that belong to its shape rather than
   // to the sun angle alone.
   const weathering = mix(
-    vec3(0.74, 0.75, 0.79),
-    vec3(1.16, 1.14, 1.1),
+    vec3(0.85, 0.86, 0.89),
+    vec3(1.14, 1.12, 1.08),
     smoothstep(-0.55, 0.5, slow.curvature),
   )
   const rockBase = bedTint
@@ -1071,11 +1075,11 @@ export function shadeSurface(
     .mul(buttressShade)
     .mul(weathering)
     .mul(parting.oneMinus())
-  const crackDarken = falloff(0.55, 0.12, detail.crack).mul(0.5)
-  const rockCracked = rockBase.mul(crackDarken.oneMinus().max(0.4))
+  const crackDarken = falloff(0.55, 0.12, detail.crack).mul(0.34)
+  const rockCracked = rockBase.mul(crackDarken.oneMinus().max(0.56))
   const lichenColour = mix(
-    vec3(0.068, 0.086, 0.042),
-    vec3(0.152, 0.156, 0.104),
+    vec3(0.124, 0.148, 0.082),
+    vec3(0.216, 0.222, 0.152),
     detail.clump,
   )
   // Crustose lichen needs recurring humidity to grow at all. Its absence is one
@@ -1098,13 +1102,18 @@ export function shadeSurface(
   // masks are mutually exclusive by construction (one is gated on `arid`, the
   // other on its complement) so applying both in sequence costs one extra lerp
   // and never needs a second copy of the rock to blend against.
-  const varnish = smoothstep(0.3, 0.8, mottle)
+  // `mottle` is an untyped baked channel, so the chain below infers a vector
+  // type it never has at runtime; the annotation keeps it a scalar mask.
+  const varnish: any = smoothstep(0.3, 0.8, mottle)
     .mul(smoothstep(0.28, 0.68, weights.slope))
     .mul(falloff(0.55, 0.12, slow.flow))
     .mul(arid)
     .toVar('varnish')
-  const rockAlbedo = mix(rockCracked, lichenColour, lichenMask.mul(0.7))
-    .mix(vec3(0.042, 0.034, 0.030), varnish.mul(0.78))
+  const rockAlbedo = mix(
+    mix(rockCracked, lichenColour, lichenMask.mul(0.7)),
+    vec3(0.042, 0.034, 0.03),
+    varnish.mul(0.78),
+  ).toVar('rockAlbedo')
 
   // --- scree -------------------------------------------------------------
   // Talus is the same rock, freshly broken. It is lighter than the face it fell
@@ -1158,18 +1167,23 @@ export function shadeSurface(
     detail.macro,
   ).mul(mix(float(0.95), float(1.06), ironBudget.oneMinus())).toVar('sandBase')
 
+  // Measured diffuse reflectance, not a mood. Alpine turf sits near 0.13,
+  // bleached litter near 0.25 and humic soil near 0.12; the values below used
+  // to be a third of that, which is asphalt, and no amount of sky fill can
+  // rescue a surface that absorbs 96% of what reaches it. The frame read as
+  // unlit rather than as evening because of this, not because of the sun.
   const bareEarth = mix(
-    mix(vec3(0.062, 0.048, 0.035), vec3(0.098, 0.079, 0.058), detail.macro),
+    mix(vec3(0.118, 0.092, 0.066), vec3(0.176, 0.142, 0.104), detail.macro),
     sandBase,
     arid,
   )
   const litter = mix(
-    mix(vec3(0.112, 0.099, 0.062), vec3(0.156, 0.138, 0.088), detail.macro),
+    mix(vec3(0.152, 0.136, 0.088), vec3(0.208, 0.186, 0.122), detail.macro),
     sandBase.mul(0.88),
     arid,
   )
   const liveTurf = mix(
-    mix(vec3(0.038, 0.062, 0.024), vec3(0.068, 0.094, 0.038), detail.macro),
+    mix(vec3(0.082, 0.126, 0.052), vec3(0.128, 0.176, 0.076), detail.macro),
     mix(vec3(0.082, 0.078, 0.038), vec3(0.152, 0.142, 0.078), detail.macro),
     arid,
   )
@@ -1230,7 +1244,7 @@ export function shadeSurface(
   ).mul(aeolian)
 
   // --- snow --------------------------------------------------------------
-  const snowAlbedo = vec3(0.7, 0.73, 0.78)
+  const snowAlbedo = vec3(0.62, 0.65, 0.7)
     .mul(mix(float(0.9), float(1.03), detail.macro))
     .mul(mix(float(0.94), float(1.02), detail.clump))
 

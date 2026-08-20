@@ -1,8 +1,23 @@
 # Visual target and review rubric
 
-This is the standing brief for the visual review pass. Screenshots are produced
-by `npm run capture` into `captures/` from four fixed viewpoints (`vista`,
-`cliff`, `meadow`, `ridgeline`) so successive passes are directly comparable.
+This is the standing brief for the visual review pass.
+
+**Review frames come from the browser.** `node tools/browser/shot.mjs` drives the
+real editor in real Chrome with real WebGPU and writes to `captures/browser/`:
+
+```bash
+bun run dev                       # in one terminal
+node tools/browser/shot.mjs --name=hero --url=http://localhost:5174 \
+  --cam=150,0,335 --above=30 --target=368,112,184 --fov=42
+```
+
+The offline `npm run capture` harness in `tools/capture` builds its own scene
+with a different tone mapper, a different lighting path and no streaming, so its
+frames are evidence about that harness and not about what the editor shows.
+Anything under `captures/` that is not under `captures/browser/` predates this
+split and should not be used for review.
+
+`docs/reference-hero.md` describes the hero frame the demo world is aiming at.
 
 ## The three reference frames
 

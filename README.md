@@ -2,7 +2,7 @@
 
 A browser-first, partitioned mesh-terrain editor inspired by Unreal Engine 5.8's Mesh Terrain architecture. It runs on Three.js `WebGPURenderer` through React Three Fiber and keeps terrain authoring, compilation, streaming, and rendering as separate systems.
 
-This is not a single heightmap mesh. The demo world is a sparse 16 km × 16 km logical terrain with sculpt layers, configurable weight-painted materials, editable topology, live add/subtract CSG objects, local density control, tunnel interiors, five geometric LODs, worker compilation, bounded residency, and IndexedDB persistence.
+This is not a single heightmap mesh. The demo world is a sparse 4 km × 4 km logical terrain with sculpt layers, configurable weight-painted materials, editable topology, live add/subtract CSG objects, local density control, tunnel interiors, five geometric LODs, worker compilation, bounded residency, and IndexedDB persistence.
 
 ## Requirements
 
@@ -26,6 +26,28 @@ bun run lint
 bun run test
 bun run build
 ```
+
+## Visual review
+
+Review frames are captured from the running editor in real Chrome, because the
+browser's WebGPU path — tone mapping, clustered lighting, streaming — is the
+thing being judged:
+
+```bash
+bun run dev
+node tools/browser/shot.mjs --name=hero --url=http://localhost:5173 \
+  --cam=150,0,335 --above=30 --target=368,112,184 --fov=42
+```
+
+The camera, render mode, tone-mapping exposure, material debug view and editor
+chrome are all driven from the URL, so a frame is reproducible from a link:
+`?cam=x,y,z&target=x,y,z&fov=42&quality=full&exposure=1.9&debug=albedo&ui=off`.
+`--above=<metres>` places the camera relative to the terrain surface once
+streaming has settled. `docs/reference-hero.md` and `docs/visual-target.md` hold
+the target frame and the scoring rubric.
+
+`bun run tools/scoutSites.ts` scans the height field for candidate viewpoints —
+alpine climate, high relief, a valley floor in front — without rendering.
 
 ## Editor controls
 

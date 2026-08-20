@@ -29,10 +29,28 @@ import { DEFAULT_SUN } from '../environment/sunPosition'
  *      stays crisp. That altitude difference is what separates ridge planes.
  */
 
-export const HAZE_DENSITY = uniform(0.00026)
-/** Extra low-lying mist, and the altitude it fills to. */
-export const MIST_DENSITY = uniform(0.0011)
-export const MIST_CEILING = uniform(70)
+export const HAZE_DENSITY = uniform(0.00042)
+/**
+ * The valley fog: cloud lying on the floor of the basin.
+ *
+ * It is meant to pool in the low ground and be *seen*, as a distinct thing with
+ * a top to it, sitting under rock that stands clear above. That means shallow
+ * and local, not dense: pushed up until it separates every ridge plane it
+ * becomes an overlay on the whole frame, everything reads through a sheet of
+ * grey, and the fog stops looking like weather and starts looking like a
+ * post-process. The ceiling is the setting that matters most here — it is what
+ * gives the layer a surface for the crags to rise out of.
+ */
+export const MIST_DENSITY = uniform(0.00085)
+/** Altitude the fog fills to, and the level below which it is at full strength. */
+export const MIST_CEILING = uniform(78)
+export const MIST_FLOOR = uniform(-30)
+/**
+ * Metres of clear air before the fog starts to accumulate. Without this the
+ * layer veils the rock at the viewer's feet as hard as the ridge a kilometre
+ * away, and the frame turns to milk instead of gaining depth.
+ */
+export const MIST_START = uniform(280)
 /** Metres of clear air before haze begins to accumulate. */
 export const HAZE_START = uniform(180)
 /** Inverse scale height, per metre. Larger means haze hugs the ground more. */
@@ -47,6 +65,15 @@ export function syncSunDirection(): void {
 const HORIZON_COLOUR = vec3(0.44, 0.54, 0.72)
 const ZENITH_COLOUR = vec3(0.14, 0.3, 0.62)
 const SUN_HALO = vec3(1.1, 0.92, 0.7)
+/**
+ * Fog is water droplets, not air: it scatters far more strongly forward than
+ * Rayleigh does, and it scatters every wavelength alike. So the same layer that
+ * reads as cold blue-grey looking away from the sun turns to bright warm white
+ * looking into it, and that split across a single frame is most of what makes
+ * a fogged valley look lit rather than washed out.
+ */
+const MIST_SHADE = vec3(0.4, 0.47, 0.6)
+const MIST_LIT = vec3(1.32, 1.0, 0.74)
 
 /**
  * Sky radiance in a direction, matched by eye to the Preetham dome so terrain
@@ -80,7 +107,6 @@ const evaluateAerialPerspective = /*@__PURE__*/ Fn(
   // Analytic integral of an exponentially decaying density along the segment
   // between the two endpoints, which keeps the falloff correct whether the ray
   // climbs a peak or runs along a valley floor.
-  const meanHeight = surfaceHeight.add(cameraHeight).mul(0.5).toVar('meanHeight')
   // Start offset: the first couple of hundred metres of air are effectively
   // clear, and veiling them is what makes near rock read as milk.
   const hazed = viewDistance.sub(HAZE_START).max(0)
@@ -88,16 +114,32 @@ const evaluateAerialPerspective = /*@__PURE__*/ Fn(
   // floors. This is what actually separates one ridge plane from the next:
   // uniform haze veils near and far equally, while mist only fills the low
   // ground between them.
-  const mistDepth = falloff(MIST_CEILING, float(-40), meanHeight)
-    .mul(viewDistance)
+  // How much of the ray actually runs through the layer. Testing the segment's
+  // mean height instead — which is what this did — says that a camera on the
+  // valley floor looking at a peak twice the height of the fog is looking
+  // through solid fog, because the average of the two endpoints is still below
+  // the ceiling. The result is a frame where the one subject that is meant to
+  // stand clear of the murk is the most veiled thing in it. Taking the fraction
+  // of the endpoints' altitude range that lies under the ceiling is still only
+  // an approximation of the integral, but it is the right shape: it goes to
+  // zero as the far end climbs out.
+  const lowest = surfaceHeight.min(cameraHeight).toVar('mistLow')
+  const highest = surfaceHeight.max(cameraHeight).toVar('mistHigh')
+  const submerged = MIST_CEILING.sub(lowest)
+    .div(highest.sub(lowest).max(1))
+    .clamp(0, 1)
+  const mistDepth = falloff(MIST_CEILING, MIST_FLOOR, lowest)
+    .mul(submerged)
+    .mul(viewDistance.sub(MIST_START).max(0))
     .mul(MIST_DENSITY)
+    .toVar('mistDepth')
   const optical = float(mistDepth as any).toVar('opticalDepth')
   If(hazed.greaterThan(0), () => {
-    const lowest = surfaceHeight.min(cameraHeight).max(-200)
-    const highest = surfaceHeight.max(cameraHeight).max(-200)
-    const rise = highest.sub(lowest).max(0.001)
-    const meanDensity = exp(lowest.mul(HAZE_HEIGHT_FALLOFF).negate())
-      .sub(exp(highest.mul(HAZE_HEIGHT_FALLOFF).negate()))
+    const hazeLow = lowest.max(-200)
+    const hazeHigh = highest.max(-200)
+    const rise = hazeHigh.sub(hazeLow).max(0.001)
+    const meanDensity = exp(hazeLow.mul(HAZE_HEIGHT_FALLOFF).negate())
+      .sub(exp(hazeHigh.mul(HAZE_HEIGHT_FALLOFF).negate()))
       .div(rise.mul(HAZE_HEIGHT_FALLOFF))
     optical.addAssign(hazed.mul(HAZE_DENSITY).mul(meanDensity))
   })
@@ -107,7 +149,15 @@ const evaluateAerialPerspective = /*@__PURE__*/ Fn(
   // travelling away from the eye is its negation.
   const colour = vec3(HORIZON_COLOUR).toVar('hazeColour')
   If(amount.greaterThan(0), () => {
-    colour.assign(skyColour(viewDirection.negate()))
+    // How much of the veil is fog rather than clear-air haze. The two are lit
+    // differently, so mixing by their share is the only way a frame can have
+    // cold fog in the shadowed side valleys and a blazing one down the sun line.
+    const mistShare = mistDepth.div(optical.max(0.0001)).clamp(0, 1)
+    const forward = clamp(dot(viewDirection.negate(), SUN_DIRECTION), 0, 1)
+    const mistColour: any = mix(MIST_SHADE, MIST_LIT, pow(forward, float(2.2)))
+    colour.assign(
+      mix(skyColour(viewDirection.negate()), mistColour, mistShare.mul(0.88) as any),
+    )
   })
 
     return vec4(colour, amount)

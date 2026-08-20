@@ -16,6 +16,7 @@
     "preview": "vite preview",
     "capture:build": "vite build --config tools/capture/vite.config.ts",
     "capture": "npm run capture:build && node .capture/capture.mjs",
+    "shot": "node tools/browser/shot.mjs",
     "survey": "vite build --config tools/capture/vite.config.ts --ssr tools/capture/survey.ts --outDir .capture/survey && node .capture/survey/capture.mjs"
   },
   "dependencies": {
@@ -41,6 +42,7 @@
     "@vitejs/plugin-react": "^6.0.4",
     "fake-indexeddb": "^6.2.5",
     "oxlint": "^1.75.0",
+    "playwright": "1.52.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
     "vite": "^8.2.0",

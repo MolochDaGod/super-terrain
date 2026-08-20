@@ -1,3 +1,4 @@
+import { SNOW_LINE, SNOW_LINE_BAND } from '../compiler/climate'
 import { clamp, lerp, smoothstep } from '../core/bounds'
 import { evaluateHeight } from '../compiler/TerrainField'
 
@@ -120,7 +121,7 @@ function calculateFarFieldColors(
       const fullRockMix = Math.max(smoothstep(0.18, 0.54, slope), alpine * 0.5)
       const meadowMix = clamp(macro * 0.72 + alpine * 0.28, 0, 1)
       const snowMix =
-        smoothstep(285, 395, height) *
+        smoothstep(SNOW_LINE, SNOW_LINE + SNOW_LINE_BAND, height) *
         (1 - smoothstep(0.14, 0.52, slope))
       const fullVariation = 0.86 + regional * 0.2
       for (let channel = 0; channel < 3; channel += 1) {

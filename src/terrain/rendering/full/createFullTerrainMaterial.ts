@@ -10,7 +10,6 @@ import {
   dot,
   faceDirection,
   float,
-  max,
   mix,
   normalize,
   normalWorld,
@@ -144,7 +143,23 @@ export function createFullTerrainMaterial(
 
     // World size of one pixel. Screen-space derivatives of the world position
     // are the only reliable measure here because the mesh has no UVs.
-    const footprint = max(dFdx(position).length(), dFdy(position).length())
+    //
+    // Taking the larger of the two axes is the isotropic answer, and on a slope
+    // seen edge-on it is badly wrong. The pixel's footprint there is a long
+    // thin sliver: metres along the fall line, centimetres across it. The long
+    // axis then fades every detail band out, but it does so at a rate that
+    // itself changes from pixel to pixel down the slope, and the result is the
+    // streaking that runs down every steep face — alternating bands of full
+    // detail and no detail, drawn along the view direction.
+    //
+    // Filtering by the short axis instead, with the anisotropy capped, is what
+    // a hardware anisotropic sampler does and it fixes both halves of the
+    // problem: the streaks go, and the mesoscale detail that used to dissolve
+    // on anything past about forty metres survives out to the haze.
+    const footprintLong = dFdx(position).length().max(dFdy(position).length())
+    const footprintShort = dFdx(position).length().min(dFdy(position).length())
+    const footprint = footprintShort
+      .max(footprintLong.mul(0.2))
       .max(0.0005)
       .toVar('pixelFootprint')
 
@@ -224,7 +239,13 @@ export function createFullTerrainMaterial(
       shading.albedo,
       shading.roughness,
       shadedNormal,
-      clamp(shading.cavity.mul(microShadow).mul(slow.occlusion), 0.18, 1),
+      // The floor matters more than the shape at low sun: ambient occlusion
+      // scales the *sky*, and after sunset the sky is the only thing lighting
+      // everything the sun cannot see. A floor of 0.18 turned every shaded
+      // slope into a silhouette, which is a darkness the reference frame does
+      // not have — an open hillside sees most of the dome however cavitied its
+      // metre-scale surface is.
+      clamp(shading.cavity.mul(microShadow).mul(slow.occlusion), 0.42, 1),
       debug === 'relief' ? surface.height : float(0),
       layerDebug,
       debug === 'strata' ? surface.detail.strata : float(0),

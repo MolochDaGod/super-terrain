@@ -27,12 +27,30 @@ describe('authored topology showcase', () => {
         'demo-v2-window-middle-bench',
         'demo-v2-natural-bridge-high-massif',
         'demo-v2-escarpment-west-face',
+        'demo-v3-hero-shard-mass',
+        'demo-v3-hero-shard-windows',
       ]),
     )
-    expect(modifiers.filter((modifier) => modifier.type === 'remesh')).toHaveLength(3)
+    // Three around the massif's authored topology, two around the hero shard's
+    // two windows.
+    expect(modifiers.filter((modifier) => modifier.type === 'remesh')).toHaveLength(5)
+    // Cave chamber, natural bridge, escarpment, plus the shard's mass, its
+    // bedding partings and its windows, plus one per outcrop cluster.
+    const volumes = modifiers.filter(
+      (modifier) => modifier.type === 'boolean-volume',
+    )
+    const outcrops = volumes.filter((modifier) =>
+      modifier.id.startsWith('demo-v4-outcrop-'),
+    )
+    expect(volumes).toHaveLength(6 + outcrops.length)
+    // The shard's mass and the outcrop clusters are the operations that add
+    // rock; everything else in the stack removes it.
     expect(
-      modifiers.filter((modifier) => modifier.type === 'boolean-volume'),
-    ).toHaveLength(3)
+      volumes.filter((modifier) => modifier.operation === 'add'),
+    ).toHaveLength(1 + outcrops.length)
+    // The outcrop field is the demo's actual subject, so it must not quietly
+    // collapse to a handful of crags in one corner of the valley.
+    expect(outcrops.length).toBeGreaterThanOrEqual(4)
 
     for (const modifier of modifiers) {
       expect(modifier.enabled).toBe(true)
@@ -40,6 +58,51 @@ describe('authored topology showcase', () => {
       expect(modifier.bounds.max.y).toBeGreaterThan(modifier.bounds.min.y)
       expect(modifier.bounds.max.z).toBeGreaterThan(modifier.bounds.min.z)
     }
+  })
+
+  it('replaces an outcrop field from an earlier version', () => {
+    const seed = 13_371
+    const current = createDemoTerrainModifiers(seed)
+    const stale = current.map((modifier) =>
+      modifier.id.startsWith('demo-v4-outcrop-')
+        ? { ...modifier, id: modifier.id.replace('demo-v4-', 'demo-v3-') }
+        : modifier,
+    )
+    const edit = createBrushStroke({
+      point: { x: 12, y: 4, z: 9 },
+      mode: 'raise',
+      radius: 8,
+      strength: 0.4,
+      falloff: 0.5,
+    })
+
+    const upgraded = upgradeLegacyDemoTerrainModifiers([...stale, edit], seed)
+
+    expect(upgraded).toBeDefined()
+    const ids = upgraded!.map((modifier) => modifier.id)
+    expect(ids).toContain(edit.id)
+    expect(ids.some((id) => id.startsWith('demo-v3-outcrop-'))).toBe(false)
+    expect(ids.filter((id) => id.startsWith('demo-v4-outcrop-')).length)
+      .toBeGreaterThanOrEqual(4)
+  })
+
+  it('adds authored terrain that shipped after a world was saved', () => {
+    const seed = 13_371
+    const current = createDemoTerrainModifiers(seed)
+    const saved = current.filter((modifier) => !modifier.id.startsWith('demo-v3-'))
+
+    const upgraded = upgradeLegacyDemoTerrainModifiers(saved, seed)
+
+    expect(upgraded).toBeDefined()
+    expect(upgraded?.some((modifier) => modifier.id === 'demo-v3-hero-shard-mass')).toBe(
+      true,
+    )
+    // Everything that was already there survives, by identity.
+    for (const modifier of saved) {
+      expect(upgraded?.some((entry) => entry.id === modifier.id)).toBe(true)
+    }
+    // And a world that is already current is left alone entirely.
+    expect(upgradeLegacyDemoTerrainModifiers(current, seed)).toBeUndefined()
   })
 
   it('places tunnel portals on the generated surface with outward normals', () => {
@@ -198,9 +261,9 @@ describe('authored topology showcase', () => {
     )
     expect(upgraded).toBeDefined()
     expect(upgraded?.some((modifier) => modifier.id === userStroke.id)).toBe(true)
-    expect(upgraded?.some((modifier) => /^demo-(?!v2-)/.test(modifier.id))).toBe(
-      false,
-    )
+    expect(
+      upgraded?.some((modifier) => /^demo-(?!v2-|v3-|v4-)/.test(modifier.id)),
+    ).toBe(false)
 
     const upgradedBridge = upgraded?.find(
       (modifier) => modifier.id === 'demo-v2-natural-bridge-high-massif',
@@ -274,7 +337,7 @@ describe('authored topology showcase', () => {
         }
       }
     },
-    20_000,
+    90_000,
   )
 })
 

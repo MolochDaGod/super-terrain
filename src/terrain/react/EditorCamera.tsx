@@ -6,6 +6,7 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
 import { useEditorSnapshot } from './hooks'
+import { currentViewUrlState } from './viewUrlState'
 
 const DISABLED_MOUSE_ACTION = -1 as (typeof MOUSE)[keyof typeof MOUSE]
 
@@ -26,6 +27,8 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
   const flyFocus = useRef(new Vector3())
   const flyRotation = useRef(new Euler(0, 0, 0, 'YXZ'))
   const orbitDistance = useRef(360)
+  const urlView = useRef(currentViewUrlState())
+  const hasFlown = useRef(false)
   const pointerLocked = useRef(false)
 
   // TerrainView's frame callback is registered before this component's. Seed
@@ -33,7 +36,16 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
   // center hundreds of jobs on the camera and cancel them one frame later.
   useLayoutEffect(() => {
     const controller = controls.current
-    if (controller) terrain.setViewTarget(controller.target)
+    if (!controller) return
+    // The declarative target — the URL's, or the default viewpoint's — is the
+    // authority on mount. Applying it here rather than waiting for the controls'
+    // own first update closes a race against the effect below.
+    const target = urlView.current.target
+    if (target) {
+      controller.target.set(target[0], target[1], target[2])
+      controller.update()
+    }
+    terrain.setViewTarget(controller.target)
   }, [terrain])
 
   useEffect(() => {
@@ -64,6 +76,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
     if (!controller) return
 
     if (cameraMode === 'fly') {
+      hasFlown.current = true
       orbitDistance.current = Math.max(
         10,
         camera.position.distanceTo(controller.target),
@@ -79,6 +92,18 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
     }
 
     if (document.pointerLockElement === canvas) document.exitPointerLock()
+    if (!hasFlown.current) {
+      // Mount, not a return from fly mode. Re-deriving the orbit focus from the
+      // camera's current facing is only correct once the camera has been
+      // oriented, and on the first frame it has not: R3F starts it looking at
+      // the origin, so this would drop the focus at a point 360 m below the
+      // viewpoint and leave the editor staring at the ground. The declarative
+      // target is already right — keep it.
+      controller.enabled = true
+      controller.update()
+      terrain.setViewTarget(controller.target)
+      return
+    }
     camera.getWorldDirection(forward.current)
     controller.target
       .copy(camera.position)
@@ -229,7 +254,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
       ref={controls}
       makeDefault
       enabled={cameraMode === 'orbit' && !dragging}
-      target={[540, 190, 140]}
+      target={urlView.current.target ?? [540, 190, 140]}
       enableDamping
       dampingFactor={0.075}
       rotateSpeed={0.65}
@@ -237,7 +262,10 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
       panSpeed={0.72}
       minDistance={10}
       maxDistance={10_000}
-      maxPolarAngle={Math.PI * 0.49}
+      // A scripted viewpoint must be reproduced exactly. The editor's polar
+      // clamp keeps interactive orbiting from rolling under the terrain, but it
+      // would silently lift a URL camera that looks up at a peak.
+      maxPolarAngle={urlView.current.target ? Math.PI : Math.PI * 0.49}
       screenSpacePanning
       mouseButtons={{
         LEFT: MOUSE.ROTATE,

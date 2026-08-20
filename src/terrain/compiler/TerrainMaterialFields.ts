@@ -1,3 +1,9 @@
+import {
+  SNOW_LINE,
+  SNOW_LINE_BAND,
+  WATER_LEVEL,
+  WATER_TABLE_REACH,
+} from './climate'
 import { clamp, smoothstep } from '../core/bounds'
 import { sampleHeightFieldCached } from './heightField'
 
@@ -93,11 +99,18 @@ export function evaluateTerrainMaterialFields(
   // Water collects in the carved drainage lines and thins out with altitude,
   // where there is less catchment above and more of the year is frozen.
   const altitudeDrying = smoothstep(210, 540, y)
+  // Standing water in the basin. A closed valley floor carries no drainage, so
+  // `flow` cannot see it at all, and without this the ground a few metres from
+  // the river's edge is classified exactly like a dry hillside — which is what
+  // turned the whole basin into tan pasture with a lake sitting in it.
+  const waterTable =
+    1 - smoothstep(WATER_LEVEL, WATER_LEVEL + WATER_TABLE_REACH, y)
   const flow = terrain.flow
   const { aridity, erg } = terrain
   const moisture = clamp(
     0.4 +
       flow * 0.5 +
+      waterTable * 0.3 +
       (1 - smoothstep(0.45, 1.4, slope)) * 0.24 -
       altitudeDrying * 0.42 -
       // Climate enters the material system at exactly one place: it takes the
@@ -238,10 +251,15 @@ export function evaluateTerrainLayerWeights(
     falloff(0.38, 0.1, slope + fray)
   const soil = remaining * (1 - plantable)
   const vegetated = remaining * plantable
+  // Wet meadow follows the water table as much as it follows the climate: the
+  // strip between the river and the foot of the slope is the greenest ground in
+  // an alpine valley, and above it the same moisture reads as dry pasture.
+  const waterTable =
+    1 - smoothstep(WATER_LEVEL, WATER_LEVEL + WATER_TABLE_REACH, y)
   const lush = smoothstep(
     0.3,
     0.66,
-    fields.moisture * 0.6 + fields.flow * 0.55 + raw * 0.3,
+    fields.moisture * 0.6 + fields.flow * 0.55 + waterTable * 0.4 + raw * 0.3,
   )
   const grass = vegetated * lush
   const meadow = vegetated * (1 - lush)
@@ -249,8 +267,8 @@ export function evaluateTerrainLayerWeights(
   const snowEdge = raw * 30 + curvature * -46
   const snow =
     smoothstep(
-      286,
-      412,
+      SNOW_LINE,
+      SNOW_LINE + SNOW_LINE_BAND,
       y + regional * 44 + fray * 30 + snowEdge,
     ) * falloff(0.5, 0.12, slope + snowEdge * 0.01)
   const snowFree = 1 - snow

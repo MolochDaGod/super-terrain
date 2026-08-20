@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
-import { ACESFilmicToneMapping, AgXToneMapping, PCFSoftShadowMap } from 'three/webgpu'
+import { ACESFilmicToneMapping, AgXToneMapping } from 'three/webgpu'
 import type { Camera, Renderer, Scene } from 'three/webgpu'
 import { createTerrainRenderPipeline } from '../rendering/post/createTerrainRenderPipeline'
 import type { TerrainRenderMode } from '../rendering/renderModes'
+import { currentViewUrlState } from './viewUrlState'
 
 export interface TerrainRenderPipelineProps {
   mode: TerrainRenderMode
@@ -23,6 +24,12 @@ export interface TerrainRenderPipelineProps {
  * warmed through `compileAsync`, which uses `createRenderPipelineAsync`
  * underneath, and no frame is submitted until it resolves.
  */
+/** Grading exposure for `full`. A review pass can override it with `?exposure=`. */
+// Graded for the evening key. AgX puts a 7-degree sun's lit rock near the
+// bottom of its range, and at the editor's old 0.95 everything the sun missed
+// fell off the curve entirely.
+const FULL_EXPOSURE = 1.9
+
 export function TerrainRenderPipeline({
   mode,
   onCompilingChange,
@@ -47,9 +54,12 @@ export function TerrainRenderPipeline({
     // AgX keeps a sky several stops above the ground from clipping while
     // leaving shadowed rock readable; ACES crushes both ends of that range.
     renderer.toneMapping = mode === 'full' ? AgXToneMapping : ACESFilmicToneMapping
-    renderer.toneMappingExposure = mode === 'full' ? 0.95 : 1.08
-    renderer.shadowMap.enabled = mode === 'full'
-    renderer.shadowMap.type = PCFSoftShadowMap
+    renderer.toneMappingExposure =
+      currentViewUrlState().exposure ?? (mode === 'full' ? FULL_EXPOSURE : 1.08)
+    // Shadow map enablement and type are declared on the Canvas instead: R3F
+    // rewrites both from its `shadows` prop after effects run, so setting them
+    // here is silently undone. Preview mode has no shadow-casting lights and no
+    // meshes flagged to cast, so leaving the map enabled there costs nothing.
   }, [gl, mode])
 
   useEffect(() => {

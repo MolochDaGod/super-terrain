@@ -10,6 +10,12 @@ import type {
   TunnelPortal,
 } from '../modifiers/types'
 import { normalizeTunnelModifier, tunnelPortalDistance } from '../modifiers/tunnel'
+import { createHeroShardModifiers } from './createHeroShard'
+import {
+  SUPERSEDED_OUTCROP_PREFIXES,
+  createOutcropFieldModifiers,
+  outcropFieldModifierIds,
+} from './createOutcropField'
 
 /**
  * A deliberately small authored demo stack.
@@ -114,6 +120,8 @@ export function createDemoTerrainModifiers(seed: number): TerrainModifier[] {
     highCave,
     bridge,
     escarpment,
+    ...createHeroShardModifiers(seed),
+    ...createOutcropFieldModifiers(seed),
   ]
 }
 
@@ -178,16 +186,23 @@ export function upgradeLegacyDemoTerrainModifiers(
   // parameters under those same IDs, so shape-specific matching can never be
   // exhaustive. Version the authored stack and replace every old built-in ID
   // once; modifiers without a shipped ID are retained byte-for-byte.
-  const containsOutdatedDemo = modifiers.some((modifier) =>
-    OUTDATED_DEMO_IDS.has(modifier.id),
+  const containsOutdatedDemo = modifiers.some(
+    (modifier) => OUTDATED_DEMO_IDS.has(modifier.id) || isSupersededOutcrop(modifier),
   )
-  const containsCurrentDemo = modifiers.some((modifier) =>
-    CURRENT_DEMO_IDS.has(modifier.id),
-  )
+  const demoIds = currentDemoIds(seed)
+  const containsCurrentDemo = modifiers.some((modifier) => demoIds.has(modifier.id))
   const containsBenchmarkResidue = modifiers.some(isBenchmarkResidue)
+  // A world saved before a new piece of authored terrain shipped keeps every
+  // modifier it had and is missing only the new ones. Adding them is what lets
+  // the demo stack grow without asking anyone to throw away their edits — the
+  // ids are the version, so anything already present is left untouched.
+  const savedIds = new Set(modifiers.map((modifier) => modifier.id))
+  const missingCurrentDemo =
+    containsCurrentDemo && [...demoIds].some((id) => !savedIds.has(id))
   if (
     !containsLegacyDemo &&
     !containsOutdatedDemo &&
+    !missingCurrentDemo &&
     !(containsCurrentDemo && containsBenchmarkResidue)
   ) {
     return undefined
@@ -197,6 +212,7 @@ export function upgradeLegacyDemoTerrainModifiers(
       !isLegacyDemoTunnel(modifier) &&
       !isLegacyDemoDensity(modifier) &&
       !OUTDATED_DEMO_IDS.has(modifier.id) &&
+      !isSupersededOutcrop(modifier) &&
       !isBenchmarkResidue(modifier),
   )
   const retainedIds = new Set(retained.map((modifier) => modifier.id))
@@ -206,7 +222,23 @@ export function upgradeLegacyDemoTerrainModifiers(
   return [...retained, ...currentDemo]
 }
 
-const CURRENT_DEMO_IDS = new Set([
+/**
+ * The ids the current demo stack ships. This set *is* the version number: a
+ * saved world missing any of them is a world from before that piece was
+ * authored, and gets it added without losing its own edits. The outcrop field's
+ * ids depend on where the height field put the crags, so they are derived
+ * rather than listed.
+ */
+function currentDemoIds(seed: number): Set<string> {
+  return new Set([...FIXED_DEMO_IDS, ...outcropFieldModifierIds(seed)])
+}
+
+const FIXED_DEMO_IDS = new Set([
+  'demo-v3-hero-shard-mass',
+  'demo-v3-hero-shard-bedding',
+  'demo-v3-hero-shard-windows',
+  'demo-v3-hero-shard-density-0',
+  'demo-v3-hero-shard-density-1',
   'demo-v2-cave-lower-massif',
   'demo-v2-cave-lower-chamber',
   'demo-v2-window-middle-bench',
@@ -234,6 +266,15 @@ const OUTDATED_DEMO_IDS = new Set([
  * they were user work. Match the generator's exact signature so ordinary
  * one-point brush edits remain untouched.
  */
+/**
+ * An outcrop field from an earlier version. These are matched by prefix rather
+ * than listed: which clusters a field produces depends on where the height
+ * field put the crags, so the old ids are not knowable from here.
+ */
+function isSupersededOutcrop(modifier: TerrainModifier): boolean {
+  return SUPERSEDED_OUTCROP_PREFIXES.some((prefix) => modifier.id.startsWith(prefix))
+}
+
 function isBenchmarkResidue(modifier: TerrainModifier): boolean {
   return (
     modifier.type === 'brush-stroke' &&

@@ -31,6 +31,7 @@ import {
   createTerrainMaterialForMode,
   type TerrainMaterialHandle,
 } from './createTerrainMaterialForMode'
+import type { FullMaterialDebug } from './full/createFullTerrainMaterial'
 import type { TerrainRenderMode } from './renderModes'
 import { createSectionGeometry } from './createSectionGeometry'
 import {
@@ -101,7 +102,14 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private readonly pendingPreviewRefresh = new Set<BufferGeometry>()
   private previewRefreshHandle?: number
 
-  constructor(root: Group, sectionSize: number) {
+  private readonly debugView: FullMaterialDebug
+
+  constructor(
+    root: Group,
+    sectionSize: number,
+    debugView: FullMaterialDebug = 'none',
+  ) {
+    this.debugView = debugView
     this.root = root
     this.surfaceRoot = new Group()
     this.surfaceRoot.name = 'terrain-static-surfaces'
@@ -110,7 +118,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     this.brickSize = Math.max(16, sectionSize / 2)
     this.terrainMaterial = createTerrainMaterialForMode(
       this.renderMode,
-      'none',
+      this.debugView,
       this.materialSettings,
     )
     this.lodMaterials = LOD_COLORS.map(
@@ -237,7 +245,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     const previous = this.terrainMaterial
     this.terrainMaterial = createTerrainMaterialForMode(
       mode,
-      'none',
+      this.debugView,
       this.materialSettings,
     )
     for (const runtime of this.runtime.values()) {
@@ -259,7 +267,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     const previous = this.terrainMaterial
     this.terrainMaterial = createTerrainMaterialForMode(
       this.renderMode,
-      'none',
+      this.debugView,
       this.materialSettings,
     )
     for (const runtime of this.runtime.values()) this.applyMaterial(runtime)
