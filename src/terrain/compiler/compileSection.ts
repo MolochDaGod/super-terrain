@@ -1172,7 +1172,11 @@ function calculateSurfaceFields(
       packUnit(fields.jointing),
       packUnitPair(fields.moisture, weights.lichen),
       packUnit(curvature[vertex] * 0.5 + 0.5),
-      packUnit(fields.mottle),
+      // Mottling and climate share a channel. Both are slow masks read through
+      // a smoothstep, so eight bits is well past what either can show; adding a
+      // seventh vertex buffer for the biome selector would have cost a real
+      // attribute slot for no visible precision.
+      packUnitPair(fields.mottle, fields.aridity),
     ], target)
     packed[3].set([
       packSigned(fields.beddedOffsetX, BEDDED_OFFSET_RANGE),

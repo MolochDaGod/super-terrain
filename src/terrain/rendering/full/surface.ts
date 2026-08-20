@@ -12,6 +12,7 @@ import {
   mix,
   normalize,
   smoothstep,
+  vec2,
   vec3,
   vec4,
   varying,
@@ -24,6 +25,7 @@ import {
   fadeToMean,
   falloff,
   fbm1,
+  fbmLod,
   fbmLodBands,
   lodDeadFootprint,
   ridgedLod,
@@ -87,6 +89,46 @@ export const SURFACE_LAYERS = {
 } satisfies Record<string, SurfaceLayer>
 
 /**
+ * The same six roles, in an arid climate.
+ *
+ * A biome here is not a new set of layers — it is the same six slots with
+ * different matter in them. Coverage is still decided upstream from slope,
+ * curvature and deposition, and that code neither knows nor needs to know what
+ * the climate is; all that changes is what the ground turns out to be made of
+ * once the water has been taken away. Turf thins to desert scrub and then to
+ * bare sand, alpine talus becomes varnished pavement, and the bedrock beneath
+ * is a sandstone sequence rather than a granite-carbonate one.
+ *
+ * Keeping the roles fixed is what lets the two climates cross-fade at all. A
+ * biome that owned its own layer list would have to blend coverage between two
+ * different classifications at the margin, and the margin is thousands of
+ * metres wide.
+ *
+ * Reflectances measured as above: dry quartz sand really does return about a
+ * third of the light falling on it, which makes a desert floor at noon the
+ * brightest natural surface in a scene short of fresh snow.
+ */
+export const ARID_SURFACE_LAYERS = {
+  grass: { name: 'wash', albedo: [0.086, 0.092, 0.046], roughness: 0.93, relief: 0.1 },
+  meadow: { name: 'scrub', albedo: [0.162, 0.142, 0.086], roughness: 0.93, relief: 0.12 },
+  soil: { name: 'sand', albedo: [0.335, 0.268, 0.171], roughness: 0.96, relief: 0.05 },
+  scree: { name: 'pavement', albedo: [0.138, 0.116, 0.089], roughness: 0.88, relief: 0.16 },
+  rock: { name: 'sandstone', albedo: [0.325, 0.246, 0.163], roughness: 0.88, relief: 0.6 },
+  snow: { name: 'snow', albedo: [0.7, 0.73, 0.78], roughness: 0.7, relief: 0.14 },
+} satisfies Record<string, SurfaceLayer>
+
+/**
+ * Climate blend used by every biome-dependent term.
+ *
+ * Shared so the shading, the roughness and the relief all cross over at the
+ * same place. Splitting the thresholds — even slightly — puts sandstone colour
+ * on ground that still carries alpine relief for a kilometre of the margin.
+ */
+function aridBlend(slow: TerrainSlowFields): any {
+  return smoothstep(0.25, 0.75, slow.aridity)
+}
+
+/**
  * World sizes of the detail bands, in metres.
  *
  * Each is used twice: once to band-limit the effect against the pixel footprint
@@ -99,6 +141,48 @@ const CLUMP_WAVELENGTH = 0.34
 const BLADE_WAVELENGTH = CLUMP_WAVELENGTH / 2.07 ** 2
 const PEBBLE_SIZE = 0.16
 const LOOSE_STONE_SIZE = 0.28
+/**
+ * Wind ripples on dune sand, metres crest to crest.
+ *
+ * Ripples are the finest thing in this shader that still reads at a distance,
+ * and they read for a reason no other micro band does: they are *organised*.
+ * Every crest in a patch is parallel to every other, so instead of averaging
+ * into flat grey as they pass below a pixel they average into a directional
+ * sheen that changes with the sun. That is why a dune photographed from a
+ * kilometre away still looks like sand rather than like a smooth grey hill.
+ */
+const RIPPLE_WAVELENGTH = 0.26
+/** Width of a grainflow tongue on a slipface, metres. */
+const GRAINFLOW_WIDTH = 1.4
+/**
+ * The wind that orders every aeolian bedform, as a unit vector in world XZ.
+ *
+ * This is a constant, and it has to be. The tempting version derives the ripple
+ * direction per pixel from the surface normal, so that crests follow the
+ * contour of the dune and curl correctly around a barchan horn. It produces
+ * catastrophic moire, and the reason is worth stating because nothing about the
+ * expression looks dangerous:
+ *
+ *   phase = dot(position.xz, axis) / wavelength
+ *
+ * If `axis` varies with position, the gradient of that dot product is not
+ * `axis` but `axis + (d axis/d x)^T . position`. World positions here run to
+ * eight kilometres, so an axis wobble of a hundredth of a radian — far less
+ * than the normal varies across a single ripple — moves the projection by fifty
+ * metres, which is two hundred wavelengths. The true spatial frequency explodes
+ * while `detailFade` still believes the feature is 26 cm across and declines to
+ * band-limit anything, and the aliased phase then feeds the shading normal.
+ *
+ * A constant axis makes the gradient exactly `axis / wavelength`, which is what
+ * every fade in this file assumes. It also costs nothing physically: one wind
+ * builds one dune field, ripples are oriented by that wind, and the crest of a
+ * transverse dune is already perpendicular to it — so contour-parallel ripples
+ * are what a fixed downwind bearing gives on the ramps anyway. The bearing is
+ * the middle of the range the compiler's own dune wind drifts across.
+ */
+const WIND_AXIS = /*@__PURE__*/ vec2(0.362, 0.932)
+/** Across-wind, i.e. along a ripple crest. */
+const CREST_AXIS = /*@__PURE__*/ vec2(-0.932, 0.362)
 
 /** Blend sharpness for the height-based layer resolve, in metres. */
 const HEIGHT_BLEND_DEPTH = 0.14
@@ -146,6 +230,8 @@ export interface TerrainSlowFields {
   bedThickness: any
   bedExposure: any
   jointing: any
+  /** Regional climate, 0 temperate alpine to 1 true desert. */
+  aridity: any
   macro: any
   /** Signed mean curvature: +1 convex rib, -1 concave hollow. */
   curvature: any
@@ -182,12 +268,22 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
   )
   const materialAttribute = vec4(attribute('terrainSurface2', 'vec4') as any)
   const moistureLichen = unpackUnitPair(materialAttribute.y)
+  // Both halves of a packed pair have to be split in the vertex stage. The
+  // packing is not linear across the seam between the two bytes, so
+  // interpolating the packed word and unpacking afterwards would produce a
+  // value that sweeps the whole range wherever the low byte wraps.
+  const mottleAridity = unpackUnitPair(materialAttribute.w)
   const material = varying(
     materialAttribute,
     'terrainSlowMaterial',
   )
   const bakedMoistureLichen = varying(
-    vec4(moistureLichen.low, moistureLichen.high, 0, 0),
+    vec4(
+      moistureLichen.low,
+      moistureLichen.high,
+      mottleAridity.low,
+      mottleAridity.high,
+    ),
     'terrainBakedMoistureLichen',
   )
   const warpedAndTint = varying(
@@ -219,7 +315,8 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
     bedExposure: relief.w,
     jointing: material.x,
     curvature: material.z.mul(2).sub(1),
-    mottle: material.w,
+    mottle: bakedMoistureLichen.z,
+    aridity: bakedMoistureLichen.w,
     bedded: position.add(warpedAndTint.xyz.mul(2).sub(1).mul(16)),
     regionalTint: warpedAndTint.w,
     buttress: relief.x,
@@ -267,6 +364,11 @@ export interface SurfaceDetail {
   /** Per-layer detail values reused for albedo shading. */
   detail: {
     strata: any
+    crossBedding: any
+    arid: any
+    ripple: any
+    grainflow: any
+    slipface: any
     bedHardness: any
     bedProfile: any
     bedStep: any
@@ -324,8 +426,10 @@ export function surfaceDetail(
   const bedExposure = float(0).toVar('bedExposure')
   const bedStep = float(0).toVar('bedStep')
   const strata = float(0.5).toVar('strata')
+  const crossBedding = float(0.5).toVar('crossBedding')
   const blocks = float(0.25).toVar('blocks')
   const buttress = float(0.5).toVar('buttress')
+  const arid = aridBlend(slow).toVar('arid')
 
   // None of the following fields can affect a pixel with zero rock and scree
   // coverage. Keeping them behind one coherent material branch avoids paying
@@ -398,6 +502,42 @@ export function surfaceDetail(
         .mix(float(0.5), weights.rock.oneMinus().mul(0.85)),
     )
 
+    // --- cross-bedding ----------------------------------------------------
+    // Inside a single aeolian bed the laminae are not parallel to the bed at
+    // all: they are the preserved slipfaces of the dunes that built it, dipping
+    // up to thirty degrees and then sliced off flat at the top of the set where
+    // the next dune migrated across. Sets a metre or two thick, each recording
+    // a different wind, truncating one another at an angle — that is the
+    // texture of a desert sandstone, and it is the reason a Navajo cliff cannot
+    // be produced by taking a limestone cliff and making it orange. It is also
+    // the one rock texture here that is finer than the bedding rather than
+    // coarser, so it carries the face at the ranges where the beds themselves
+    // have already merged into a single tone.
+    If(arid.greaterThan(0), () => {
+      const setPhase = fbm1(bandCoordinate.floor().mul(2.3).add(11.4), 2)
+      // The tilt comes from the set's own index, so every lamina within a set
+      // agrees and the boundary between two sets is a real angular discordance
+      // rather than a phase shift in one continuous pattern.
+      const tilt = setPhase.sub(0.5).mul(2.2)
+      const laminaNormal = normalize(
+        beddingNormal.add(vec3(tilt, 0, tilt.mul(0.6)).mul(0.62)),
+      )
+      const laminaDepth = bedded
+        .dot(laminaNormal)
+        .div(bedThickness.mul(0.085))
+        .toVar('laminaDepth')
+      const lamina = laminaDepth.fract()
+      crossBedding.assign(
+        // A lamina is a grain-size parting, not a groove: it holds a hairline
+        // shadow on one side and fades over the rest of its spacing.
+        smoothstep(0.0, 0.22, lamina)
+          .mul(falloff(1.0, 0.72, lamina))
+          .mul(arid)
+          .mul(cutAngle)
+          .mul(smoothstep(0.2, 0.65, weights.rock)),
+      )
+    })
+
   // --- meso band: rock blocks and boulders --------------------------------
   // Jointing is not uniform: whole stretches of a face are massive and smooth,
   // others are broken into blocks. Modulating the amount by bed hardness and by
@@ -437,6 +577,9 @@ export function surfaceDetail(
   const pebbleId = float(0.5).toVar('pebbleId')
   const clump = float(0.5).toVar('clump')
   const blade = float(0.5).toVar('blade')
+  const ripple = float(0.5).toVar('ripple')
+  const grainflow = float(0.5).toVar('grainflow')
+  const slipface = float(0).toVar('slipface')
 
   If(footprint.lessThan(lodDeadFootprint(CRACK_WAVELENGTH)), () => {
     If(rockyCoverage.greaterThan(0), () => {
@@ -489,6 +632,100 @@ export function surfaceDetail(
     })
   })
 
+  // --- aeolian band: ripples and grainflow ---------------------------------
+  // Everything here applies to one thing only: sand, in a climate dry enough to
+  // keep moving it. Sand under an alpine sky is a river bar, and it has none of
+  // this.
+  const sandCoverage = weights.soil.mul(arid).toVar('sandCoverage')
+  If(sandCoverage.greaterThan(0.02), () => {
+    // A slipface is sand standing at its angle of repose, and nothing else in a
+    // desert is both that steep and that clean. Thirty-two degrees puts the
+    // surface normal at y = 0.85, so the threshold sits either side of a slope
+    // of 0.15 and separates the face from the windward ramp — around four
+    // degrees — with room to spare.
+    slipface.assign(smoothstep(0.075, 0.135, weights.slope))
+
+    If(footprint.lessThan(detailDeadFootprint(GRAINFLOW_WIDTH)), () => {
+      // Both bedforms are indexed off the same fixed wind frame. See WIND_AXIS
+      // for why this must not be derived from the surface.
+      const downwind = dot(position.xz, WIND_AXIS).toVar('downwind')
+      const alongCrest = dot(position.xz, CREST_AXIS).toVar('alongCrest')
+
+      // Grainflow tongues: sand released at the brink does not slide as a sheet
+      // but in discrete tongues a metre or two wide that run the full height of
+      // the face. Stretching the sample coordinate ten to one along the fall
+      // line is what makes them tongues rather than blobs — the same field
+      // sampled isotropically gives a mottle that reads as dirt on the sand.
+      If(slipface.greaterThan(0.01), () => {
+        // A tongue is a stripe: constant down the fall line, varying across it.
+        // That makes the field genuinely one-dimensional, and taking it from a
+        // scalar noise indexed by the across-slope coordinate is both cheaper
+        // than a stretched 3D tap and more faithful — an anisotropically scaled
+        // 3D noise still decorrelates slowly along the stretched axis, so its
+        // tongues wander and break up over a few metres instead of running the
+        // full height of the face the way real grainflow does.
+        // A slipface faces downwind by construction, so the across-slope
+        // direction the tongues are indexed by is the across-wind one.
+        const acrossSlope = alongCrest.div(GRAINFLOW_WIDTH)
+        // Tongues do not all reach the same distance, so a slow term along the
+        // fall line lets some die out part-way down without ever bending one.
+        const reach = fbm1(downwind.mul(0.04).add(7.3), 1)
+        grainflow.assign(
+          fadeToMean(
+            mix(float(0.5), fbm1(acrossSlope, 3), reach.mul(0.6).add(0.55).clamp(0, 1)),
+            float(0.5),
+            detailFade(footprint, float(GRAINFLOW_WIDTH)),
+          ),
+        )
+      })
+
+      If(footprint.lessThan(detailDeadFootprint(RIPPLE_WAVELENGTH)), () => {
+        const rippleCoordinate = downwind.div(RIPPLE_WAVELENGTH)
+        // Real ripple crests meander and fork rather than running dead
+        // straight, and the forks are what stop a large expanse from reading as
+        // printed corduroy. Displacing the phase produces both at once: where
+        // the displacement gradient exceeds one crest spacing, a crest divides.
+        //
+        // The displacement varies only *along* the crest, which is what makes
+        // it a one-dimensional field and lets a scalar noise stand in for the
+        // 3D tap this started as. That is not a saving at the cost of quality:
+        // a 3D noise also varies across the crests, which shifts neighbouring
+        // crests independently and mushes the parallel banding that is the
+        // whole reason ripples read at distance.
+        const meander = fbm1(alongCrest.mul(0.42), 2).sub(0.5).mul(1.4)
+        const rippleWave = rippleCoordinate.add(meander).fract()
+        ripple.assign(
+          fadeToMean(
+            // Ripples carry the same asymmetry as the dune, for the same
+            // reason and at a thousandth the size: a gentle stoss and a short
+            // lee, all facing the same way.
+            smoothstep(0, 0.66, rippleWave).mul(falloff(1.0, 0.74, rippleWave)),
+            float(0.5),
+            detailFade(footprint, float(RIPPLE_WAVELENGTH)),
+          ),
+        )
+        // Avalanching wipes the face clean; ripples rebuild only where the sand
+        // has come to rest. This is the single clearest read on a dune — the
+        // ripple texture stops dead at the brink line.
+        ripple.assign(mix(ripple, float(0.5), slipface.mul(0.9)))
+      })
+    })
+  })
+
+  // The ripple's contribution to *relief* has to die long before its
+  // contribution to colour does. It is a sawtooth, and a sawtooth's derivative
+  // reaches Nyquist several times sooner than its value: at three samples per
+  // period the colour band is merely soft, while the gradient driving the
+  // shading normal is already pure noise — and a noisy normal on a sunlit sand
+  // slope does not read as texture, it reads as black. Fading the relief copy
+  // against a feature size a third of the true one buys that margin, and costs
+  // only the last few metres of visible ripple bump.
+  const rippleRelief = fadeToMean(
+    ripple,
+    float(0.5),
+    detailFade(footprint, float(RIPPLE_WAVELENGTH * 0.34)),
+  ).toVar('rippleRelief')
+
   // --- assemble relief ----------------------------------------------------
   // Amplitudes are in metres and roughly proportional to each band's
   // wavelength. This is the detail that was missing before: a 9 m rib carrying
@@ -507,6 +744,10 @@ export function surfaceDetail(
     .add(outcrop.mul(0.42))
     .add(blocks.mul(0.24))
     .add(crack.mul(0.085))
+    // Laminae stand out by a few centimetres at most — differential cementation
+    // across a grain-size parting, not a ledge. Any more and a cliff face reads
+    // as corrugated iron.
+    .add(crossBedding.mul(0.055))
     .toVar('rockRelief')
 
   const screeRelief = pebble
@@ -551,6 +792,18 @@ export function surfaceDetail(
     .add(looseStone.mul(0.075))
     .add(macro.mul(0.55))
     .toVar('turfRelief')
+
+  // Sand relief is tiny in absolute terms and that is the point. A ripple is
+  // about a centimetre and a half from trough to crest; a grainflow tongue
+  // stands a few centimetres proud of the face beside it. Sand's whole visual
+  // character comes from being *smooth at every scale but one*, so the macro
+  // band is also cut right back here — undulating the sand the way turf
+  // undulates is what makes procedural deserts look like carpet.
+  const sandRelief = rippleRelief
+    .mul(0.016)
+    .add(grainflow.mul(0.055).mul(slipface))
+    .add(macro.mul(0.18))
+    .toVar('sandRelief')
   const snowRelief = macro.mul(0.4).toVar('snowRelief')
 
   // Layer competition uses only the micro band. Mixing metre-scale structure
@@ -567,9 +820,15 @@ export function surfaceDetail(
   const microHeights = {
     grass: clump.sub(0.5).mul(0.1),
     meadow: clump.mul(0.7).add(macro.mul(0.3)).sub(0.5).mul(0.08),
-    soil: macro.sub(0.5).mul(0.05).sub(0.01),
+    // In an arid climate this slot is sand, which lies flatter than any soil
+    // and buries what it laps against rather than interlocking with it.
+    soil: mix(
+      macro.sub(0.5).mul(0.05).sub(0.01),
+      rippleRelief.sub(0.5).mul(0.02).add(0.01),
+      arid,
+    ),
     scree: pebble.sub(0.35).add(blocks.sub(0.25).mul(0.4)).mul(0.14).add(0.015),
-    rock: crack.add(strata).sub(1).mul(0.12).add(0.04),
+    rock: crack.add(strata).sub(1).mul(0.12).add(crossBedding.sub(0.5).mul(0.03)).add(0.04),
     // Snow drifts fill hollows: smooth, and it buries what is beneath.
     snow: macro.sub(0.5).mul(0.06).add(0.07),
   }
@@ -579,7 +838,7 @@ export function surfaceDetail(
   const reliefByLayer = {
     grass: turfRelief,
     meadow: turfRelief,
-    soil: turfRelief,
+    soil: mix(turfRelief, sandRelief, arid),
     scree: screeRelief,
     rock: rockRelief,
     snow: snowRelief,
@@ -601,12 +860,24 @@ export function surfaceDetail(
     .mul(0.5)
     .add(buttress.mul(1.1))
     .add(crack.mul(0.09))
+    .add(crossBedding.mul(0.05))
   const normalTurfHeight = macro
     .mul(0.5)
     .add(clump.mul(0.09))
     .add(blade.mul(0.0108))
     .add(looseStone.mul(0.036))
-  const normalHeight = mix(normalTurfHeight, normalRockHeight, rocky)
+  const normalSandHeight = macro
+    .mul(0.18)
+    .add(rippleRelief.mul(0.016))
+    .add(grainflow.mul(0.05).mul(slipface))
+  // Sand is resolved before rock: an erg has no rock in it to speak of, and
+  // where a dune laps onto an outcrop the rock is what stands proud.
+  const sandy = weights.soil.mul(arid).clamp(0, 1)
+  const normalHeight = mix(
+    mix(normalTurfHeight, normalSandHeight, sandy),
+    normalRockHeight,
+    rocky,
+  )
 
   return {
     height,
@@ -614,6 +885,11 @@ export function surfaceDetail(
     resolved,
     detail: {
       strata,
+      crossBedding,
+      arid,
+      ripple,
+      grainflow,
+      slipface,
       bedHardness,
       bedProfile,
       bedStep,
@@ -689,6 +965,9 @@ export function shadeSurface(
   slow: TerrainSlowFields,
 ): { albedo: any; roughness: any; cavity: any } {
   const { detail, resolved } = surface
+  // Recomputed nowhere: the relief pass already resolved the climate blend, and
+  // shading has to cross over at exactly the same place it did.
+  const arid = detail.arid
 
   // --- rock --------------------------------------------------------------
   // One lithology per region, varying slowly, rather than a different rock type
@@ -700,10 +979,40 @@ export function shadeSurface(
   const bedType = detail.bedHardness
   const carbonate = vec3(0.345, 0.330, 0.292)
   const silicate = vec3(0.168, 0.163, 0.166)
+
+  // The alpine sequence below keeps its bed-to-bed colour spread deliberately
+  // tiny, because a limestone or granite sequence really does differ only in
+  // grain and cement. A red-bed sandstone is the one lithology where that rule
+  // inverts: what changes between beds is the oxidation state of the iron in
+  // the cement, and that swings the rock from hematite red through buff to
+  // near-white across a few metres of section. Stripes legible from thirty
+  // kilometres are the correct answer here — they are what the Colorado Plateau
+  // actually looks like. One formation is one basin with one iron budget, so
+  // the *range* a sequence swings over stays regional even though the beds
+  // inside it alternate fast.
+  const ironBudget = smoothstep(0.25, 0.78, slow.regionalTint)
+  const sandstoneBed = mix(
+    mix(vec3(0.268, 0.132, 0.074), vec3(0.392, 0.330, 0.223), smoothstep(0.18, 0.86, bedType)),
+    mix(vec3(0.300, 0.148, 0.083), vec3(0.368, 0.310, 0.210), smoothstep(0.3, 0.7, bedType)),
+    ironBudget,
+  )
+
+  // One lithology, crossed over between the climates *before* any of the shared
+  // weathering is applied to it.
+  //
+  // The obvious structure — shade an alpine rock, shade a sandstone, and mix
+  // the two results — is what this replaces, and the reason is register
+  // pressure rather than tidiness. Both palettes are live simultaneously from
+  // the moment the first is computed until the final blend, which on a shader
+  // that already carries forty-two noise evaluations is enough extra live vec3
+  // state to halve occupancy. Blending the *inputs* costs one lerp, keeps a
+  // single set of colours alive, and produces the same picture, because every
+  // modifier downstream — bedding, jointing, weathering, cavity — applies to
+  // both rocks in exactly the same way.
   const lithology = mix(
-    silicate,
-    carbonate,
-    smoothstep(0.3, 0.66, slow.regionalTint),
+    mix(silicate, carbonate, smoothstep(0.3, 0.66, slow.regionalTint)),
+    sandstoneBed,
+    arid,
   ).toVar('lithology')
 
   // Resistant beds weather pale and clean; weak beds hold more clay, weather
@@ -713,7 +1022,10 @@ export function shadeSurface(
   // change of colour, and any appreciable colour step turns the sequence into
   // painted stripes that stay legible from kilometres away — which real beds,
   // seen through that much air, do not.
-  const bedValue = mix(float(0.88), float(1.07), bedType)
+  // Damped in arid ground: `sandstoneBed` already carries a far larger
+  // bed-to-bed swing of its own, and stacking this one on top of it drives the
+  // pale beds to white.
+  const bedValue = mix(float(0.88), float(1.07), bedType).mix(float(1), arid.mul(0.7))
   const bedWarmth = mix(vec3(1.03, 0.99, 0.94), vec3(0.99, 1.0, 1.01), bedType)
   const bedTint = lithology.mul(bedValue).mul(bedWarmth)
 
@@ -725,10 +1037,17 @@ export function shadeSurface(
   const mottle = slow.mottle
   // Limonite staining bleeds downwards from iron-bearing beds and concentrates
   // where water has run over the face, so it is keyed to flow, not to noise.
+  // In arid ground the same multiplier slot carries the cross-bedding instead:
+  // the coarse foreset laminae are cemented differently from the fine ones
+  // between them, so they read as a value change as much as a relief one.
   const ironStain = mix(
-    vec3(1, 1, 1),
-    vec3(1.22, 0.82, 0.52),
-    smoothstep(0.45, 0.9, mottle.mul(0.5).add(slow.flow.mul(0.5))).mul(0.7),
+    mix(
+      vec3(1, 1, 1),
+      vec3(1.22, 0.82, 0.52),
+      smoothstep(0.45, 0.9, mottle.mul(0.5).add(slow.flow.mul(0.5))).mul(0.7),
+    ),
+    vec3(mix(float(0.86), float(1.1), detail.crossBedding)),
+    arid,
   )
   const blockShade = mix(float(0.78), float(1.08), detail.blocks)
   const buttressShade = mix(float(0.74), float(1.06), detail.buttress)
@@ -759,50 +1078,100 @@ export function shadeSurface(
     vec3(0.152, 0.156, 0.104),
     detail.clump,
   )
+  // Crustose lichen needs recurring humidity to grow at all. Its absence is one
+  // of the quieter reasons a desert cliff reads as a desert cliff: nothing has
+  // softened or greened the rock, so the bare lithology carries the whole face.
   const lichenMask = weights.lichen
+    .mul(arid.oneMinus())
     .mul(smoothstep(0.4, 0.85, mottle))
     .mul(smoothstep(0.35, 0.8, detail.crack))
     .mul(falloff(0.85, 0.25, weights.slope))
     .mul(smoothstep(0.35, 0.7, detail.macro))
+  // Desert varnish: a micron-thick manganese and iron oxide film that takes
+  // millennia of bacterial accumulation to build, so it survives only where a
+  // face is stable and dry. That makes it the exact inverse of the wetness term
+  // further down — varnish blackens the panels *between* the water tracks, and
+  // the runoff lines stay pale because they are the one place it gets stripped.
+  // Streaked canyon walls are almost entirely this.
+  //
+  // It shares the rock albedo with the lichen rather than forking it: the two
+  // masks are mutually exclusive by construction (one is gated on `arid`, the
+  // other on its complement) so applying both in sequence costs one extra lerp
+  // and never needs a second copy of the rock to blend against.
+  const varnish = smoothstep(0.3, 0.8, mottle)
+    .mul(smoothstep(0.28, 0.68, weights.slope))
+    .mul(falloff(0.55, 0.12, slow.flow))
+    .mul(arid)
+    .toVar('varnish')
   const rockAlbedo = mix(rockCracked, lichenColour, lichenMask.mul(0.7))
+    .mix(vec3(0.042, 0.034, 0.030), varnish.mul(0.78))
 
   // --- scree -------------------------------------------------------------
   // Talus is the same rock, freshly broken. It is lighter than the face it fell
   // from because the fracture surfaces are unweathered, and it is desaturated
   // by the rock flour between the clasts.
+  //
+  // Desert pavement is the same expression read in an arid climate, and it only
+  // needs two of its terms moved. Pavement is a single armoured layer of clasts
+  // varnished nearly black on their exposed faces, set in a matrix of pale
+  // wind-winnowed fines — so the clasts go darker, the matrix goes lighter, and
+  // the contrast between them widens. Averaging the two into one mid-brown,
+  // which is what a plain gravel tint gives, loses the whole effect.
   const freshRock = mix(lithology, vec3(0.6), float(0.12)).mul(1.05)
-  const pebbleTint = freshRock.mul(mix(float(0.72), float(1.18), detail.pebbleId))
+  const clastValue = mix(float(0.72), float(1.18), detail.pebbleId).mix(
+    mix(float(0.28), float(0.62), detail.pebbleId),
+    arid,
+  )
+  const matrixValue = float(0.62).mix(float(1.34), arid)
   const screeAlbedo = mix(
-    freshRock.mul(0.62),
-    pebbleTint,
-    smoothstep(0.15, 0.7, detail.pebble),
+    freshRock.mul(matrixValue),
+    freshRock.mul(clastValue),
+    smoothstep(0.15, 0.7, detail.pebble).mix(smoothstep(0.18, 0.66, detail.pebble), arid),
   ).mul(mix(float(0.86), float(1.1), detail.macro))
 
-  // --- vegetation --------------------------------------------------------
+  // --- ground cover ------------------------------------------------------
   // Sward is not one colour with a brightness ramp over it. At walking distance
   // it resolves into three things at once: the living crown of each tussock,
   // the bleached dead litter packed between the crowns, and the bare earth
   // showing through wherever the mat is thin. Ramping a single hue by a noise
   // field can reproduce none of that, and a flat expanse of one saturated
   // colour is what a hillside looks like only in a texture atlas.
+  //
+  // A desert floor has exactly the same three components and differs only in
+  // what each one is made of: the bare fraction is sand rather than humus, the
+  // litter is bleached almost white, and the living fraction is the grey-green
+  // of woody scrub instead of turf. So the climate is folded into the three
+  // colours and the structure above them is shared, which is both far cheaper
+  // than shading two grounds and blending them, and a better description — the
+  // reason a desert reads as sparse is that the *coverage* is low, not that a
+  // different kind of surface is being drawn.
   const tussock = smoothstep(0.34, 0.74, detail.clump).toVar('tussock')
   const thinning = falloff(0.42, 0.08, detail.clump).toVar('swardThinning')
   const bladeShade = mix(float(0.86), float(1.1), detail.blade)
 
-  const bareEarth = mix(
-    vec3(0.062, 0.048, 0.035),
-    vec3(0.098, 0.079, 0.058),
+  // Sand is the same rock as the cliff with its iron coatings abraded off by
+  // transport, so it is far paler and less saturated while staying
+  // unmistakably related to it.
+  const sandBase = mix(
+    vec3(0.318, 0.252, 0.158),
+    vec3(0.408, 0.345, 0.238),
     detail.macro,
+  ).mul(mix(float(0.95), float(1.06), ironBudget.oneMinus())).toVar('sandBase')
+
+  const bareEarth = mix(
+    mix(vec3(0.062, 0.048, 0.035), vec3(0.098, 0.079, 0.058), detail.macro),
+    sandBase,
+    arid,
   )
   const litter = mix(
-    vec3(0.112, 0.099, 0.062),
-    vec3(0.156, 0.138, 0.088),
-    detail.macro,
+    mix(vec3(0.112, 0.099, 0.062), vec3(0.156, 0.138, 0.088), detail.macro),
+    sandBase.mul(0.88),
+    arid,
   )
   const liveTurf = mix(
-    vec3(0.038, 0.062, 0.024),
-    vec3(0.068, 0.094, 0.038),
-    detail.macro,
+    mix(vec3(0.038, 0.062, 0.024), vec3(0.068, 0.094, 0.038), detail.macro),
+    mix(vec3(0.082, 0.078, 0.038), vec3(0.152, 0.142, 0.078), detail.macro),
+    arid,
   )
 
   // Stones sit in the sward, so they carry its shadow at their base and are
@@ -812,6 +1181,9 @@ export function shadeSurface(
     .mul(mix(float(0.72), float(1.15), detail.pebbleId))
   const stoneMask = smoothstep(0.3, 0.62, detail.looseStone)
 
+  // Lush ground: turf in the mountains, and the one genuinely green line in a
+  // desert, where a wash keeps a root zone wet long after the surface has
+  // dried. It earns its saturation precisely because nothing around it has any.
   const grassAlbedo = mix(
     mix(
       mix(litter, liveTurf, tussock).mul(bladeShade),
@@ -821,9 +1193,9 @@ export function shadeSurface(
     stoneColour,
     stoneMask,
   )
-  // Dry sward: the same structure, with the living fraction bleached out. The
+  // Dry ground: the same structure with the living fraction bleached out. The
   // contrast between this and green turf along a drainage line is the strongest
-  // vegetation cue a mountainside has.
+  // vegetation cue a mountainside has, and in a desert it is the only one.
   const meadowAlbedo = mix(
     mix(
       mix(litter.mul(1.04), mix(litter, liveTurf, float(0.3)), tussock).mul(bladeShade),
@@ -833,17 +1205,40 @@ export function shadeSurface(
     stoneColour.mul(1.06),
     stoneMask,
   )
+
+  // Bare ground: soil in the mountains, open sand in the desert. Only this slot
+  // takes the aeolian treatment, because only this slot is ever sand.
+  //
+  // Ripples sort the sand as they build: the coarse, dark, heavy grains are
+  // driven up and left on the crests while the fine pale ones collect in the
+  // troughs, so the colour banding is *inverted* relative to the shading — the
+  // crests are the darker stripe even though they catch the light. Getting that
+  // backwards, by tinting with height the way a naive detail texture would,
+  // cancels the effect and leaves the ripples reading as pure bump.
+  const aeolian = mix(
+    float(1).mix(mix(float(1.06), float(0.9), detail.ripple), arid),
+    // A slipface is freshly avalanched: better sorted, more uniform, and a
+    // touch darker than the rippled ramp because the loose surface layer packs
+    // open and traps light between the grains.
+    mix(float(0.9), float(0.99), detail.grainflow).mul(arid).add(arid.oneMinus()),
+    detail.slipface,
+  )
   const soilAlbedo = mix(
     bareEarth,
     mix(bareEarth, litter, float(0.45)),
     detail.macro,
-  )
+  ).mul(aeolian)
 
   // --- snow --------------------------------------------------------------
   const snowAlbedo = vec3(0.7, 0.73, 0.78)
     .mul(mix(float(0.9), float(1.03), detail.macro))
     .mul(mix(float(0.94), float(1.02), detail.clump))
 
+  // One material per role, already carrying its climate. The cross-over happened
+  // upstream in the inputs to each of these, not here on their outputs, so the
+  // margin costs a handful of lerps rather than a second copy of the entire
+  // shading pass. Coverage is untouched by climate either way: the margin
+  // changes what a layer is made of, never which layer is where.
   const albedo = vec3(0).toVar('albedo')
   albedo.addAssign(grassAlbedo.mul(resolved.grass))
   albedo.addAssign(meadowAlbedo.mul(resolved.meadow))
@@ -865,6 +1260,10 @@ export function shadeSurface(
   // consequence on the drainage network the terrain was carved with.
   const wetness: any = float(smoothstep(0.35, 0.9, float(slow.flow)))
     .mul(smoothstep(0.1, 0.45, weights.moisture).mul(0.6).add(0.4))
+    // A desert drainage is dry almost every day of its life. It keeps a trace
+    // of the effect because the shaded pools under a pour-off genuinely do
+    // persist, but a canyon whose every water track glistens is a rainforest.
+    .mul(mix(float(1), float(0.3), arid))
     .mul(resolved.rock.add(resolved.scree).add(resolved.soil).clamp(0, 1))
     .mul(falloff(0.72, 0.2, weights.slope).mul(0.5).add(0.5))
     .clamp(0, 1)
@@ -872,16 +1271,21 @@ export function shadeSurface(
   albedo.mulAssign(mix(vec3(1), vec3(0.48, 0.5, 0.54), wetness))
 
   const roughness = float(0).toVar('roughness')
-  roughness.addAssign(float(SURFACE_LAYERS.grass.roughness).mul(resolved.grass))
-  roughness.addAssign(float(SURFACE_LAYERS.meadow.roughness).mul(resolved.meadow))
-  roughness.addAssign(float(SURFACE_LAYERS.soil.roughness).mul(resolved.soil))
+  /** A role's roughness, crossed over between the two climates' tables. */
+  const layerRoughness = (key: keyof typeof SURFACE_LAYERS): any =>
+    mix(
+      float(SURFACE_LAYERS[key].roughness),
+      float(ARID_SURFACE_LAYERS[key].roughness),
+      arid,
+    )
+  roughness.addAssign(layerRoughness('grass').mul(resolved.grass))
+  roughness.addAssign(layerRoughness('meadow').mul(resolved.meadow))
+  roughness.addAssign(layerRoughness('soil').mul(resolved.soil))
   // Broken talus scatters light very differently from the polished face above
   // it, which is most of what makes a fan legible at distance.
-  roughness.addAssign(
-    float(SURFACE_LAYERS.scree.roughness).add(0.1).mul(resolved.scree),
-  )
-  roughness.addAssign(float(SURFACE_LAYERS.rock.roughness).mul(resolved.rock))
-  roughness.addAssign(float(SURFACE_LAYERS.snow.roughness).mul(resolved.snow))
+  roughness.addAssign(layerRoughness('scree').add(0.1).mul(resolved.scree))
+  roughness.addAssign(layerRoughness('rock').mul(resolved.rock))
+  roughness.addAssign(layerRoughness('snow').mul(resolved.snow))
   // Damp rock in the shaded crack bottoms reads as wet stone, and hard beds
   // weather smoother than the soft ones between them.
   // Weathered rock is matte. Damp crack bottoms and hard, close-grained beds
@@ -894,6 +1298,10 @@ export function shadeSurface(
   // The other half of wetness: a water film is optically smooth, so wet rock
   // carries a broad sheen that dry rock never does.
   roughness.assign(mix(roughness, float(0.28), wetness.mul(0.75)))
+  // Loose, well-sorted, freshly avalanched sand is measurably smoother than the
+  // rippled and crusted ramp above it, which is why a slipface picks up a sheen
+  // in raking light that the rest of the dune does not.
+  roughness.subAssign(resolved.soil.mul(arid).mul(detail.slipface).mul(0.08))
 
   // Cavity occlusion from the relief itself: anything sitting below the local
   // mean height is darkened, which is what sells crack and joint depth.
@@ -904,8 +1312,19 @@ export function shadeSurface(
     .add(detail.blade.mul(0.2))
     .add(falloff(0.6, 0.3, detail.looseStone).mul(0.06))
     .add(0.16)
+  // Sand occludes almost nothing: it is a smooth surface with a centimetre of
+  // ripple on it, and the ripple troughs are open enough to see most of the
+  // sky. A desert reads bright and open largely because of what is *not* here.
+  const sandCavity = mix(float(0.86), float(1), detail.ripple).sub(
+    detail.slipface.mul(0.04),
+  )
+  const groundCavity = mix(
+    turfCavity,
+    sandCavity,
+    resolved.soil.mul(arid).clamp(0, 1),
+  )
   const cavity = clamp(
-    mix(turfCavity, rockCavity, resolved.rock.add(resolved.scree).clamp(0, 1)).add(0.3),
+    mix(groundCavity, rockCavity, resolved.rock.add(resolved.scree).clamp(0, 1)).add(0.3),
     0.28,
     1,
   )

@@ -25,6 +25,10 @@ export interface TerrainMaterialFields {
   buttress: number
   /** 0..1 proximity to a drainage line: the path water actually takes. */
   flow: number
+  /** 0..1 regional climate, 0 temperate alpine to 1 true desert. */
+  aridity: number
+  /** 0..1 how completely a wind-blown sand sea has taken over the surface. */
+  erg: number
 }
 
 /** Final broad material coverage baked into each compiled terrain vertex. */
@@ -90,11 +94,20 @@ export function evaluateTerrainMaterialFields(
   // where there is less catchment above and more of the year is frozen.
   const altitudeDrying = smoothstep(210, 540, y)
   const flow = terrain.flow
+  const { aridity, erg } = terrain
   const moisture = clamp(
     0.4 +
       flow * 0.5 +
       (1 - smoothstep(0.45, 1.4, slope)) * 0.24 -
-      altitudeDrying * 0.42 +
+      altitudeDrying * 0.42 -
+      // Climate enters the material system at exactly one place: it takes the
+      // water away. Everything that distinguishes a desert downstream — bare
+      // bedrock, unfixed sand, no turf, no moss, no wet runnels — follows from
+      // that one subtraction through fields that already existed, rather than
+      // from a parallel set of desert-only rules. The residue left at full
+      // aridity is deliberate: even an erg has damp interdune hollows where
+      // the water table is close, and those are where its only vegetation is.
+      aridity * 0.55 +
       (fbm(position, 150, 2) - 0.5) * 0.3,
     0,
     1,
@@ -109,6 +122,12 @@ export function evaluateTerrainMaterialFields(
     0.62 +
       flow * 0.3 -
       smoothstep(0.9, 2.1, slope) * 0.5 +
+      // A desert is not short of loose material — it is short of the water and
+      // roots that would fix it in place. Sand is supplied by the weathering of
+      // the sandstone itself and then moved and re-sorted by wind, so the arid
+      // basins carry a *larger* budget of mobile regolith than the alpine
+      // valleys do, not a smaller one.
+      aridity * 0.22 +
       (fbm(position, 46, 2) - 0.5) * 0.34,
     0,
     1,
@@ -136,6 +155,8 @@ export function evaluateTerrainMaterialFields(
     beddedOffsetY: bedded.y - y,
     beddedOffsetZ: bedded.z - z,
     regionalTint: fbm(position, 220, 2),
+    aridity,
+    erg,
     buttress: ridged(
       { x: buttressPosition.x, y: buttressPosition.y * 0.6, z: buttressPosition.z },
       9,
@@ -180,8 +201,18 @@ export function evaluateTerrainLayerWeights(
     1,
   )
   const rock = 1 - regolith
+  const { aridity } = fields
+  // Desert pavement. On temperate ground the coarse fraction only shows where
+  // the gradient is steep enough to keep washing the fines out from between the
+  // clasts, which is what the lower edge of `repose` encodes. An arid surface
+  // gets to the same place by the opposite route and on no gradient at all:
+  // wind removes the fines directly, and what it cannot lift settles into a
+  // single armoured layer of varnished gravel. Lowering that edge with aridity
+  // is the whole of it — flat desert floors become lag rather than clean sand,
+  // and the sand goes where the wind actually piles it instead of lying
+  // everywhere in an even sheet.
   const repose =
-    smoothstep(0.075, 0.17, slope + fray * 0.5) *
+    smoothstep(0.075 - aridity * 0.07, 0.17 - aridity * 0.09, slope + fray * 0.5) *
     falloff(0.46, 0.24, slope)
   const scree =
     regolith *
@@ -193,9 +224,17 @@ export function evaluateTerrainLayerWeights(
     268,
     y + regional * 44 + fray * 26,
   )
+  // Drying the moisture field already thins the vegetation; this closes it out.
+  // The two are not redundant: moisture is a continuum that a wet gully can
+  // push back up locally, and that is exactly right — a desert wash really is
+  // the one green line in the landscape. But it must not push a *hillside*
+  // back to pasture, so the ceiling on how much of the ground can be vegetated
+  // at all comes down with the climate independently of any local wetness.
+  const aridCeiling = 1 - smoothstep(0.25, 0.72, aridity) * 0.94
   const plantable =
     smoothstep(0.2, 0.52, fields.moisture + raw * 0.28) *
     alpineFade *
+    aridCeiling *
     falloff(0.38, 0.1, slope + fray)
   const soil = remaining * (1 - plantable)
   const vegetated = remaining * plantable
@@ -220,15 +259,28 @@ export function evaluateTerrainLayerWeights(
     smoothstep(0.26, 0.7, fields.moisture) *
     falloff(0.6, -0.2, curvature)
 
+  // --- the dune sea ------------------------------------------------------
+  // Inside an erg the slope-and-curvature classification above has nothing
+  // useful to say. It reads a slipface at the angle of repose as ground steep
+  // enough to wash its fines out and hands back armoured pavement, which is
+  // exactly backwards: a slipface is the cleanest, best-sorted sand in the
+  // whole landscape, because the avalanching that built it *is* a sorting
+  // process. Where the sand sea is established it simply wins, and the ordinary
+  // classification fades back in around the margins as the dunes thin out onto
+  // the basin floor. Snow is left alone — it is already zero at these
+  // altitudes and in this climate, and making the erg fight it would only add a
+  // term that can never fire.
+  const sandward = smoothstep(0.12, 0.62, fields.erg)
+
   return {
-    grass: grass * snowFree,
-    meadow: meadow * snowFree,
-    soil: soil * snowFree,
-    scree: scree * snowFree,
-    rock: rock * snowFree,
+    grass: lerp(grass * snowFree, 0, sandward),
+    meadow: lerp(meadow * snowFree, 0, sandward),
+    soil: lerp(soil * snowFree, snowFree, sandward),
+    scree: lerp(scree * snowFree, 0, sandward),
+    rock: lerp(rock * snowFree, 0, sandward),
     snow,
     slope,
-    lichen,
+    lichen: lerp(lichen, 0, sandward),
   }
 }
 
