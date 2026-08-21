@@ -39,6 +39,8 @@ export interface ProceduralSurfaceTextures {
   physicalWidth: number
   /** Peak-to-trough relief in metres. */
   reliefDepth: number
+  /** Resolves when the fast preview bake has been uploaded. */
+  previewReady: Promise<void>
   /** Resolves when the full-resolution bake has been uploaded. */
   ready: Promise<void>
 }
@@ -58,15 +60,29 @@ const PLACEHOLDER: Record<ProceduralSurfaceId, readonly [number, number, number]
 
 const cache = new Map<ProceduralSurfaceId, ProceduralSurfaceTextures>()
 
+function createSolidPixels(
+  rgb: readonly [number, number, number],
+  size: number,
+): Uint8Array {
+  const pixels = new Uint8Array(size * size * 4)
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    pixels[offset] = rgb[0]
+    pixels[offset + 1] = rgb[1]
+    pixels[offset + 2] = rgb[2]
+    pixels[offset + 3] = 255
+  }
+  return pixels
+}
+
 function createPlaceholder(
   rgb: readonly [number, number, number],
   name: string,
   colorSpace: ColorSpace,
 ): DataTexture {
   const texture = new DataTexture(
-    new Uint8Array([rgb[0], rgb[1], rgb[2], 255]),
-    1,
-    1,
+    createSolidPixels(rgb, FULL_SIZE),
+    FULL_SIZE,
+    FULL_SIZE,
     RGBAFormat,
     UnsignedByteType,
   )
@@ -78,17 +94,55 @@ function createPlaceholder(
   texture.generateMipmaps = true
   texture.anisotropy = 16
   texture.colorSpace = colorSpace
+  // Match the image-texture convention used by the previous JPG maps. The
+  // recipes author runoff and ledge dust with decreasing V as world-up.
+  texture.flipY = true
   texture.needsUpdate = true
   return texture
 }
 
 function upload(texture: DataTexture, data: Uint8Array, size: number): void {
-  texture.image = { data, width: size, height: size }
+  const image = texture.image as {
+    data: Uint8Array
+    width: number
+    height: number
+  }
+  if (
+    size !== image.width ||
+    size !== image.height ||
+    data.byteLength !== image.width * image.height * 4
+  ) {
+    throw new Error(
+      `${texture.name} received ${size}x${size} data for its fixed ` +
+      `${image.width}x${image.height} GPU allocation`,
+    )
+  }
+  image.data = data
   texture.needsUpdate = true
 }
 
 let worker: Worker | null = null
 let workerFailed = false
+
+interface PendingBake {
+  resolve(reply: ProceduralBakeReply): void
+  reject(error: Error): void
+}
+
+let nextToken = 1
+const pending = new Map<number, PendingBake>()
+
+function failPending(error: Error): void {
+  for (const request of pending.values()) request.reject(error)
+  pending.clear()
+}
+
+function failWorker(error: Error): void {
+  workerFailed = true
+  worker?.terminate()
+  worker = null
+  failPending(error)
+}
 
 function getWorker(): Worker | null {
   if (worker || workerFailed) return worker
@@ -100,6 +154,19 @@ function getWorker(): Worker | null {
     worker = new Worker(new URL('./proceduralBake.worker.ts', import.meta.url), {
       type: 'module',
     })
+    worker.onmessage = (event: MessageEvent<ProceduralBakeReply>) => {
+      const request = pending.get(event.data.token)
+      if (!request) return
+      pending.delete(event.data.token)
+      request.resolve(event.data)
+    }
+    worker.onerror = (event: ErrorEvent) => {
+      event.preventDefault()
+      failWorker(new Error(event.message || 'Procedural texture worker failed'))
+    }
+    worker.onmessageerror = () => {
+      failWorker(new Error('Procedural texture worker returned unreadable data'))
+    }
   } catch {
     // Older bundlers and non-browser hosts: fall back to the placeholder.
     workerFailed = true
@@ -108,30 +175,25 @@ function getWorker(): Worker | null {
   return worker
 }
 
-let nextToken = 1
-const pending = new Map<number, (reply: ProceduralBakeReply) => void>()
-
 function bakeInWorker(
   id: ProceduralSurfaceId,
   size: number,
+  outputSize: number,
   seed: number,
 ): Promise<ProceduralBakeReply> | null {
   const instance = getWorker()
   if (!instance) return null
-  if (pending.size === 0) {
-    instance.onmessage = (event: MessageEvent<ProceduralBakeReply>) => {
-      const resolve = pending.get(event.data.token)
-      if (!resolve) return
-      pending.delete(event.data.token)
-      resolve(event.data)
-    }
-  }
   const token = nextToken
   nextToken += 1
-  const request: ProceduralBakeRequest = { id, size, seed, token }
-  return new Promise<ProceduralBakeReply>((resolve) => {
-    pending.set(token, resolve)
-    instance.postMessage(request)
+  const request: ProceduralBakeRequest = { id, size, outputSize, seed, token }
+  return new Promise<ProceduralBakeReply>((resolve, reject) => {
+    pending.set(token, { resolve, reject })
+    try {
+      instance.postMessage(request)
+    } catch (cause) {
+      pending.delete(token)
+      reject(cause instanceof Error ? cause : new Error(String(cause)))
+    }
   })
 }
 
@@ -165,18 +227,25 @@ export function getProceduralSurfaceTextures(
     displacement: createPlaceholder([128, 128, 128], `${id} procedural height`, NoColorSpace),
     physicalWidth: recipe.physicalWidth,
     reliefDepth: recipe.reliefDepth,
+    previewReady: Promise.resolve(),
     ready: Promise.resolve(),
   }
   cache.set(id, entry)
 
-  entry.ready = (async () => {
-    const preview = bakeInWorker(id, PREVIEW_SIZE, seed)
-    if (!preview) return
-    applyReply(entry, await preview)
-    const full = bakeInWorker(id, FULL_SIZE, seed)
-    if (!full) return
-    applyReply(entry, await full)
-  })()
+  const preview = bakeInWorker(id, PREVIEW_SIZE, FULL_SIZE, seed)
+  if (preview) {
+    entry.previewReady = preview.then((reply) => applyReply(entry, reply))
+    entry.ready = entry.previewReady.then(async () => {
+      const full = bakeInWorker(id, FULL_SIZE, FULL_SIZE, seed)
+      if (!full) return
+      applyReply(entry, await full)
+    })
+    // Material construction starts these jobs before React attaches its status
+    // handlers. Mark them handled here while preserving the rejecting promises
+    // for callers that want to report a failed bake.
+    void entry.previewReady.catch(() => undefined)
+    void entry.ready.catch(() => undefined)
+  }
 
   return entry
 }
@@ -190,10 +259,15 @@ export function resetProceduralSurfaceTextures(): void {
     entry.displacement.dispose()
   }
   cache.clear()
-  worker?.terminate()
+  if (worker) {
+    worker.onmessage = null
+    worker.onerror = null
+    worker.onmessageerror = null
+    worker.terminate()
+  }
   worker = null
   workerFailed = false
-  pending.clear()
+  failPending(new Error('Procedural texture cache reset'))
 }
 
 export type { ProceduralSurfaceId }

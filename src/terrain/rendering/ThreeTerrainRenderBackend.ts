@@ -29,6 +29,7 @@ import type {
 import {
   createTerrainMaterialForMode,
   type TerrainMaterialHandle,
+  type TerrainMaterialReadiness,
 } from './createTerrainMaterialForMode'
 import type { FullMaterialDebug } from './full/createFullTerrainMaterial'
 import type { TerrainRenderMode } from './renderModes'
@@ -241,8 +242,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
    * Swaps the surface material for every resident section. Geometry is
    * untouched, so toggling quality never re-streams or re-compiles anything.
    */
-  setRenderMode(mode: TerrainRenderMode): void {
-    if (this.renderMode === mode) return
+  setRenderMode(mode: TerrainRenderMode): TerrainMaterialReadiness {
+    if (this.renderMode === mode) return this.materialReadiness()
     this.renderMode = mode
     const previous = this.terrainMaterial
     this.terrainMaterial = createTerrainMaterialForMode(
@@ -262,6 +263,14 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     }
     previous.dispose()
     invalidateTerrainShadows()
+    return this.materialReadiness()
+  }
+
+  private materialReadiness(): TerrainMaterialReadiness {
+    return {
+      previewReady: this.terrainMaterial.previewReady,
+      ready: this.terrainMaterial.ready,
+    }
   }
 
   setMaterialSettings(settings: TerrainMaterialSettings): void {

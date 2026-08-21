@@ -9,6 +9,8 @@ import { useEditorSnapshot } from './hooks'
 import { currentViewUrlState } from './viewUrlState'
 
 const DISABLED_MOUSE_ACTION = -1 as (typeof MOUSE)[keyof typeof MOUSE]
+const FLY_SPEED = 24
+const FLY_BOOST_SPEED = 480
 
 interface EditorCameraProps {
   terrain: WorldTerrain
@@ -197,7 +199,9 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
       }
       if (movement.current.lengthSq() === 0) return
       const speed =
-        active.has('ShiftLeft') || active.has('ShiftRight') ? 480 : 120
+        active.has('ShiftLeft') || active.has('ShiftRight')
+          ? FLY_BOOST_SPEED
+          : FLY_SPEED
       movement.current
         .normalize()
         .multiplyScalar(speed * Math.min(delta, 0.1))

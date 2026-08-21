@@ -35,8 +35,40 @@ export function TerrainView({
   }, [backend, terrain])
 
   useEffect(() => {
-    backend.setRenderMode(renderMode)
-  }, [backend, renderMode])
+    const readiness = backend.setRenderMode(renderMode)
+    if (renderMode !== 'full') return
+
+    let active = true
+    let previewLoaded = false
+    let failureReported = false
+    editor.patch({ status: 'Generating procedural terrain textures…' })
+
+    const reportFailure = () => {
+      if (!active || failureReported) return
+      failureReported = true
+      editor.patch({
+        status: previewLoaded
+          ? 'Full quality active · 1K texture refinement failed'
+          : 'Procedural texture bake failed · using colour fallback',
+      })
+    }
+
+    void readiness.previewReady.then(() => {
+      if (!active) return
+      previewLoaded = true
+      editor.patch({
+        status: 'Full quality active · refining procedural textures…',
+      })
+    }, reportFailure)
+    void readiness.ready.then(() => {
+      if (!active) return
+      editor.patch({ status: 'Full quality ready · procedural textures baked' })
+    }, reportFailure)
+
+    return () => {
+      active = false
+    }
+  }, [backend, editor, renderMode])
 
   useEffect(() => {
     const canvas = gl.domElement

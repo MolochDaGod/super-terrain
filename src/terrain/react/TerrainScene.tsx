@@ -51,11 +51,11 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
   // moment building shaders, and silence there looks like a freeze.
   const onCompilingChange = useCallback(
     (compiling: boolean) => {
-      editor.patch({
-        status: compiling
-          ? 'Building full-quality shaders…'
-          : `${renderMode === 'full' ? 'Full' : 'Preview'} quality ready`,
-      })
+      if (compiling) {
+        editor.patch({ status: 'Building full-quality shaders…' })
+      } else if (renderMode === 'preview') {
+        editor.patch({ status: 'Preview quality ready' })
+      }
     },
     [editor, renderMode],
   )

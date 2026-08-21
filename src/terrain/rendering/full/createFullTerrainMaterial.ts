@@ -83,6 +83,16 @@ export function createFullTerrainMaterial(
   const detailTexture = createGeologyDetailTexture()
   const cliffSurface = getProceduralSurfaceTextures('cliff-side')
   const groundSurface = getProceduralSurfaceTextures('rock-ground')
+  const previewReady = Promise.all([
+    cliffSurface.previewReady,
+    groundSurface.previewReady,
+  ]).then(() => undefined)
+  const ready = Promise.all([
+    cliffSurface.ready,
+    groundSurface.ready,
+  ]).then(() => undefined)
+  void previewReady.catch(() => undefined)
+  void ready.catch(() => undefined)
   const rockScanDiffuse = cliffSurface.albedo
   const rockScanNormal = cliffSurface.normal
   const rockScanArm = cliffSurface.arm
@@ -629,17 +639,11 @@ export function createFullTerrainMaterial(
 
   return {
     material,
+    previewReady,
+    ready,
     dispose() {
       material.dispose()
       detailTexture.dispose()
-      rockScanDiffuse.dispose()
-      rockScanNormal.dispose()
-      rockScanArm.dispose()
-      rockScanDisplacement.dispose()
-      groundScanDiffuse.dispose()
-      groundScanNormal.dispose()
-      groundScanArm.dispose()
-      groundScanDisplacement.dispose()
     },
   }
 }

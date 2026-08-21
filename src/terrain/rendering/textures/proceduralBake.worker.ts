@@ -1,10 +1,14 @@
 /// <reference lib="webworker" />
 import { bakeSurface } from './procedural/bake'
 import { PROCEDURAL_SURFACES, type ProceduralSurfaceId } from './procedural/materials'
+import { resizeRgbaNearest } from './procedural/resample'
 
 export interface ProceduralBakeRequest {
   id: ProceduralSurfaceId
+  /** Resolution at which the procedural recipe is evaluated. */
   size: number
+  /** Fixed GPU allocation size; preview results are expanded to this size. */
+  outputSize?: number
   seed: number
   /** Echoed back so the host can match a reply to its request. */
   token: number
@@ -30,17 +34,25 @@ export interface ProceduralBakeReply {
  * swaps the real pixels in when they arrive.
  */
 self.onmessage = (event: MessageEvent<ProceduralBakeRequest>) => {
-  const { id, size, seed, token } = event.data
+  const { id, size, outputSize = size, seed, token } = event.data
   const recipe = PROCEDURAL_SURFACES[id]
   const maps = bakeSurface(recipe, size, seed)
+  const albedo = resizeRgbaNearest(maps.albedo, maps.size, outputSize)
+  const normal = resizeRgbaNearest(maps.normal, maps.size, outputSize)
+  const arm = resizeRgbaNearest(maps.arm, maps.size, outputSize)
+  const displacement = resizeRgbaNearest(
+    maps.displacement,
+    maps.size,
+    outputSize,
+  )
   const reply: ProceduralBakeReply = {
     token,
     id,
-    size: maps.size,
-    albedo: maps.albedo.buffer as ArrayBuffer,
-    normal: maps.normal.buffer as ArrayBuffer,
-    arm: maps.arm.buffer as ArrayBuffer,
-    displacement: maps.displacement.buffer as ArrayBuffer,
+    size: outputSize,
+    albedo: albedo.buffer as ArrayBuffer,
+    normal: normal.buffer as ArrayBuffer,
+    arm: arm.buffer as ArrayBuffer,
+    displacement: displacement.buffer as ArrayBuffer,
     physicalWidth: maps.physicalWidth,
     reliefDepth: maps.reliefDepth,
   }
