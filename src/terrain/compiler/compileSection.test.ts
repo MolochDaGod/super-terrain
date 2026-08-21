@@ -10,7 +10,12 @@ import {
 import type { TerrainModifier } from '../modifiers/types'
 import { EditableMesh, EditableMeshSection } from '../mesh/EditableMesh'
 import { encodeModifiers, type CompileSectionRequest } from '../workers/protocol'
-import { compileTerrainSection, evaluateHeight } from './compileSection'
+import {
+  calculatePatchFoundationBlend,
+  compileTerrainSection,
+  evaluateHeight,
+} from './compileSection'
+import { PATCH_SURFACE_TRIANGLE } from '../modifiers/boolean/MeshBooleanBackend'
 import {
   generateGraniteRock,
   transformGraniteRockPositions,
@@ -170,6 +175,37 @@ describe('section compiler', () => {
     request.modifiers = encodeModifiers([volume])
     const moved = compileTerrainSection(request)
     expect(moved.bounds.max.x).toBeGreaterThan(first.bounds.max.x + 8)
+  })
+
+  it('assigns cross-boundary additive triangles to one section only', () => {
+    const volume = createBooleanVolumeModifier({
+      operation: 'add',
+      volumes: [{
+        kind: 'ellipsoid',
+        center: { x: 128, y: 34, z: 64 },
+        radii: { x: 32, y: 24, z: 26 },
+        forward: { x: 1, y: 0, z: 0 },
+        surface: 'none',
+      }],
+    })
+    for (const key of [{ x: 0, z: 0 }, { x: 1, z: 0 }]) {
+      const lod = compileTerrainSection(requestFor(key, [volume], 16)).lods[0]
+      for (let offset = 0; offset < lod.indices.length; offset += 3) {
+        const a = lod.indices[offset]! * 3
+        const b = lod.indices[offset + 1]! * 3
+        const c = lod.indices[offset + 2]! * 3
+        const centroidX = (
+          lod.positions[a]! + lod.positions[b]! + lod.positions[c]!
+        ) / 3
+        const centroidZ = (
+          lod.positions[a + 2]! + lod.positions[b + 2]! + lod.positions[c + 2]!
+        ) / 3
+        expect(centroidX).toBeGreaterThanOrEqual(-1e-4)
+        expect(centroidX).toBeLessThan(128)
+        expect(centroidZ).toBeGreaterThanOrEqual(-1e-4)
+        expect(centroidZ).toBeLessThan(128)
+      }
+    }
   })
 
   it('packs four-channel weight painting into every compiled vertex stream', () => {
@@ -498,6 +534,34 @@ describe('section compiler', () => {
         )
       }
     }
+  })
+})
+
+describe('mesh-patch material integration', () => {
+  it('inherits terrain coverage at the fused edge and fades geodesically into rock', () => {
+    const blend = calculatePatchFoundationBlend(
+      Float32Array.from([
+        0, 0, 0,
+        1, 0, 0,
+        0, 0, 1,
+        6, 0, 0,
+        13, 0, 0,
+      ]),
+      Uint32Array.from([
+        0, 2, 1,
+        1, 2, 3,
+        2, 4, 3,
+      ]),
+      Uint8Array.from([0, PATCH_SURFACE_TRIANGLE, PATCH_SURFACE_TRIANGLE]),
+      12,
+    )
+
+    expect(blend[0]).toBe(0)
+    expect(blend[1]).toBe(1)
+    expect(blend[2]).toBe(1)
+    expect(blend[3]).toBeGreaterThan(0)
+    expect(blend[3]).toBeLessThan(1)
+    expect(blend[4]).toBeCloseTo(0)
   })
 })
 

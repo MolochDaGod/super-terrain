@@ -1,6 +1,7 @@
 import { clamp, lerp, smoothstep } from '../core/bounds'
 import { sampleHeight } from './heightField'
 import type { Vec3Like } from '../core/types'
+import type { TerrainApron } from '../modifiers/boolean/CutterVolume'
 import type {
   BrushStrokeModifier,
   TerrainModifier,
@@ -57,11 +58,78 @@ export function evaluateTerrainPoint(
     z: worldZ,
   }
   const point = { ...base }
+
+  // Grow the cheap source surface into additive mesh patches before exact CSG.
+  // The Boolean still owns every overhang and opening; this only supplies a
+  // broad, low-frequency geological root on the terrain side of the join.
+  let apronLift = 0
+  for (const modifier of modifiers) {
+    if (
+      !modifier.enabled ||
+      modifier.type !== 'boolean-volume' ||
+      modifier.operation !== 'add'
+    ) {
+      continue
+    }
+    for (const volume of modifier.volumes) {
+      if (!volume.terrainApron) continue
+      apronLift = Math.max(
+        apronLift,
+        terrainApronLift(worldX, worldZ, volume.terrainApron),
+      )
+    }
+  }
+  point.y += apronLift
+  const integratedBase = { ...point }
   for (const modifier of modifiers) {
     if (!modifier.enabled || modifier.type !== 'brush-stroke') continue
-    applyBrushToPoint(point, base, modifier)
+    applyBrushToPoint(point, integratedBase, modifier)
   }
   return point
+}
+
+/** Smooth radial distance to an oriented ellipse, with a metre-space falloff. */
+export function terrainApronLift(
+  worldX: number,
+  worldZ: number,
+  apron: TerrainApron,
+): number {
+  const forwardLength = Math.hypot(apron.forward.x, apron.forward.z) || 1
+  const forwardX = apron.forward.x / forwardLength
+  const forwardZ = apron.forward.z / forwardLength
+  const sideX = -forwardZ
+  const sideZ = forwardX
+  const dx = worldX - apron.center.x
+  const dz = worldZ - apron.center.z
+  const along = dx * forwardX + dz * forwardZ
+  const across = dx * sideX + dz * sideZ
+  const distance = Math.hypot(along, across)
+  const halfLength = Math.max(0.25, apron.halfLength)
+  const halfWidth = Math.max(0.25, apron.halfWidth)
+
+  // Radius of the core ellipse in the direction of this sample. This avoids
+  // an AABB-shaped mound around oblique sheets while keeping evaluation O(1).
+  let coreRadius = Math.min(halfLength, halfWidth)
+  if (distance > 1e-6) {
+    const directionX = along / distance
+    const directionZ = across / distance
+    coreRadius = 1 / Math.sqrt(
+      (directionX * directionX) / (halfLength * halfLength) +
+      (directionZ * directionZ) / (halfWidth * halfWidth),
+    )
+  }
+  const falloff = Math.max(0.25, apron.falloff)
+  if (distance >= coreRadius + falloff) return 0
+  const influence = distance <= coreRadius
+    ? 1
+    : 1 - smoothstep(coreRadius, coreRadius + falloff, distance)
+
+  // A tiny continuous warp prevents the apron edge becoming a mathematically
+  // perfect contour, without adding another modifier or any random state.
+  const geologicalVariation =
+    0.9 + Math.sin(worldX * 0.037 + worldZ * 0.051) * 0.065 +
+    Math.sin(worldX * 0.091 - worldZ * 0.043) * 0.035
+  return Math.max(0, apron.lift) * influence * geologicalVariation
 }
 
 /** Applies the same non-destructive field stack to an arbitrary source point. */

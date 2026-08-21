@@ -1,5 +1,6 @@
 import {
   AmbientLight,
+  BackSide,
   Camera,
   Color,
   DirectionalLight,
@@ -7,7 +8,11 @@ import {
   Group,
   HemisphereLight,
   Matrix4,
+  Mesh,
+  MeshBasicNodeMaterial,
   Scene,
+  SphereGeometry,
+  type Texture,
   Vector3,
 } from 'three/webgpu'
 import { SkyMesh } from 'three/addons/objects/SkyMesh.js'
@@ -32,13 +37,15 @@ export interface TerrainEnvironment {
 
 const SKY_SCALE = 45_000
 /** Divides the Preetham dome down into the scene's linear lighting range. */
-const SKY_INTENSITY = 0.078
+const SKY_INTENSITY = 0.18
 
 export interface TerrainEnvironmentOptions {
   /** Cascaded shadows. Disable to fall back to one wide shadow frustum. */
   cascadedShadows?: boolean
   /** Turns the sun's shadow casting off entirely, for A/B comparison. */
   shadows?: boolean
+  /** Lightweight authored backdrop; physical sun and fog still come from the sky model. */
+  skyTexture?: Texture
 }
 
 export function createTerrainEnvironment(
@@ -65,17 +72,17 @@ function createFullEnvironment(
 
   const sky = new SkyMesh()
   sky.scale.setScalar(SKY_SCALE)
-  sky.turbidity.value = 3.4
-  sky.rayleigh.value = 1.35
-  sky.mieCoefficient.value = 0.004
-  sky.mieDirectionalG.value = 0.82
+  sky.turbidity.value = 4.1
+  sky.rayleigh.value = 1.12
+  sky.mieCoefficient.value = 0.006
+  sky.mieDirectionalG.value = 0.84
   sky.sunPosition.value.copy(DEFAULT_SUN.direction)
   // Cumulus. An empty gradient sky is one of the strongest tells that a frame
   // is synthetic, and clouds also give the eye a scale reference at the horizon.
-  sky.cloudCoverage.value = 0.46
-  sky.cloudDensity.value = 0.62
-  sky.cloudScale.value = 0.00085
-  sky.cloudElevation.value = 0.42
+  sky.cloudCoverage.value = 0.38
+  sky.cloudDensity.value = 0.46
+  sky.cloudScale.value = 0.00072
+  sky.cloudElevation.value = 0.38
   sky.cloudSpeed.value = 0.00004
   sky.renderOrder = -1000
   // Preetham radiance is authored in its own arbitrary scale; this brings it
@@ -84,10 +91,15 @@ function createFullEnvironment(
   sky.material.colorNode = (sky.material.colorNode as any).mul(skyIntensity)
   group.add(sky)
 
+  const skyBackdrop = options.skyTexture
+    ? createCinematicSkyBackdrop(options.skyTexture)
+    : undefined
+  if (skyBackdrop) group.add(skyBackdrop)
+
   // A 7-degree sun has lost most of its blue to the long atmospheric path, and
   // what is left is strong: the reference frame's lit rock is a warm gold at
   // several times the brightness of its own sky-lit shade.
-  const sun = new DirectionalLight(0xffb578, 2.6)
+  const sun = new DirectionalLight(0xffd0a6, 4.35)
   sun.position.copy(DEFAULT_SUN.direction).multiplyScalar(2_400)
   sun.castShadow = options.shadows ?? true
   sun.shadow.mapSize.set(1536, 1536)
@@ -107,10 +119,18 @@ function createFullEnvironment(
   // which is most of the frame. Underfilling it is what turns a backlit valley
   // into a black cut-out: the reference keeps readable blue-grey texture in
   // every shadow, and this is where that comes from.
-  const skyFill = new HemisphereLight(0x7ea6dc, 0x5a4a35, 2.0)
+  const skyFill = new HemisphereLight(0x748ba8, 0x292a2d, 0.92)
   group.add(skyFill)
-  const ambient = new AmbientLight(0x50628a, 0.4)
+  const ambient = new AmbientLight(0x303947, 0.052)
   group.add(ambient)
+
+  // A real valley receives a directional lobe from the open sky behind the
+  // camera, not a uniform ambient wash. This cool, shadowless bounce lets the
+  // backlit landmark retain its fracture and grain while the occluded ravines
+  // stay dark. Uniformly raising the hemisphere flattened both into grey.
+  const frontFill = new DirectionalLight(0x879bb8, 0.94)
+  frontFill.castShadow = false
+  group.add(frontFill, frontFill.target)
 
   // Cascades. One shadow map stretched over kilometres gives metre-wide texels
   // and loses every contact shadow; four cascades keep the near field sharp
@@ -137,6 +157,7 @@ function createFullEnvironment(
   }
 
   const anchor = new Vector3()
+  const frontDirection = new Vector3()
   const previousCameraWorld = new Matrix4()
   const previousCameraProjection = new Matrix4()
   let hasCameraSnapshot = false
@@ -208,6 +229,7 @@ function createFullEnvironment(
 
       camera.getWorldPosition(anchor)
       sky.position.set(anchor.x, 0, anchor.z)
+      skyBackdrop?.position.set(anchor.x, 0, anchor.z)
       sun.target.position.set(anchor.x, 0, anchor.z)
       sun.position
         .copy(DEFAULT_SUN.direction)
@@ -215,6 +237,20 @@ function createFullEnvironment(
         .add(sun.target.position)
       sun.target.updateMatrixWorld()
       sun.updateMatrixWorld()
+      // Put the fill on the camera side of the scene. The old fixed world-space
+      // position ended up behind the north-facing showcase camera and turned
+      // the landmark's detailed face into a black silhouette.
+      camera.getWorldDirection(frontDirection)
+      frontFill.target.position
+        .copy(anchor)
+        .addScaledVector(frontDirection, 520)
+      frontFill.target.position.y -= 70
+      frontFill.position
+        .copy(anchor)
+        .addScaledVector(frontDirection, -920)
+      frontFill.position.y += 560
+      frontFill.target.updateMatrixWorld()
+      frontFill.updateMatrixWorld()
     },
     applyToScene(scene) {
       scene.fog = null
@@ -233,13 +269,40 @@ function createFullEnvironment(
     dispose() {
       sky.geometry.dispose()
       sky.material.dispose()
+      if (skyBackdrop) {
+        skyBackdrop.geometry.dispose()
+        skyBackdrop.material.dispose()
+      }
       cascades?.dispose()
       sun.dispose()
       skyFill.dispose()
       ambient.dispose()
+      frontFill.dispose()
       void config
     },
   }
+}
+
+function createCinematicSkyBackdrop(
+  textureMap: Texture,
+): Mesh<SphereGeometry, MeshBasicNodeMaterial> {
+  const geometry = new SphereGeometry(SKY_SCALE * 0.985, 72, 36)
+  const material = new MeshBasicNodeMaterial({
+    name: 'cinematic cloud panorama',
+    map: textureMap,
+    color: 0xe0e4e9,
+    side: BackSide,
+    depthWrite: false,
+    depthTest: false,
+    fog: false,
+  })
+  const backdrop = new Mesh(geometry, material)
+  backdrop.name = 'photographic alpine cloud dome'
+  backdrop.renderOrder = -999
+  backdrop.frustumCulled = false
+  // Put the panorama's warm break on the same side as the analytic sun.
+  backdrop.rotation.y = Math.PI - 0.72
+  return backdrop
 }
 
 /** The original editing lighting, preserved verbatim so preview never shifts. */

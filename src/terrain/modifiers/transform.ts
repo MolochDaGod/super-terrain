@@ -4,6 +4,7 @@ import {
   cutterBounds,
   unionBounds as unionCutterBounds,
   type CutterVolume,
+  type TerrainApron,
 } from './boolean/CutterVolume'
 import type {
   BooleanSubtractModifier,
@@ -299,10 +300,12 @@ function transformCutterVolume(
   pivot: Vec3Like,
   transform: ModifierTransform,
 ): CutterVolume {
+  const terrainApron = transformTerrainApron(cutter.terrainApron, pivot, transform)
   switch (cutter.kind) {
     case 'sweep':
       return {
         ...cutter,
+        terrainApron,
         rings: cutter.rings.map((ring) => ({
           ...transformPoint(ring, pivot, transform),
           horizontalRadius: ring.horizontalRadius * transform.scale,
@@ -312,6 +315,7 @@ function transformCutterVolume(
     case 'capsule':
       return {
         ...cutter,
+        terrainApron,
         start: transformPoint(cutter.start, pivot, transform),
         end: transformPoint(cutter.end, pivot, transform),
         radius: cutter.radius * transform.scale,
@@ -319,6 +323,7 @@ function transformCutterVolume(
     case 'ellipsoid':
       return {
         ...cutter,
+        terrainApron,
         center: transformPoint(cutter.center, pivot, transform),
         radii: scaleVector(cutter.radii, transform.scale),
         forward: rotateNormal(cutter.forward, transform),
@@ -327,6 +332,7 @@ function transformCutterVolume(
     case 'box':
       return {
         ...cutter,
+        terrainApron,
         center: transformPoint(cutter.center, pivot, transform),
         halfExtents: scaleVector(cutter.halfExtents, transform.scale),
         forward: rotateNormal(cutter.forward, transform),
@@ -335,9 +341,26 @@ function transformCutterVolume(
     case 'mesh':
       return {
         ...cutter,
+        terrainApron,
         positions: transformMeshPositions(cutter.positions, pivot, transform),
         indices: [...cutter.indices],
       }
+  }
+}
+
+function transformTerrainApron(
+  apron: TerrainApron | undefined,
+  pivot: Vec3Like,
+  transform: ModifierTransform,
+): TerrainApron | undefined {
+  if (!apron) return undefined
+  return {
+    center: transformPoint(apron.center, pivot, transform),
+    forward: rotateNormal(apron.forward, transform),
+    halfLength: apron.halfLength * transform.scale,
+    halfWidth: apron.halfWidth * transform.scale,
+    falloff: apron.falloff * transform.scale,
+    lift: apron.lift * transform.scale,
   }
 }
 

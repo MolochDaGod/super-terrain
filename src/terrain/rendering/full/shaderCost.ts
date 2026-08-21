@@ -42,7 +42,17 @@ export interface ShaderCost {
 /** A renderer stub carrying only what `WGSLNodeBuilder` actually reads. */
 function stubRenderer(): any {
   return {
-    backend: { getDrawingBufferSize: () => ({ x: 1, y: 1 }) },
+    backend: {
+      getDrawingBufferSize: () => ({ x: 1, y: 1 }),
+      utils: {
+        getTextureSampleData: () => ({
+          samples: 1,
+          primarySamples: 1,
+          isMSAA: false,
+        }),
+      },
+    },
+    hasFeature: () => false,
     getRenderTarget: () => null,
     getMRT: () => null,
     nodes: { getForRender: () => ({}) },

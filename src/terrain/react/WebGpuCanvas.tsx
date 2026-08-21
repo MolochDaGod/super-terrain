@@ -30,8 +30,8 @@ export function WebGpuCanvas({ children, dpr }: WebGpuCanvasProps) {
         createRenderer(defaults.canvas as HTMLCanvasElement)
       }
       camera={{
-        position: view.current.position ?? [230, 280, -90],
-        fov: view.current.fov ?? 48,
+        position: view.current.position ?? [0, 175, -170],
+        fov: view.current.fov ?? 50,
         near: 0.5,
         far: 80_000,
       }}
@@ -61,13 +61,15 @@ async function createWebGpuRenderer(canvas: HTMLCanvasElement, dpr: number) {
   }
   const renderer = new WebGPURenderer(parameters)
   renderer.toneMapping = ACESFilmicToneMapping
-  renderer.toneMappingExposure = 1.08
+  renderer.toneMappingExposure = 1.03
   sizeRendererToCanvas(renderer, canvas, dpr)
   await renderer.init()
-  // `?noclustered` falls back to three's own lighting for A/B checks: when a
-  // frame looks wrong, the first question is always whether the clustered path
-  // is the reason, and rebuilding to answer it is far too slow a loop.
-  if (!new URLSearchParams(location.search).has('noclustered')) {
+  // Three's native WebGPU light path is the shipped default. In this scene it
+  // preserves the real point-light energy inside the two CSG chambers and is
+  // just as fast as the clustered path at the current light count. Keep the
+  // clustered renderer available as an explicit stress-test mode for editors
+  // that add hundreds of lights, rather than silently weakening local bounce.
+  if (new URLSearchParams(location.search).has('clustered')) {
     installClusteredWebgpuLighting(renderer)
   }
   // The CSS layout may settle while requestAdapter/requestDevice is pending.

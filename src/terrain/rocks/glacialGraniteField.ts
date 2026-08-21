@@ -104,21 +104,26 @@ function buildMassParameters(seed: number): MassParameters {
   }
   addFacet([0.03, -0.99, -0.05], 0.6, 0.004)
 
-  const scarCount = formation === 'arch' ? 5 : formation === 'monolith' ? 7 : 10
+  // Surface spalls must stay subordinate to the joint planes. The former
+  // 0.2–0.42 source-unit bites became ten-to-twenty-metre circular craters when
+  // a valid granite asset was reused as a terrain-scale CSG patch. More,
+  // smaller anisotropic boxoid spalls preserve chipped parallax without
+  // changing the mass into a pock-marked asteroid.
+  const scarCount = formation === 'arch' ? 4 : formation === 'monolith' ? 6 : 8
   const scars = new Float64Array(scarCount * 9)
   for (let index = 0; index < scarCount; index += 1) {
     const theta = 0.7 + index * 1.29 + pick(200 + index) * 0.7
-    const radius = 0.2 + pick(220 + index) * 0.22
-    const distance = 0.98 + radius * (0.72 + pick(240 + index) * 0.3)
+    const radius = 0.032 + pick(220 + index) * 0.044
+    const distance = 0.98 + radius * (0.42 + pick(240 + index) * 0.26)
     const yaw = pick(320 + index) * Math.PI
     const offset = index * 9
     scars[offset] = Math.cos(theta) * distance
     scars[offset + 1] = -0.2 + pick(260 + index) * 0.78
     scars[offset + 2] = Math.sin(theta) * distance
-    scars[offset + 3] = radius
-    scars[offset + 4] = radius * (0.5 + pick(280 + index) * 0.7)
-    scars[offset + 5] = radius * (0.6 + pick(290 + index) * 0.8)
-    scars[offset + 6] = 0.002 + pick(300 + index) * 0.008
+    scars[offset + 3] = radius * (0.55 + pick(275 + index) * 0.7)
+    scars[offset + 4] = radius * (0.28 + pick(280 + index) * 0.48)
+    scars[offset + 5] = radius * (1.05 + pick(290 + index) * 1.15)
+    scars[offset + 6] = 0.001 + pick(300 + index) * 0.0035
     scars[offset + 7] = Math.cos(yaw)
     scars[offset + 8] = Math.sin(yaw)
   }

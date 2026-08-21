@@ -20,7 +20,12 @@ export interface BooleanMeshBuffers {
   normals: Float32Array
   indices: Uint32Array
   interiorVertices: Uint8Array
+  /** One entry per triangle: 1 when the visible face came from an add operand. */
+  triangleSurfaceKinds?: Uint8Array
 }
+
+export const TERRAIN_SURFACE_TRIANGLE = 0
+export const PATCH_SURFACE_TRIANGLE = 1
 
 export interface MeshBooleanBackend {
   readonly id: string
@@ -129,8 +134,10 @@ function distance(
 export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
   readonly id = 'bvh-csg-nondestructive-v4'
   private readonly surfaceMaterial = new MeshBasicMaterial()
+  private readonly patchMaterial = new MeshBasicMaterial()
   private readonly closureMaterial = new MeshBasicMaterial()
   private readonly interiorMaterial = new MeshBasicMaterial()
+  private readonly emberInteriorMaterial = new MeshBasicMaterial()
 
   subtract(
     target: BooleanMeshBuffers,
@@ -189,6 +196,7 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     const steps = localOperations.flatMap((operation) =>
       operation.cutters.map((cutter) => ({
         operation: operation.operation,
+        interior: cutter.interior,
         geometry: cutterGeometry(cutter, detail, seed),
       })),
     )
@@ -210,8 +218,10 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
       const cutterBrush = new Brush(
         geometry,
         operation === 'subtract'
-          ? this.interiorMaterial
-          : this.surfaceMaterial,
+          ? step.interior === 'ember'
+            ? this.emberInteriorMaterial
+            : this.interiorMaterial
+          : this.patchMaterial,
       )
       cutterBrush.updateMatrixWorld(true)
       const previous = result
@@ -227,8 +237,15 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     const extracted = this.extractVisibleGeometry(result)
     snapSectionBoundaryVertices(extracted.positions, sectionSize)
     const cleaned = removeBooleanSliverTriangles(extracted)
+    const continuous = smoothBooleanJunctionNormals(cleaned)
+    const owned = retainOwnedSectionTriangles(
+      continuous,
+      sectionOriginX,
+      sectionOriginZ,
+      sectionSize,
+    )
     result.geometry.dispose()
-    return isUsableBooleanResult(cleaned) ? cleaned : target
+    return isUsableBooleanResult(owned) ? owned : target
   }
 
   private createTerrainSolid(
@@ -344,12 +361,20 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     const normals: number[] = []
     const indices: number[] = []
     const interior: number[] = []
+    const triangleSurfaceKinds: number[] = []
     const vertexMap = new Map<string, number>()
 
     for (const group of geometry.groups) {
       const material = materials[group.materialIndex ?? 0]
       if (material === this.closureMaterial) continue
-      const isInterior = material === this.interiorMaterial
+      const interiorKind = material === this.emberInteriorMaterial
+        ? 2
+        : material === this.interiorMaterial
+          ? 1
+          : 0
+      const surfaceKind = material === this.patchMaterial
+        ? PATCH_SURFACE_TRIANGLE
+        : TERRAIN_SURFACE_TRIANGLE
       const end = Math.min(
         group.start + group.count,
         sourceIndices?.count ?? position.count,
@@ -361,8 +386,9 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
             : offset + corner,
         )
         if (isDegenerateTriangle(position, triangle)) continue
+        triangleSurfaceKinds.push(surfaceKind)
         for (const sourceVertex of triangle) {
-          const mapKey = `${sourceVertex}:${isInterior ? 1 : 0}`
+          const mapKey = `${sourceVertex}:${interiorKind}`
           let targetVertex = vertexMap.get(mapKey)
           if (targetVertex === undefined) {
             targetVertex = positions.length / 3
@@ -377,7 +403,7 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
               normal.getY(sourceVertex),
               normal.getZ(sourceVertex),
             )
-            interior.push(isInterior ? 1 : 0)
+            interior.push(interiorKind)
           }
           indices.push(targetVertex)
         }
@@ -389,8 +415,110 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
       normals: Float32Array.from(normals),
       indices: Uint32Array.from(indices),
       interiorVertices: Uint8Array.from(interior),
+      triangleSurfaceKinds: Uint8Array.from(triangleSurfaceKinds),
     }
   }
+}
+
+/**
+ * Makes the lighting normal continuous across the exact terrain/patch curve.
+ *
+ * three-bvh-csg correctly fuses the positions, but keeps each operand's source
+ * normals. At their intersection that produces a dark outline which visually
+ * re-separates the otherwise unified surface. Only vertices on a provenance
+ * boundary are touched; fracture edges elsewhere retain their authored normal.
+ */
+export function smoothBooleanJunctionNormals(
+  result: BooleanMeshBuffers,
+): BooleanMeshBuffers {
+  const kinds = result.triangleSurfaceKinds
+  if (!kinds?.includes(PATCH_SURFACE_TRIANGLE)) return result
+
+  const vertexCount = result.positions.length / 3
+  const incidentKinds = new Uint8Array(vertexCount)
+  const geometric = new Float32Array(result.normals.length)
+  for (let offset = 0; offset < result.indices.length; offset += 3) {
+    const triangle = offset / 3
+    const a = result.indices[offset]!
+    const b = result.indices[offset + 1]!
+    const c = result.indices[offset + 2]!
+    if (
+      result.interiorVertices[a] !== 0 ||
+      result.interiorVertices[b] !== 0 ||
+      result.interiorVertices[c] !== 0
+    ) {
+      continue
+    }
+    const kindMask = kinds[triangle] === PATCH_SURFACE_TRIANGLE ? 2 : 1
+    incidentKinds[a] |= kindMask
+    incidentKinds[b] |= kindMask
+    incidentKinds[c] |= kindMask
+
+    const ai = a * 3
+    const bi = b * 3
+    const ci = c * 3
+    const abx = result.positions[bi]! - result.positions[ai]!
+    const aby = result.positions[bi + 1]! - result.positions[ai + 1]!
+    const abz = result.positions[bi + 2]! - result.positions[ai + 2]!
+    const acx = result.positions[ci]! - result.positions[ai]!
+    const acy = result.positions[ci + 1]! - result.positions[ai + 1]!
+    const acz = result.positions[ci + 2]! - result.positions[ai + 2]!
+    const nx = aby * acz - abz * acy
+    const ny = abz * acx - abx * acz
+    const nz = abx * acy - aby * acx
+    for (const vertex of [a, b, c]) {
+      const target = vertex * 3
+      geometric[target] += nx
+      geometric[target + 1] += ny
+      geometric[target + 2] += nz
+    }
+  }
+
+  // CSG may duplicate an intersection vertex when two material groups meet.
+  // Quantised world-local positions reunite those copies for shading without
+  // changing indices or the intentionally split interior/emissive surfaces.
+  const POSITION_EPSILON = 1e-4
+  const groups = new Map<string, number[]>()
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (result.interiorVertices[vertex] !== 0 || incidentKinds[vertex] === 0) continue
+    const source = vertex * 3
+    const key = `${Math.round(result.positions[source]! / POSITION_EPSILON)}:` +
+      `${Math.round(result.positions[source + 1]! / POSITION_EPSILON)}:` +
+      `${Math.round(result.positions[source + 2]! / POSITION_EPSILON)}`
+    const group = groups.get(key)
+    if (group) group.push(vertex)
+    else groups.set(key, [vertex])
+  }
+
+  const normals = result.normals.slice()
+  let changed = false
+  for (const vertices of groups.values()) {
+    let mask = 0
+    for (const vertex of vertices) mask |= incidentKinds[vertex]!
+    if (mask !== 3) continue
+    let nx = 0
+    let ny = 0
+    let nz = 0
+    for (const vertex of vertices) {
+      const source = vertex * 3
+      nx += geometric[source]!
+      ny += geometric[source + 1]!
+      nz += geometric[source + 2]!
+    }
+    const length = Math.hypot(nx, ny, nz)
+    if (length < 1e-8) continue
+    nx /= length
+    ny /= length
+    nz /= length
+    for (const vertex of vertices) {
+      const target = vertex * 3
+      normals[target] = nx
+      normals[target + 1] = ny
+      normals[target + 2] = nz
+    }
+    changed = true
+  }
+  return changed ? { ...result, normals } : result
 }
 
 /**
@@ -426,6 +554,7 @@ export function removeBooleanSliverTriangles(
   minimumDoubleAreaSquared = 2e-12,
 ): BooleanMeshBuffers {
   const indices: number[] = []
+  const triangleSurfaceKinds: number[] = []
   for (let offset = 0; offset < result.indices.length; offset += 3) {
     const a = result.indices[offset]!
     const b = result.indices[offset + 1]!
@@ -461,9 +590,109 @@ export function removeBooleanSliverTriangles(
       if (thinnessSquared < NEEDLE_THINNESS * NEEDLE_THINNESS) continue
     }
     indices.push(a, b, c)
+    triangleSurfaceKinds.push(
+      result.triangleSurfaceKinds?.[offset / 3] ?? TERRAIN_SURFACE_TRIANGLE,
+    )
   }
   if (indices.length === result.indices.length) return result
-  return { ...result, indices: Uint32Array.from(indices) }
+  return {
+    ...result,
+    indices: Uint32Array.from(indices),
+    triangleSurfaceKinds: result.triangleSurfaceKinds
+      ? Uint8Array.from(triangleSurfaceKinds)
+      : undefined,
+  }
+}
+
+/**
+ * Assigns every post-CSG triangle to exactly one streamed section.
+ *
+ * Additive mesh operands cross section boundaries. Each worker must evaluate
+ * the complete solid so its Boolean intersection is correct, but returning the
+ * complete operand from every touched worker draws several coincident copies.
+ * A later subtractor then opens only the owning copy while neighbours continue
+ * to render solid rock over the portal. Ownership by world-space centroid
+ * partitions the identical operand triangles without clipping their natural
+ * edges or introducing an authored box into the formation.
+ */
+function retainOwnedSectionTriangles(
+  result: BooleanMeshBuffers,
+  sectionOriginX: number,
+  sectionOriginZ: number,
+  sectionSize: number,
+): BooleanMeshBuffers {
+  const sectionX = Math.round(sectionOriginX / sectionSize)
+  const sectionZ = Math.round(sectionOriginZ / sectionSize)
+  const boundaryBias = Math.max(1e-6, sectionSize * 1e-7)
+  const ownedIndices: number[] = []
+  const ownedSurfaceKinds: number[] = []
+
+  for (let offset = 0; offset < result.indices.length; offset += 3) {
+    const a = result.indices[offset]!
+    const b = result.indices[offset + 1]!
+    const c = result.indices[offset + 2]!
+    const localX = (
+      result.positions[a * 3]! +
+      result.positions[b * 3]! +
+      result.positions[c * 3]!
+    ) / 3
+    const localZ = (
+      result.positions[a * 3 + 2]! +
+      result.positions[b * 3 + 2]! +
+      result.positions[c * 3 + 2]!
+    ) / 3
+    const ownerX = Math.floor(
+      (sectionOriginX + localX + boundaryBias) / sectionSize,
+    )
+    const ownerZ = Math.floor(
+      (sectionOriginZ + localZ + boundaryBias) / sectionSize,
+    )
+    if (ownerX === sectionX && ownerZ === sectionZ) {
+      ownedIndices.push(a, b, c)
+      ownedSurfaceKinds.push(
+        result.triangleSurfaceKinds?.[offset / 3] ?? TERRAIN_SURFACE_TRIANGLE,
+      )
+    }
+  }
+  if (ownedIndices.length === result.indices.length) return result
+
+  // Compact immediately. Leaving every rejected operand vertex in the
+  // attribute arrays fixes overdraw but keeps the same cold-load upload cost
+  // and expands each section's culling bounds back over the whole landmark.
+  const vertexMap = new Map<number, number>()
+  const positions: number[] = []
+  const normals: number[] = []
+  const interior: number[] = []
+  const indices: number[] = []
+  for (const sourceVertex of ownedIndices) {
+    let targetVertex = vertexMap.get(sourceVertex)
+    if (targetVertex === undefined) {
+      targetVertex = positions.length / 3
+      vertexMap.set(sourceVertex, targetVertex)
+      const sourceOffset = sourceVertex * 3
+      positions.push(
+        result.positions[sourceOffset]!,
+        result.positions[sourceOffset + 1]!,
+        result.positions[sourceOffset + 2]!,
+      )
+      normals.push(
+        result.normals[sourceOffset]!,
+        result.normals[sourceOffset + 1]!,
+        result.normals[sourceOffset + 2]!,
+      )
+      interior.push(result.interiorVertices[sourceVertex] ?? 0)
+    }
+    indices.push(targetVertex)
+  }
+  return {
+    positions: Float32Array.from(positions),
+    normals: Float32Array.from(normals),
+    indices: Uint32Array.from(indices),
+    interiorVertices: Uint8Array.from(interior),
+    triangleSurfaceKinds: result.triangleSurfaceKinds
+      ? Uint8Array.from(ownedSurfaceKinds)
+      : undefined,
+  }
 }
 
 function isUsableBooleanResult(result: BooleanMeshBuffers): boolean {

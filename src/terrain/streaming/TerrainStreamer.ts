@@ -112,7 +112,7 @@ export class TerrainStreamer {
       0,
       Math.round(this.config.prefetchSections * clamp((qualityScale - 0.45) * 1.8, 0, 1)),
     )
-    const visibilityHysteresis = 1.75
+    const visibilityHysteresis = 1
     const searchRadius = Math.ceil(
       baseRadius + Math.max(prefetch, visibilityHysteresis),
     )
@@ -317,6 +317,10 @@ export function requiredViewRadiusSections(
   const halfVertical =
     distanceToFocus * Math.tan(clamp(view.verticalFovRadians, 0.2, 2.2) * 0.5)
   const halfViewport = halfVertical * Math.max(1, view.aspect)
+  // Two guards cover the full diagonal footprint and keep the exact terrain
+  // in front of the coarse horizon proxy. Background residency is controlled
+  // separately by prefetch/hysteresis, so this visual guard need not inflate
+  // the cold compile queue.
   const footprintRadius = Math.ceil(halfViewport / config.sectionSize) + 2
   return clamp(
     footprintRadius,

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { validateMeshData } from '../../mesh/MeshValidation'
 import {
+  BvhCsgTunnelBooleanBackend,
+  PATCH_SURFACE_TRIANGLE,
   removeBooleanSliverTriangles,
+  smoothBooleanJunctionNormals,
   type BooleanMeshBuffers,
 } from './MeshBooleanBackend'
 
@@ -53,5 +56,83 @@ describe('needle removal', () => {
     }
     const cleaned = removeBooleanSliverTriangles(buffers)
     expect(Array.from(cleaned.indices)).toEqual([3, 4, 5, 6, 7, 8])
+  })
+})
+
+describe('additive patch integration', () => {
+  it('retains triangle provenance through exact CSG', () => {
+    const backend = new BvhCsgTunnelBooleanBackend()
+    const target: BooleanMeshBuffers = {
+      positions: Float32Array.from([
+        0, 0, 0,
+        16, 0, 0,
+        0, 0, 16,
+        16, 0, 16,
+      ]),
+      normals: Float32Array.from([
+        0, 1, 0,
+        0, 1, 0,
+        0, 1, 0,
+        0, 1, 0,
+      ]),
+      indices: Uint32Array.from([0, 2, 1, 1, 2, 3]),
+      interiorVertices: new Uint8Array(4),
+    }
+    const result = backend.evaluate(
+      target,
+      [{
+        operation: 'add',
+        cutters: [{
+          kind: 'ellipsoid',
+          center: { x: 8, y: 1, z: 8 },
+          radii: { x: 3, y: 3, z: 3 },
+          forward: { x: 1, y: 0, z: 0 },
+          surface: 'none',
+        }],
+      }],
+      0,
+      0,
+      16,
+      0.25,
+      17,
+    )
+
+    expect(result.triangleSurfaceKinds).toBeDefined()
+    expect(result.triangleSurfaceKinds).toContain(PATCH_SURFACE_TRIANGLE)
+    expect(result.triangleSurfaceKinds).toContain(0)
+  })
+
+  it('matches normals across duplicated terrain/patch junction vertices', () => {
+    const result = smoothBooleanJunctionNormals({
+      positions: Float32Array.from([
+        0, 0, 0,
+        1, 0, 0,
+        0, 0, 1,
+        // CSG material split duplicates the two intersection vertices.
+        1, 0, 0,
+        0, 0, 1,
+        0.5, 1, 0.5,
+      ]),
+      normals: Float32Array.from([
+        0, 1, 0,
+        0, 1, 0,
+        0, 1, 0,
+        0, 0, -1,
+        0, 0, -1,
+        0, 0, -1,
+      ]),
+      indices: Uint32Array.from([0, 2, 1, 3, 4, 5]),
+      interiorVertices: new Uint8Array(6),
+      triangleSurfaceKinds: Uint8Array.from([0, PATCH_SURFACE_TRIANGLE]),
+    })
+
+    expect(Array.from(result.normals.slice(3, 6))).toEqual(
+      Array.from(result.normals.slice(9, 12)),
+    )
+    expect(Array.from(result.normals.slice(6, 9))).toEqual(
+      Array.from(result.normals.slice(12, 15)),
+    )
+    // A fracture vertex away from the junction keeps its authored normal.
+    expect(Array.from(result.normals.slice(15, 18))).toEqual([0, 0, -1])
   })
 })

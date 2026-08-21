@@ -1,0 +1,49 @@
+import { describe, expect, it } from 'vitest'
+import { createBrushStroke } from '../modifiers/factories'
+import { OUTCROP_ID_PREFIX } from './createOutcropField'
+import {
+  THRUST_MODIFIER_IDS,
+} from './createThrustFormation'
+import {
+  createShowcaseTerrainModifiers,
+  upgradeShowcaseTerrainModifiers,
+} from './createShowcaseModifiers'
+
+const seed = 13_371
+
+describe('showcase modifier migration', () => {
+  it('replaces the former natural-mesh generation without duplicating patches', () => {
+    const current = createShowcaseTerrainModifiers(seed)
+    const stale = current.map((modifier) => {
+      if (modifier.id.startsWith('showcase-v13-')) {
+        return { ...modifier, id: modifier.id.replace('showcase-v13-', 'showcase-v12-') }
+      }
+      if (modifier.id.startsWith(OUTCROP_ID_PREFIX)) {
+        return { ...modifier, id: modifier.id.replace(OUTCROP_ID_PREFIX, 'demo-v8-outcrop-') }
+      }
+      return modifier
+    })
+    const edit = createBrushStroke({
+      point: { x: 12, y: 3, z: 8 },
+      mode: 'raise',
+      radius: 6,
+      strength: 0.3,
+      falloff: 0.5,
+    })
+
+    const upgraded = upgradeShowcaseTerrainModifiers([...stale, edit], seed)
+
+    expect(upgraded).toBeDefined()
+    const ids = upgraded!.map((modifier) => modifier.id)
+    expect(ids).toContain(edit.id)
+    expect(THRUST_MODIFIER_IDS.every((id) => ids.includes(id))).toBe(true)
+    expect(ids.some((id) => id.startsWith('showcase-v12-'))).toBe(false)
+    expect(ids.some((id) => id.startsWith('demo-v8-outcrop-'))).toBe(false)
+    expect(new Set(ids).size).toBe(ids.length)
+  }, 20_000)
+
+  it('leaves a complete current showcase untouched', () => {
+    const current = createShowcaseTerrainModifiers(seed)
+    expect(upgradeShowcaseTerrainModifiers(current, seed)).toBeUndefined()
+  })
+})

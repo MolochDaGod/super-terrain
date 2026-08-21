@@ -59,6 +59,7 @@ const DEBUG_VIEWS = new Set<string>([
   'crack',
   'blocks',
   'buttress',
+  'scan',
 ])
 
 export function currentViewUrlState(): ViewUrlState {

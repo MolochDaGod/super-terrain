@@ -17,6 +17,6 @@ export { WATER_LEVEL }
 
 /** Extent the water mesh is built over, in world metres. */
 export const WATER_REGION: AABB = {
-  min: { x: -140, y: WATER_LEVEL, z: -280 },
-  max: { x: 500, y: WATER_LEVEL, z: 420 },
+  min: { x: 0, y: WATER_LEVEL, z: -500 },
+  max: { x: 420, y: WATER_LEVEL, z: 720 },
 }

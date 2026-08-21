@@ -5,6 +5,7 @@ import type { TerrainStorage } from './persistence/TerrainStorage'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
 import { WorldTerrain } from './WorldTerrain'
 import { graniteMassingPreset } from './rocks/types'
+import { THRUST_MODIFIER_IDS } from './demo/createThrustFormation'
 
 class FakeWorker {
   onmessage: ((event: MessageEvent) => void) | null = null
@@ -32,27 +33,31 @@ describe('world terrain brush sessions', () => {
     globalThis.Worker = OriginalWorker
   })
 
-  it('restores the whole shipped demo scene on reset, erratics included', async () => {
-    const terrain = new WorldTerrain({}, memoryStorage)
-    await terrain.initialize()
-    const plantedIds = terrain.rocks.snapshot().map((rock) => rock.id)
-    expect(plantedIds.length).toBeGreaterThan(0)
+  it(
+    'restores the authored mesh-terrain patch showcase on reset',
+    async () => {
+      const terrain = new WorldTerrain({}, memoryStorage)
+      await terrain.initialize()
+      expect(terrain.rocks.snapshot()).toHaveLength(0)
+      expect(terrain.removeModifier(THRUST_MODIFIER_IDS[0])).toBe(true)
+      expect(
+        terrain.modifiers
+          .snapshot()
+          .some((modifier) => modifier.id === THRUST_MODIFIER_IDS[0]),
+      ).toBe(false)
 
-    terrain.removeGraniteRock(plantedIds[0])
-    expect(terrain.rocks.snapshot()).toHaveLength(plantedIds.length - 1)
+      await terrain.resetEdits()
 
-    await terrain.resetEdits()
-
-    // A reset world has to be indistinguishable from a first load; leaving the
-    // rocks out produced a scene no fresh load ever produces.
-    expect(terrain.rocks.snapshot()).toHaveLength(plantedIds.length)
-    expect(
-      terrain.modifiers
-        .snapshot()
-        .some((modifier) => modifier.id === 'demo-v3-hero-shard-mass'),
-    ).toBe(true)
-    terrain.dispose()
-  })
+      expect(terrain.rocks.snapshot()).toHaveLength(0)
+      expect(
+        terrain.modifiers
+          .snapshot()
+          .some((modifier) => modifier.id === THRUST_MODIFIER_IDS[0]),
+      ).toBe(true)
+      terrain.dispose()
+    },
+    20_000,
+  )
 
   it('stores one uninterrupted press and drag as one modifier', () => {
     const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)

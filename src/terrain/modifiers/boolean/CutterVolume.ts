@@ -42,6 +42,38 @@ interface CutterBase {
    * meant to look like rock.
    */
   surface?: keyof typeof DISPLACEMENT_PROFILES | 'none'
+  /**
+   * Material classification for faces exposed by subtraction.
+   *
+   * The Boolean backend transfers this tag onto the generated terrain
+   * vertices. An emissive chamber therefore remains one topologically coherent
+   * streamed terrain surface instead of relying on a second backing mesh.
+   */
+  interior?: 'rock' | 'ember'
+  /**
+   * Optional terrain-side transition authored with an additive mesh patch.
+   *
+   * Exact CSG supplies the arbitrary topology, but a bare hard union leaves the
+   * untouched height field meeting the operand at one razor-thin curve.  That
+   * is topologically valid and still reads like a prop pushed through the
+   * ground.  The apron raises the inexpensive source terrain underneath and
+   * around the operand before the Boolean is evaluated, giving the final union
+   * a broad geological root while retaining the patch's overhangs and holes.
+   */
+  terrainApron?: TerrainApron
+}
+
+/** World-space elliptical footprint used to grow terrain into a mesh patch. */
+export interface TerrainApron {
+  center: Vec3Like
+  /** Long-axis direction. Only X/Z participate in the terrain footprint. */
+  forward: Vec3Like
+  halfLength: number
+  halfWidth: number
+  /** Metres outside the authored footprint over which the uplift reaches zero. */
+  falloff: number
+  /** Maximum vertical terrain displacement in metres. */
+  lift: number
 }
 
 /** One elliptical cross-section of a continuous authored void. */
@@ -102,14 +134,25 @@ export interface MeshCutter extends CutterBase {
 }
 
 export function cloneCutterVolume(cutter: CutterVolume): CutterVolume {
+  const terrainApron = cloneTerrainApron(cutter.terrainApron)
   switch (cutter.kind) {
     case 'sweep':
-      return { ...cutter, rings: cutter.rings.map((ring) => ({ ...ring })) }
+      return {
+        ...cutter,
+        terrainApron,
+        rings: cutter.rings.map((ring) => ({ ...ring })),
+      }
     case 'capsule':
-      return { ...cutter, start: { ...cutter.start }, end: { ...cutter.end } }
+      return {
+        ...cutter,
+        terrainApron,
+        start: { ...cutter.start },
+        end: { ...cutter.end },
+      }
     case 'ellipsoid':
       return {
         ...cutter,
+        terrainApron,
         center: { ...cutter.center },
         radii: { ...cutter.radii },
         forward: { ...cutter.forward },
@@ -118,6 +161,7 @@ export function cloneCutterVolume(cutter: CutterVolume): CutterVolume {
     case 'box':
       return {
         ...cutter,
+        terrainApron,
         center: { ...cutter.center },
         halfExtents: { ...cutter.halfExtents },
         forward: { ...cutter.forward },
@@ -126,9 +170,19 @@ export function cloneCutterVolume(cutter: CutterVolume): CutterVolume {
     case 'mesh':
       return {
         ...cutter,
+        terrainApron,
         positions: [...cutter.positions],
         indices: [...cutter.indices],
       }
+  }
+}
+
+function cloneTerrainApron(apron: TerrainApron | undefined): TerrainApron | undefined {
+  if (!apron) return undefined
+  return {
+    ...apron,
+    center: { ...apron.center },
+    forward: { ...apron.forward },
   }
 }
 

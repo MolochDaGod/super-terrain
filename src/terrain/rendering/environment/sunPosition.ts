@@ -12,18 +12,19 @@ export interface SunSetup {
  * model, the cascade shadows, the rim light on ridges and the aerial haze all
  * read from here so they can never drift apart.
  */
-// Late afternoon, east-south-east and a little above the far ridge line. The
+// Late afternoon, west-north-west and a little above the far ridge line. The
 // hero frame is three-quarter backlit, so crests carry a warm rim and faces
 // turned to the camera fall into sky-lit shade.
 //
 // The elevation is a compromise that was previously set too low. At seven
 // degrees the rake is so extreme that every slope is either blown out or in
 // shadow, cast shadows run the whole length of the valley, and the terrain
-// reads as a relief map lit by a torch held at the horizon. Fourteen degrees
+// reads as a relief map lit by a torch held at the horizon. Fifteen degrees
 // keeps the warm backlight and the long modelling shadows while leaving enough
 // of the ground in the middle of the falloff for the surface material to show
-// at all — and the fog, not the rake, is what is meant to separate the planes.
-export const DEFAULT_SUN = createSun(14, 116)
+// at all. Twelve degrees restores the long reference shadows while the reduced
+// ambient fill keeps their interiors modelled rather than uniformly grey.
+export const DEFAULT_SUN = createSun(14, 142)
 
 /**
  * Repoints the shared sun. Everything downstream reads `DEFAULT_SUN.direction`

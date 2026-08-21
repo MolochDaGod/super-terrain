@@ -9,6 +9,10 @@ import { sampleHeightFieldCached } from './heightField'
 
 export interface TerrainMaterialFields {
   regional: number
+  /** Up component of the undeformed height-field normal at this X/Z. */
+  baseNormalY: number
+  /** Barren showcase basin where exposed bedrock replaces pasture/regolith. */
+  bedrockExposure: number
   /** Regolith depth proxy in 0..1: where loose material can come to rest. */
   deposition: number
   /** Ground water availability in 0..1, from drainage and altitude. */
@@ -95,6 +99,9 @@ export function evaluateTerrainMaterialFields(
   // Slope from the height stack rather than the mesh normal, so it survives LOD
   // changes and skirt vertices unchanged.
   const slope = clamp(terrain.steepness, 0, 3)
+  const baseNormalY = 1 / Math.sqrt(1 + slope * slope)
+  const showcaseDistance = Math.hypot((x - 300) / 680, (z - 100) / 400)
+  const bedrockExposure = 1 - smoothstep(0.48, 0.98, showcaseDistance)
 
   // Water collects in the carved drainage lines and thins out with altitude,
   // where there is less catchment above and more of the year is frozen.
@@ -148,6 +155,8 @@ export function evaluateTerrainMaterialFields(
 
   return {
     regional: perlin3(x * 0.011, y * 0.011, z * 0.011),
+    baseNormalY,
+    bedrockExposure,
     deposition,
     moisture,
     macro: fbm(position, 34, 3),
@@ -209,7 +218,12 @@ export function evaluateTerrainLayerWeights(
   const regolith = clamp(
     falloff(0.44, 0.1, slope + fray * 0.6) *
       falloff(0.85, 0.12, curvature) *
-      (fields.deposition * 0.6 + 0.45),
+      (fields.deposition * 0.6 + 0.45) *
+      // The showcase is a stripped glacial rock basin. Retaining the generic
+      // meadow/regolith budget here made the fused mesh operands switch to a
+      // completely different dark material at their exact join and recreated
+      // the appearance of props even though the topology was continuous.
+      (1 - fields.bedrockExposure * 0.84),
     0,
     1,
   )
@@ -248,7 +262,11 @@ export function evaluateTerrainLayerWeights(
     smoothstep(0.2, 0.52, fields.moisture + raw * 0.28) *
     alpineFade *
     aridCeiling *
-    falloff(0.38, 0.1, slope + fray)
+    falloff(0.38, 0.1, slope + fray) *
+    // This basin is the exposed mesh-patch showcase, not a pasture. Suppress
+    // the generic alpine vegetation budget here so the continuous mineral
+    // material remains visible on both the source terrain and inserted faces.
+    (1 - fields.bedrockExposure * 0.995)
   const soil = remaining * (1 - plantable)
   const vegetated = remaining * plantable
   // Wet meadow follows the water table as much as it follows the climate: the

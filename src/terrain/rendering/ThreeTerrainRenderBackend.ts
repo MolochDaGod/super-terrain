@@ -1,5 +1,4 @@
 import {
-  Box3,
   BufferAttribute,
   BufferGeometry,
   type Camera,
@@ -39,7 +38,6 @@ import {
   expandTerrainBrickBounds,
   type TerrainBrickGeometry,
 } from './TerrainBricks'
-import { TerrainHiZOcclusion } from './TerrainHiZOcclusion'
 import { invalidateTerrainShadows } from './environment/terrainShadowInvalidation'
 import {
   cloneTerrainMaterialSettings,
@@ -79,7 +77,6 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private readonly surfaceRoot: Group
   private readonly sectionSize: number
   private readonly brickSize: number
-  private readonly occlusion = new TerrainHiZOcclusion()
   private runtime = new Map<SectionId, RuntimeSection>()
   private deferredDisposals: DeferredGeometry[] = []
   private overlay: TerrainOverlay = 'none'
@@ -115,7 +112,12 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     this.surfaceRoot.name = 'terrain-static-surfaces'
     this.root.add(this.surfaceRoot)
     this.sectionSize = sectionSize
-    this.brickSize = Math.max(16, sectionSize / 2)
+    // One draw per active section. The old 64 m cubic split turned a single
+    // mountainous section into 10–30 meshes along Y, taking the hero frame to
+    // 3,230 terrain draw calls and then rendering all of them again for a CPU
+    // readback Hi-Z pass. Section frustum culling plus the coarse horizon proxy
+    // is the better trade at this world scale.
+    this.brickSize = Number.POSITIVE_INFINITY
     this.terrainMaterial = createTerrainMaterialForMode(
       this.renderMode,
       this.debugView,
@@ -214,7 +216,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     if (!runtime || runtime.visible === visible) return
     runtime.visible = visible
     for (const brick of this.activeBricks(runtime)) {
-      this.occlusion.setStreamVisible(brick.id, visible)
+      brick.mesh.visible = visible
     }
     runtime.boundary.visible = visible && this.overlay !== 'none'
     invalidateTerrainShadows()
@@ -276,7 +278,11 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   updateOcclusion(renderer: Renderer, camera: Camera, scene: Scene): void {
-    this.occlusion.update(renderer, camera, scene)
+    // Deliberately section/frustum culled. A per-frame depth render and GPU→CPU
+    // readback costs more than it saves once each section is one draw call.
+    void renderer
+    void camera
+    void scene
   }
 
   setOverlay(overlay: TerrainOverlay): void {
@@ -333,9 +339,6 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       if (maximumDisplacement > 0) {
         expandPreviewBounds(activeLod.source, maximumDisplacement)
         expandTerrainBrickBounds(activeLod.bricks, maximumDisplacement)
-        for (const brick of activeLod.bricks) {
-          this.occlusion.expandBounds(brick.id, maximumDisplacement)
-        }
         this.queuePreviewRefresh(activeLod.source)
       }
     }
@@ -478,7 +481,6 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const id of [...this.runtime.keys()]) this.evict(id)
     for (const pending of this.deferredDisposals) pending.geometry.dispose()
     this.deferredDisposals.length = 0
-    this.occlusion.dispose()
     this.root.remove(this.surfaceRoot)
     this.terrainMaterial.dispose()
     this.densityMaterial.dispose()
@@ -531,17 +533,12 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private attachActiveLod(runtime: RuntimeSection): void {
     for (const brick of this.activeBricks(runtime)) {
       this.surfaceRoot.add(brick.mesh)
-      const worldBounds = brick.geometry.boundingBox
-        ? brick.geometry.boundingBox.clone().translate(brick.mesh.position)
-        : new Box3().setFromObject(brick.mesh)
-      this.occlusion.register(brick.id, brick.mesh, worldBounds)
-      this.occlusion.setStreamVisible(brick.id, runtime.visible)
+      brick.mesh.visible = runtime.visible
     }
   }
 
   private detachActiveLod(runtime: RuntimeSection): void {
     for (const brick of this.activeBricks(runtime)) {
-      this.occlusion.unregister(brick.id)
       this.surfaceRoot.remove(brick.mesh)
     }
   }

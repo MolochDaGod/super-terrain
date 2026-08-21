@@ -19,15 +19,23 @@ interface ValleyWaterProps {
 export function ValleyWater({ terrain, mode }: ValleyWaterProps) {
   const seed = terrain.config.seed
   const geometry = useMemo(
-    () => createWaterSurface({ region: WATER_REGION, level: WATER_LEVEL, seed }),
+    () => createWaterSurface({
+      region: WATER_REGION,
+      level: WATER_LEVEL,
+      seed,
+      // A six-metre fringe exposed the rectangular cell outline wherever a
+      // channel narrowed. Three metres is still a tiny mesh next to terrain,
+      // but lets the real height field cut a visibly continuous shoreline.
+      step: 3,
+    }),
     [seed],
   )
 
-  const { material, reflectionTarget } = useMemo(() => {
+  const { resources, reflectionTarget } = useMemo(() => {
     // A second pass over the whole scene, so it is rendered at a fraction of
     // the frame's resolution. The ripple distortion hides the difference, and a
     // reflection sharp enough to count pixels in is not what this is for.
-    const reflection = reflector({ resolutionScale: 0.2, bounces: false })
+    const reflection = reflector({ resolutionScale: 0.64, bounces: false })
     // The node's `target` is what defines the mirror plane: its local +Z is the
     // plane normal, so it is laid flat and lifted to the water level. The water
     // geometry is already in world space on a mesh at the origin, so the target
@@ -35,7 +43,7 @@ export function ValleyWater({ terrain, mode }: ValleyWaterProps) {
     reflection.target.rotateX(-Math.PI / 2)
     reflection.target.position.y = WATER_LEVEL
     return {
-      material: createWaterMaterial({ reflection }),
+      resources: createWaterMaterial({ reflection }),
       reflectionTarget: reflection.target,
     }
   }, [])
@@ -43,16 +51,16 @@ export function ValleyWater({ terrain, mode }: ValleyWaterProps) {
   useEffect(
     () => () => {
       geometry.dispose()
-      material.dispose()
+      resources.dispose()
     },
-    [geometry, material],
+    [geometry, resources],
   )
 
   if (mode !== 'full') return null
   return (
     <>
       <primitive object={reflectionTarget} />
-      <mesh geometry={geometry} material={material} renderOrder={-1} />
+      <mesh geometry={geometry} material={resources.material} renderOrder={-1} />
     </>
   )
 }

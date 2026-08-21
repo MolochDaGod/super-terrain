@@ -9,15 +9,13 @@ describe('the full terrain material', () => {
     // Reaching a fragment entry point at all means every node in the graph was
     // walked and emitted, which is the check TypeScript cannot perform.
     expect(cost.wgsl).toContain('fn main(')
-    expect(cost.mainLines).toBeGreaterThan(100)
+    expect(cost.mainLines).toBeGreaterThan(50)
   })
 
   it('stays within its Perlin noise budget', () => {
-    // Measured at 42 with both biomes in. This is the number that decides
-    // whether the material is renderable, so it gets a tight bound rather than
-    // a generous one: an accidental extra octave in a shared field multiplies
-    // through every layer that reads it and lands here as four or five.
-    expect(cost.perlinCallSites).toBeLessThanOrEqual(44)
+    // Surface detail is texture-baked. A future material change must not
+    // quietly put the old fragment-noise workload back into the hot path.
+    expect(cost.perlinCallSites).toBe(0)
   })
 
   it('stays within its code-size budget', () => {

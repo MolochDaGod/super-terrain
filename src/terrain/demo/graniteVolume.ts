@@ -2,6 +2,7 @@ import { Euler, Matrix4, Quaternion, Vector3 } from 'three'
 import { generateGraniteRock } from '../rocks/generateGraniteRock'
 import type { GraniteTopologyDetail } from '../rocks/types'
 import type { CutterVolume } from '../modifiers/boolean/CutterVolume'
+import type { TerrainApron } from '../modifiers/boolean/CutterVolume'
 import type { Vec3Like } from '../core/types'
 
 export interface GraniteVolumeOptions {
@@ -12,6 +13,8 @@ export interface GraniteVolumeOptions {
   /** Overrides `rotation` when the orientation is derived rather than authored. */
   orientation?: Quaternion
   position: Vec3Like
+  /** Optional terrain-side transition retained with this CSG operand. */
+  terrainApron?: TerrainApron
 }
 
 interface Blank {
@@ -110,5 +113,12 @@ export function graniteVolume(options: GraniteVolumeOptions): CutterVolume {
     kind: 'mesh',
     positions,
     indices: Array.from(blank.indices),
+    terrainApron: options.terrainApron
+      ? {
+          ...options.terrainApron,
+          center: { ...options.terrainApron.center },
+          forward: { ...options.terrainApron.forward },
+        }
+      : undefined,
   }
 }

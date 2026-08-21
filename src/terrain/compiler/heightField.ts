@@ -1,4 +1,5 @@
 import { clamp, lerp, smoothstep } from '../core/bounds'
+import { WATER_LEVEL } from './climate'
 
 /**
  * The world's base elevation model.
@@ -230,6 +231,153 @@ export function sampleHeightField(
     height = lerp(height, Math.min(height, floor + valley * 12), flatten)
   }
 
+  // Open the authored showcase into a glacial rock basin. The regional field
+  // naturally put a chain of billowed foothills through this exact view, which
+  // made the foreground read as a dune field and hid both the river and most
+  // mesh patches behind smooth swells. This is still a continuous base field,
+  // but here it supplies subdued bedrock under the Boolean patchwork rather
+  // than competing with it as the subject.
+  const showcaseDistance = Math.hypot((x - 300) / 680, (z - 100) / 400)
+  const showcaseBasin = 1 - smoothstep(0.55, 0.96, showcaseDistance)
+  if (showcaseBasin > 0.001) {
+    const floorUndulation =
+      fbm(x * 0.012, z * 0.012, seed + 1_013, 2, 2.15, 0.48) * 1.8
+    const bedrockRibs =
+      (ridgedMultifractal(x * 0.024, z * 0.024, seed + 1_019, 3) - 0.48) * 2.25
+    const basinFloor =
+      WATER_LEVEL + 8 + (x - 300) * 0.006 + floorUndulation + bedrockRibs
+    height = lerp(height, basinFloor, showcaseBasin * 0.88)
+  }
+
+  // The hero valley needs one legible drainage axis. The broad procedural
+  // catchment sometimes leaves its low ground as an undirected lake, which is
+  // visually flat and gives reflections no line through the composition. This
+  // narrow, meandering glacial outlet is still part of the height field (not a
+  // ribbon laid on top), so its banks, shadows, shoreline and water occlusion
+  // are all real terrain and remain editable.
+  const showcaseRiver = sampleShowcaseRiverProfile(x, z, seed)
+  if (showcaseRiver.valley > 0.001) {
+    const gravel = fbm(x * 0.027, z * 0.027, seed + 1_091, 2, 2.1, 0.5) * 1.35
+    const riverBed = WATER_LEVEL - 4.6 + gravel
+    height = lerp(
+      height,
+      Math.min(height, showcaseRiver.bankHeight + gravel * 0.45),
+      showcaseRiver.valley * 0.86,
+    )
+    height = lerp(
+      height,
+      Math.min(height, riverBed),
+      showcaseRiver.bed * 0.98,
+    )
+  }
+
+  // Angular moraine and shallow bedrock ribs keep the showcase basin from
+  // reading as a smoothed heightfield wherever no authored mesh operand lands.
+  // Two octaves are enough at this metre scale; centimetre fracture remains a
+  // material concern and the river bed is kept calm for legible reflections.
+  const glacialRubble = ridgedMultifractal(
+    x * 0.032,
+    z * 0.032,
+    seed + 1_127,
+    2,
+  )
+  height +=
+    (glacialRubble - 0.52) *
+    1.55 *
+    // On the distant walls this is real metre-scale surface relief, not a
+    // normal-map substitute. Reusing the already-evaluated ridge field avoids
+    // another cold-load noise stack while breaking the smooth procedural
+    // massif into frost-shattered faces and a genuinely irregular silhouette.
+    (0.7 + massif * 3.1) *
+    (1 - showcaseRiver.bed * 0.88)
+
+  // The mountain immediately behind the showcase thrust is a focal asset, not
+  // a haze-only horizon proxy. Its former six-sample streamed source reduced a
+  // 390 m massif to a handful of broad polygons; even at LOD0 the underlying
+  // kilometre-scale ridge field supplied too little meso relief to catch a
+  // normal, cast small self-shadows, or break the skyline. Confine two cheap
+  // frost-fracture bands to that massif so the extra work and vertices are paid
+  // only where the shipped camera can resolve them.
+  const rearMassifDistance = Math.min(
+    // Left rear peak.
+    Math.hypot((x - 620) / 310, (z - 410) / 255),
+    // The mountain immediately behind the hero in the shipped camera. A live
+    // review ray lands at about (415, 393); the old mask never touched it and
+    // therefore spent all of its focal detail on the neighbouring peak.
+    Math.hypot((x - 420) / 245, (z - 395) / 215),
+  )
+  const rearMassifDetail =
+    (1 - smoothstep(0.52, 1, rearMassifDistance)) *
+    massif *
+    (1 - showcaseRiver.bed * 0.92)
+  if (rearMassifDetail > 0.001) {
+    // Quantised low-frequency value fields form broad planar blocks and sharp
+    // frost steps. The previous ridged multifractal was smooth at every scale:
+    // more vertices only resolved the same melted billows more accurately.
+    // These plateaus survive LOD1 because their shortest cell is still ~29 m,
+    // while the bedding pass below cuts independent oblique ledges through
+    // them instead of producing one repeated procedural comb.
+    const jointField = valueNoise(
+      x * 0.012,
+      z * 0.012,
+      seed + 1_163,
+    )
+    const chipField = valueNoise(
+      (x + 37) * 0.034,
+      (z - 61) * 0.034,
+      seed + 1_177,
+    )
+    const jointBlocks = Math.floor(jointField * 6) / 5
+    const faceChips = Math.floor(chipField * 5) / 4
+    const faultPhase =
+      x * 0.031 +
+      z * 0.018 +
+      valueNoise(x * 0.0045, z * 0.0045, seed + 1_181) * 1.35
+    const faultFraction = faultPhase - Math.floor(faultPhase)
+    const faultShelf =
+      smoothstep(0.08, 0.2, faultFraction) *
+      (1 - smoothstep(0.62, 0.84, faultFraction))
+    height += (
+      (jointBlocks - 0.5) * 16.5 +
+      (faceChips - 0.5) * 4.8 +
+      (faultShelf - 0.38) * 4.4
+    ) * rearMassifDetail
+  }
+
+  // Near-field frost-shattered bedrock. The section source grid resolves this
+  // four-to-nine-metre relief directly, so the foreground is not a perfectly
+  // smooth height sheet between the authored CSG complexes. These two cheap
+  // value-noise samples are intentionally subordinate to the mesh patches:
+  // they break grazing highlights and collect shadow, but never manufacture a
+  // landmark or an overhang that belongs in the Boolean topology.
+  const rubbleMask = showcaseBasin * (1 - showcaseRiver.bed * 0.94)
+  if (rubbleMask > 0.001) {
+    // Interpolated noise only makes soft soil humps, even when its wavelength
+    // is short. Glacially stripped bedrock instead breaks into shallow planar
+    // plates separated by abrupt frost steps. Quantise two rotated value fields
+    // before meshing: the 12–18 m band changes silhouette and casts real small
+    // shadows, while the 5–8 m band facets those plates without spending source
+    // triangles on centimetre detail that belongs in the scan normal map.
+    const plateU = x * 0.829 + z * 0.559
+    const plateV = z * 0.829 - x * 0.559
+    const blockField = valueNoise(
+      plateU * 0.071,
+      plateV * 0.058,
+      seed + 1_139,
+    )
+    const chipField = valueNoise(
+      (plateU + plateV * 0.21) * 0.16,
+      (plateV - plateU * 0.13) * 0.135,
+      seed + 1_151,
+    )
+    const blockFaces = Math.floor(blockField * 6) / 5
+    const chipFaces = Math.floor(chipField * 5) / 4
+    height += (
+      (blockFaces - 0.5) * 3.15 +
+      (chipFaces - 0.5) * 0.72
+    ) * rubbleMask
+  }
+
   // --- 4b. the dune sea -------------------------------------------------
   // Dunes are geometry, not texture. A slipface is forty metres of ground at
   // the angle of repose with a brink line along the top, and it has to occlude
@@ -279,6 +427,69 @@ export function sampleHeightFieldCached(
 /** Convenience wrapper for callers that only need elevation. */
 export function sampleHeight(x: number, z: number, seed: number): number {
   return sampleHeightFieldCached(x, z, seed).height
+}
+
+/** 0 outside the authored valley outlet, 1 on its gravel bed. */
+export function sampleShowcaseRiver(
+  x: number,
+  z: number,
+  seed: number,
+): number {
+  return sampleShowcaseRiverProfile(x, z, seed).bed
+}
+
+function sampleShowcaseRiverProfile(
+  x: number,
+  z: number,
+  seed: number,
+): { bed: number; valley: number; bankHeight: number } {
+  const extent =
+    smoothstep(-620, -510, z) * (1 - smoothstep(720, 850, z))
+  if (extent <= 0) return { bed: 0, valley: 0, bankHeight: WATER_LEVEL }
+  // The shipped camera looks north-east. In world space its screen-right axis
+  // runs towards smaller X and larger Z, so the outlet must pass the hero on
+  // this side to be visible. The previous centreline did the opposite: it sat
+  // behind the landmark and only a thin reflective sliver escaped on the left.
+  const centreX =
+    (z < 180
+      ? 200 + (z - 180) * 0.55
+      : 200 - (z - 180) * 0.15) +
+    Math.sin(z * 0.009) * 15 +
+    Math.sin(z * 0.002 + seed * 0.0007) * 18
+  const bankNoise =
+    fbm(x * 0.012, z * 0.012, seed + 1_073, 2, 2.05, 0.5) * 10
+  const relative = x - centreX + bankNoise
+  const distance = Math.abs(relative)
+  // A second meltwater thread splits around a gravel bar through the middle
+  // distance, then rejoins before the narrow outlet. It is evaluated as part
+  // of the same terrain profile, so the island between the threads is real
+  // ground that occludes/reflects correctly rather than a dark shape painted
+  // onto one wide water ribbon.
+  const braid = smoothstep(105, 205, z) * (1 - smoothstep(470, 575, z))
+  const branchOffset = 38 + Math.sin(z * 0.021 + 0.7) * 8
+  const branchRelative = relative - branchOffset
+  const branchDistance = Math.abs(branchRelative)
+  const primaryBed = 1 - smoothstep(8, 22, distance)
+  const branchBed = (1 - smoothstep(7, 18, branchDistance)) * braid
+  // The mountain-side bank has room to open into a broad valley wall; the
+  // landmark-side bank stays tight so the slab still appears rooted at the
+  // channel's edge instead of floating in a flattened basin.
+  const valleyWidth = relative < 0 ? 130 : 185
+  const branchValleyWidth = branchRelative < 0 ? 92 : 120
+  const primaryValley = 1 - smoothstep(28, valleyWidth, distance)
+  const secondaryValley =
+    (1 - smoothstep(24, branchValleyWidth, branchDistance)) * braid
+  const nearestRelative = branchDistance < distance && braid > 0.2
+    ? branchRelative
+    : relative
+  const nearestDistance = Math.min(distance, branchDistance + (1 - braid) * 1_000)
+  return {
+    bed: Math.max(primaryBed, branchBed) * extent,
+    valley: Math.max(primaryValley, secondaryValley) * extent,
+    bankHeight:
+      WATER_LEVEL - 3.4 +
+      Math.max(0, nearestDistance - 12) * (nearestRelative < 0 ? 0.42 : 0.28),
+  }
 }
 
 /**
@@ -336,7 +547,9 @@ function applyStrata(
   bedding: Bedding,
 ): number {
   const exposure =
-    smoothstep(0.85, 1.9, steepness) * massif * bedding.expression
+    smoothstep(0.38, 1.4, steepness) *
+    massif *
+    (0.46 + bedding.expression * 0.54)
   if (exposure < 0.02) return height
 
   // Distance from the origin along the bedding normal, in bed counts. The
@@ -357,7 +570,7 @@ function applyStrata(
   // normal's vertical component moves the point onto the plane along Y, which
   // is the only axis a heightfield may move on.
   const shift = ((snapped - band) * bedding.thickness) / bedding.normalY
-  return height + shift * clamp(0.55 * exposure * hardness, 0, 1)
+  return height + shift * clamp(0.72 * exposure * hardness, 0, 1)
 }
 
 /**

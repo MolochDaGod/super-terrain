@@ -25,14 +25,14 @@ import { BenchmarkHistory } from './benchmarks/BenchmarkHistory'
 import { evaluateHeight } from './compiler/TerrainField'
 import { TerrainCompiler } from './compiler/TerrainCompiler'
 import {
-  createDemoTerrainModifiers,
-  upgradeLegacyDemoTerrainModifiers,
-} from './demo/createDemoModifiers'
-import { createDemoGraniteRocks } from './demo/createDemoRocks'
+  createShowcaseTerrainModifiers,
+  upgradeShowcaseTerrainModifiers,
+} from './demo/createShowcaseModifiers'
 import type { EditorSnapshot, TerrainOverlay } from './editor/EditorStore'
 import {
   cameraSectionDistance,
   constrainNeighborLods,
+  detailFocusLodCeiling,
   focusedLodCeiling,
   selectLod,
   selectSourceLod,
@@ -69,6 +69,7 @@ import {
 } from './modifiers/transform'
 import { MeshPartition, type TerrainSection } from './partition/MeshPartition'
 import { IndexedDbTerrainStorage, type TerrainStorage } from './persistence/TerrainStorage'
+import { loadShowcaseSectionBake } from './prebake/showcaseSectionBake'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
 import { HorizonProxyMask } from './rendering/HorizonProxyMask'
 import {
@@ -1066,10 +1067,6 @@ export class WorldTerrain {
     this.modifiers.clear()
     this.rocks.clear()
     this.installDemoModifiers()
-    // Reset restores the shipped demo scene, and the erratics are part of it.
-    // Leaving them out made "Reset edits" produce a world that no fresh load
-    // ever produces.
-    this.installDemoRocks()
     this.ensureDocumentModifiers()
     this.renderer?.setMaterialSettings(this.getMaterialSettings())
     const now = performance.now()
@@ -1147,9 +1144,17 @@ export class WorldTerrain {
         this.storage.load('default'),
         this.storage.loadRocks?.('default') ?? Promise.resolve(undefined),
       ])
-      const upgraded = saved?.length
-        ? upgradeLegacyDemoTerrainModifiers(saved, this.config.seed)
+      // The legacy migration imports the old mesh-CSG showcase only for an
+      // existing document that can actually need it. A fresh scene no longer
+      // generates dozens of granite operands merely by importing WorldTerrain.
+      const showcaseUpgrade = saved?.length
+        ? upgradeShowcaseTerrainModifiers(saved, this.config.seed)
         : undefined
+      const upgraded = showcaseUpgrade ?? (saved?.length
+        ? (await import('./demo/createDemoModifiers'))
+            .upgradeLegacyDemoTerrainModifiers(saved, this.config.seed)
+        : undefined)
+      let installedFreshShowcase = false
       if (upgraded) {
         this.modifiers.replace(upgraded)
         await this.storage.save(
@@ -1161,10 +1166,11 @@ export class WorldTerrain {
         this.modifiers.replace(saved)
       } else {
         this.installDemoModifiers()
+        installedFreshShowcase = true
       }
       this.rocks.replace(savedRocks ?? [])
-      if (!saved?.length && !savedRocks?.length) this.installDemoRocks()
       this.ensureDocumentModifiers()
+      if (installedFreshShowcase) await this.installShowcaseSectionBake()
       this.renderer?.setMaterialSettings(this.getMaterialSettings())
       this.savedModifierRevision = this.modifiers.sourceRevision
       this.savedRockRevision = this.rocks.sourceRevision
@@ -1174,23 +1180,20 @@ export class WorldTerrain {
   }
 
   private installDemoModifiers(): void {
-    for (const modifier of createDemoTerrainModifiers(this.config.seed)) {
+    for (const modifier of createShowcaseTerrainModifiers(this.config.seed)) {
       this.modifiers.add(modifier)
     }
   }
 
-  /**
-   * Plants the demo's erratics. Runs only for a world that had nothing saved,
-   * so it can never add rocks to a scene someone has already worked on.
-   */
-  private installDemoRocks(): void {
-    for (const placement of createDemoGraniteRocks()) {
-      const point = {
-        x: placement.point.x,
-        y: this.sampleHeight(placement.point.x, placement.point.z),
-        z: placement.point.z,
-      }
-      this.addGraniteRock(placement.parameters, point)
+  private async installShowcaseSectionBake(): Promise<void> {
+    const sections = await loadShowcaseSectionBake(this.config)
+    for (const compiled of sections) {
+      const section = this.partition.getOrCreate(compiled.key)
+      // Fresh procedural cells start at revision zero. Keep the guard explicit
+      // so an initialization race can never overwrite an authored source.
+      if (section.revision !== 0 || !section.source.procedural) continue
+      compiled.sourceRevision = section.revision
+      this.partition.acceptCompiled(section, compiled)
     }
   }
 
@@ -1355,6 +1358,14 @@ export class WorldTerrain {
       // distance or authored terrain actually changes.
       errorTolerancePixels: this.config.baseLodErrorPixels,
     })
+    const detailFocusCeiling = this.config.lodDetailFocus
+      ? detailFocusLodCeiling(
+          section.key,
+          this.config.lodDetailFocus,
+          this.config.sectionSize,
+          lastLevel,
+        )
+      : lastLevel
     return Math.min(
       screenLod,
       focusedLodCeiling(
@@ -1362,6 +1373,7 @@ export class WorldTerrain {
         this.config.lod0FocusRadiusSections,
         lastLevel,
       ),
+      detailFocusCeiling,
     )
   }
 
@@ -1455,6 +1467,17 @@ export class WorldTerrain {
         ),
         lod0FocusRadiusSections: this.config.lod0FocusRadiusSections,
       })
+      if (this.config.lodDetailFocus) {
+        lod = Math.min(
+          lod,
+          detailFocusLodCeiling(
+            section.key,
+            this.config.lodDetailFocus,
+            this.config.sectionSize,
+            this.config.lodResolutions.length - 1,
+          ),
+        )
+      }
       const activeBrushTouchesSection = Boolean(
         this.activeStroke &&
         this.liveStrokePoint &&

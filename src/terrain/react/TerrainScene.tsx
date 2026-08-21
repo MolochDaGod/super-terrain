@@ -1,8 +1,8 @@
-import { useCallback, useMemo } from 'react'
+import { lazy, Suspense, useCallback, useMemo } from 'react'
 import { Group } from 'three/webgpu'
 import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
-import { useEditorSnapshot } from './hooks'
+import { useEditorSnapshot, useGraniteRockRevision } from './hooks'
 import { DevSceneHandle } from './DevSceneHandle'
 import { EditorCamera } from './EditorCamera'
 import { HorizonProxy } from './HorizonProxy'
@@ -11,7 +11,6 @@ import { TerrainEnvironment } from './TerrainEnvironment'
 import { TerrainRenderPipeline } from './TerrainRenderPipeline'
 import { TerrainView } from './TerrainView'
 import { ModifierTransformGizmo } from './ModifierTransformGizmo'
-import { GraniteRockScene } from './GraniteRockScene'
 import { HeroShardGlow } from './HeroShardGlow'
 import { ValleyWater } from './ValleyWater'
 import { EditorLights } from './EditorLights'
@@ -24,8 +23,18 @@ interface TerrainSceneProps {
   editor: EditorStore
 }
 
+// Granite authoring owns seven topology/bake sources and its own large node
+// material graph. A fresh showcase contains no authored granite objects, so
+// loading that entire subsystem on the critical path only delays first light.
+const GraniteRockScene = lazy(async () => {
+  const module = await import('./GraniteRockScene')
+  return { default: module.GraniteRockScene }
+})
+
 export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
   const { renderMode, uiViewMode } = useEditorSnapshot(editor)
+  useGraniteRockRevision(terrain)
+  const hasGraniteRocks = terrain.rocks.count > 0
   const showEditorOverlays = uiViewMode === 'editor'
   const terrainGroup = useMemo(() => new Group(), [])
   const debugView = useMemo(() => currentViewUrlState().debug ?? 'none', [])
@@ -65,8 +74,12 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
         backend={terrainBackend}
       />
       <ValleyWater terrain={terrain} mode={renderMode} />
-      <GraniteRockScene terrain={terrain} editor={editor} />
       <HeroShardGlow />
+      {hasGraniteRocks && (
+        <Suspense fallback={null}>
+          <GraniteRockScene terrain={terrain} editor={editor} />
+        </Suspense>
+      )}
       <EditorLights editor={editor} />
       {showEditorOverlays && (
         <>
@@ -75,7 +88,7 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
           <ModifierTransformGizmo terrain={terrain} editor={editor} />
         </>
       )}
-      <DevSceneHandle />
+      <DevSceneHandle terrain={terrain} />
       <EditorCamera terrain={terrain} editor={editor} />
       <TerrainRenderPipeline
         mode={renderMode}

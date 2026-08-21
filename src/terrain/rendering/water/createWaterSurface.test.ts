@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_TERRAIN_CONFIG } from '../../config'
-import { sampleHeight } from '../../compiler/heightField'
+import {
+  sampleHeight,
+  sampleShowcaseRiver,
+} from '../../compiler/heightField'
 import { WATER_LEVEL, WATER_REGION } from '../../demo/valleyFloor'
 import { createWaterSurface } from './createWaterSurface'
 
@@ -42,6 +45,23 @@ describe('valley water surface', () => {
     // of the rectangle is hillside. Keeping it would be tens of thousands of
     // invisible triangles.
     expect(emitted.size).toBeLessThan(positions.count * 0.7)
+  })
+
+  it('keeps water inside the authored river instead of flooding low basins', () => {
+    const positions = geometry.getAttribute('position')
+    const indices = geometry.getIndex()!.array
+    // Every emitted quad is admitted by at least one corner of the carved
+    // river corridor. Its other corners are the intentional shoreline fringe.
+    for (let offset = 0; offset < indices.length; offset += 6) {
+      const corners = [indices[offset], indices[offset + 1], indices[offset + 2], indices[offset + 5]]
+      expect(
+        Math.max(...corners.map((index) => sampleShowcaseRiver(
+          positions.getX(index),
+          positions.getZ(index),
+          seed,
+        ))),
+      ).toBeGreaterThan(0.001)
+    }
   })
 
   it('actually floods some of the basin', () => {

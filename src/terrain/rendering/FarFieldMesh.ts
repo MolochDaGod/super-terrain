@@ -21,7 +21,11 @@ export interface FarFieldMeshData {
  * terrain always wins where the two representations overlap.
  */
 const FAR_FIELD_TARGET_EDGE_LENGTH = 64
-const FAR_FIELD_MIN_SEGMENTS = 96
+// The showcase now uses a 4 km logical world. At that extent the old minimum
+// produced ~43 m triangles, visibly clipping the silhouette of the mountain
+// immediately behind the hero in close review shots. 128 segments gives 32 m
+// edges while leaving the 16 km/max-resolution path unchanged.
+const FAR_FIELD_MIN_SEGMENTS = 128
 const FAR_FIELD_MAX_SEGMENTS = 512
 
 export function generateFarFieldMesh(

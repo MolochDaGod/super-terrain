@@ -1,5 +1,8 @@
 import { BufferAttribute, BufferGeometry } from 'three/webgpu'
-import { sampleHeight } from '../../compiler/heightField'
+import {
+  sampleHeight,
+  sampleShowcaseRiver,
+} from '../../compiler/heightField'
 import type { AABB } from '../../core/types'
 
 export interface WaterSurfaceOptions {
@@ -31,6 +34,7 @@ export function createWaterSurface(options: WaterSurfaceOptions): BufferGeometry
   const rows = Math.max(2, Math.round((region.max.z - region.min.z) / step) + 1)
 
   const depths = new Float32Array(columns * rows)
+  const river = new Float32Array(columns * rows)
   const positions = new Float32Array(columns * rows * 3)
   for (let row = 0; row < rows; row += 1) {
     const z = region.min.z + row * step
@@ -41,6 +45,7 @@ export function createWaterSurface(options: WaterSurfaceOptions): BufferGeometry
       positions[index * 3 + 1] = level
       positions[index * 3 + 2] = z
       depths[index] = level - sampleHeight(x, z, seed)
+      river[index] = sampleShowcaseRiver(x, z, seed)
     }
   }
 
@@ -54,6 +59,13 @@ export function createWaterSurface(options: WaterSurfaceOptions): BufferGeometry
       const b = a + 1
       const c = a + columns
       const d = c + 1
+      // A water level is not permission to flood every unrelated hollow in
+      // the basin. Keep the exact terrain-cut shoreline, but only inside the
+      // authored outlet corridor. The one-cell fringe lets the terrain itself
+      // remain the final shoreline mask and avoids a visible geometric ribbon
+      // edge when a sculpt crosses the bank.
+      const corridor = Math.max(river[a], river[b], river[c], river[d])
+      if (corridor <= 0.001) continue
       const deepest = Math.max(depths[a], depths[b], depths[c], depths[d])
       // One cell of slack, so the ring of quads straddling the shore is kept
       // and the terrain has something to cut the waterline out of.

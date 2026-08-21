@@ -1,4 +1,5 @@
 import { clamp, worldToSection } from '../core/bounds'
+import type { TerrainLodDetailFocus } from '../config'
 import type {
   CompiledLOD,
   SectionId,
@@ -98,7 +99,7 @@ export function focusedLodCeiling(
 /** Section-grid distance from a terrain cell to the cell below the camera. */
 export function cameraSectionDistance(
   section: SectionKey,
-  camera: Vec3Like,
+  camera: Pick<Vec3Like, 'x' | 'z'>,
   sectionSize: number,
 ): number {
   const cameraSection = worldToSection(camera.x, camera.z, sectionSize)
@@ -106,6 +107,28 @@ export function cameraSectionDistance(
     section.x - cameraSection.x,
     section.z - cameraSection.z,
   )
+}
+
+/**
+ * Finest LOD allowed by a fixed world-space presentation focus.
+ *
+ * Unlike the camera editing ring, this follows the subject of a composed view:
+ * a distant landmark can occupy hundreds of pixels while being several section
+ * radii from the camera. The ceiling relaxes by one level per outer ring so it
+ * remains compatible with the ordinary neighbour constraint.
+ */
+export function detailFocusLodCeiling(
+  section: SectionKey,
+  focus: TerrainLodDetailFocus,
+  sectionSize: number,
+  maximumLevel: number,
+): number {
+  const ring = focusedLodCeiling(
+    cameraSectionDistance(section, focus, sectionSize),
+    focus.radiusSections,
+    maximumLevel,
+  )
+  return clamp(focus.finestLod + ring, 0, maximumLevel)
 }
 
 export interface SourceLodSelectionInput {

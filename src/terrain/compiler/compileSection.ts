@@ -11,6 +11,7 @@ import { boundaryWeldKey } from '../partition/boundary'
 import { validateMeshData } from '../mesh/MeshValidation'
 import {
   BvhCsgTunnelBooleanBackend,
+  PATCH_SURFACE_TRIANGLE,
   tunnelCutterVolumes,
   type BooleanMeshBuffers,
   type MeshBooleanOperation,
@@ -35,6 +36,7 @@ import {
   evaluateTerrainLayerWeights,
   evaluateTerrainMaterialFields,
   type TerrainMaterialFields,
+  type TerrainLayerWeights,
 } from './TerrainMaterialFields'
 import { paintChannelIndex } from '../rendering/materialSettings'
 
@@ -521,6 +523,7 @@ function generateSectionMesh(
     result.normals,
     result.indices,
     result.interiorVertices,
+    result.triangleSurfaceKinds,
     originX,
     originZ,
     seed,
@@ -661,6 +664,7 @@ function generateEditableSectionMesh(
     result.normals,
     result.indices,
     result.interiorVertices,
+    result.triangleSurfaceKinds,
     originX,
     originZ,
     seed,
@@ -1057,6 +1061,7 @@ function createFeatureLocks(
 
 const PACKED_UNIT_MAX = 65_535
 const BEDDED_OFFSET_RANGE = 16
+const PATCH_MATERIAL_TRANSITION_METRES = 12
 
 function calculatePaintWeights(
   positions: Float32Array,
@@ -1108,11 +1113,179 @@ function calculatePaintWeights(
   return packed
 }
 
+/**
+ * Geodesic distance from the fused terrain/patch curve, evaluated only across
+ * additive-patch triangles. The returned value is 1 on the exact junction and
+ * reaches 0 twelve metres into the operand. This gives the patch terrain's
+ * broad material classification at its root while leaving its exposed crest
+ * as rock; world-space texture coordinates remain unchanged throughout.
+ */
+export function calculatePatchFoundationBlend(
+  positions: Float32Array,
+  indices: Uint32Array,
+  triangleSurfaceKinds: Uint8Array | undefined,
+  transition = PATCH_MATERIAL_TRANSITION_METRES,
+): Float32Array {
+  const vertexCount = positions.length / 3
+  const blend = new Float32Array(vertexCount)
+  if (
+    !triangleSurfaceKinds ||
+    triangleSurfaceKinds.length !== indices.length / 3 ||
+    !triangleSurfaceKinds.includes(PATCH_SURFACE_TRIANGLE)
+  ) {
+    return blend
+  }
+
+  const incident = new Uint8Array(vertexCount)
+  const adjacency: Array<number[] | undefined> = new Array(vertexCount)
+  const connect = (a: number, b: number) => {
+    const neighbours = adjacency[a]
+    if (neighbours) neighbours.push(b)
+    else adjacency[a] = [b]
+  }
+  for (let offset = 0; offset < indices.length; offset += 3) {
+    const triangle = offset / 3
+    const a = indices[offset]!
+    const b = indices[offset + 1]!
+    const c = indices[offset + 2]!
+    if (triangleSurfaceKinds[triangle] === PATCH_SURFACE_TRIANGLE) {
+      incident[a] |= 2
+      incident[b] |= 2
+      incident[c] |= 2
+      connect(a, b)
+      connect(b, a)
+      connect(b, c)
+      connect(c, b)
+      connect(c, a)
+      connect(a, c)
+    } else {
+      incident[a] |= 1
+      incident[b] |= 1
+      incident[c] |= 1
+    }
+  }
+
+  // Material groups may duplicate a CSG intersection vertex. Reunite only for
+  // finding the boundary; the render topology and deliberate hard edges stay
+  // untouched.
+  const POSITION_EPSILON = 1e-4
+  const positionGroups = new Map<string, number[]>()
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if (incident[vertex] === 0) continue
+    const source = vertex * 3
+    const key = `${Math.round(positions[source]! / POSITION_EPSILON)}:` +
+      `${Math.round(positions[source + 1]! / POSITION_EPSILON)}:` +
+      `${Math.round(positions[source + 2]! / POSITION_EPSILON)}`
+    const group = positionGroups.get(key)
+    if (group) group.push(vertex)
+    else positionGroups.set(key, [vertex])
+  }
+
+  const distance = new Float32Array(vertexCount)
+  distance.fill(Number.POSITIVE_INFINITY)
+  const heapVertices: number[] = []
+  const heapDistances: number[] = []
+  const push = (vertex: number, value: number) => {
+    let index = heapVertices.length
+    heapVertices.push(vertex)
+    heapDistances.push(value)
+    while (index > 0) {
+      const parent = (index - 1) >> 1
+      if (heapDistances[parent]! <= value) break
+      heapVertices[index] = heapVertices[parent]!
+      heapDistances[index] = heapDistances[parent]!
+      index = parent
+    }
+    heapVertices[index] = vertex
+    heapDistances[index] = value
+  }
+  const pop = (): [number, number] | undefined => {
+    if (heapVertices.length === 0) return undefined
+    const vertex = heapVertices[0]!
+    const value = heapDistances[0]!
+    const lastVertex = heapVertices.pop()!
+    const lastDistance = heapDistances.pop()!
+    if (heapVertices.length > 0) {
+      let index = 0
+      while (true) {
+        const left = index * 2 + 1
+        if (left >= heapVertices.length) break
+        const right = left + 1
+        const child = right < heapVertices.length &&
+          heapDistances[right]! < heapDistances[left]!
+          ? right
+          : left
+        if (heapDistances[child]! >= lastDistance) break
+        heapVertices[index] = heapVertices[child]!
+        heapDistances[index] = heapDistances[child]!
+        index = child
+      }
+      heapVertices[index] = lastVertex
+      heapDistances[index] = lastDistance
+    }
+    return [vertex, value]
+  }
+
+  for (const vertices of positionGroups.values()) {
+    let mask = 0
+    for (const vertex of vertices) mask |= incident[vertex]!
+    if (mask !== 3) continue
+    for (const vertex of vertices) {
+      if ((incident[vertex]! & 2) === 0 || distance[vertex] === 0) continue
+      distance[vertex] = 0
+      push(vertex, 0)
+    }
+  }
+
+  const transitionDistance = Math.max(0.25, transition)
+  let entry: [number, number] | undefined
+  while ((entry = pop())) {
+    const [vertex, current] = entry
+    if (current !== distance[vertex] || current >= transitionDistance) continue
+    const source = vertex * 3
+    for (const neighbour of adjacency[vertex] ?? []) {
+      const target = neighbour * 3
+      const edge = Math.hypot(
+        positions[target]! - positions[source]!,
+        positions[target + 1]! - positions[source + 1]!,
+        positions[target + 2]! - positions[source + 2]!,
+      )
+      const next = current + edge
+      if (next >= distance[neighbour] || next > transitionDistance) continue
+      distance[neighbour] = next
+      push(neighbour, next)
+    }
+  }
+
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    if ((incident[vertex]! & 2) === 0 || !Number.isFinite(distance[vertex])) continue
+    const amount = clamp(distance[vertex]! / transitionDistance, 0, 1)
+    blend[vertex] = 1 - amount * amount * (3 - 2 * amount)
+  }
+  return blend
+}
+
+function blendTerrainLayerWeights(
+  target: TerrainLayerWeights,
+  foundation: TerrainLayerWeights,
+  amount: number,
+): void {
+  target.grass = lerp(target.grass, foundation.grass, amount)
+  target.meadow = lerp(target.meadow, foundation.meadow, amount)
+  target.soil = lerp(target.soil, foundation.soil, amount)
+  target.scree = lerp(target.scree, foundation.scree, amount)
+  target.rock = lerp(target.rock, foundation.rock, amount)
+  target.snow = lerp(target.snow, foundation.snow, amount)
+  target.slope = lerp(target.slope, foundation.slope, amount)
+  target.lichen = lerp(target.lichen, foundation.lichen, amount)
+}
+
 function calculateSurfaceFields(
   positions: Float32Array,
   normals: Float32Array,
   indices: Uint32Array,
   interiorVertices: Uint8Array,
+  triangleSurfaceKinds: Uint8Array | undefined,
   originX: number,
   originZ: number,
   seed: number,
@@ -1133,6 +1306,11 @@ function calculateSurfaceFields(
     interiorVertices,
   )
   const curvature = calculateMeshCurvature(positions, normals, indices)
+  const patchFoundationBlend = calculatePatchFoundationBlend(
+    positions,
+    indices,
+    triangleSurfaceKinds,
+  )
 
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     const source = vertex * 3
@@ -1155,6 +1333,18 @@ function calculateSurfaceFields(
       curvature[vertex],
       fields,
     )
+    const foundationBlend = patchFoundationBlend[vertex]!
+    if (foundationBlend > 0) {
+      const foundation = evaluateTerrainLayerWeights(
+        x,
+        y,
+        z,
+        fields.baseNormalY,
+        0,
+        fields,
+      )
+      blendTerrainLayerWeights(weights, foundation, foundationBlend)
+    }
 
     packed[0].set([
       packUnitPair(weights.grass, weights.meadow),
@@ -1184,7 +1374,13 @@ function calculateSurfaceFields(
       packSigned(fields.beddedOffsetZ, BEDDED_OFFSET_RANGE),
       packUnit(fields.regionalTint),
     ], target)
-    packed[4][target] = packUnit(fields.buttress)
+    // The high byte is a material tag carried by the CSG-generated chamber
+    // surface. Pairing it with buttress preserves the five-buffer layout and
+    // proves the glow belongs to terrain topology rather than a backing card.
+    packed[4][target] = packUnitPair(
+      fields.buttress,
+      interiorVertices[vertex] === 2 ? 1 : 0,
+    )
     packed[4][target + 1] = packUnit(occlusion[vertex])
     packed[4][target + 2] = packUnit(fields.flow)
     packed[4][target + 3] = packUnit(fields.bedExposure)
@@ -1341,7 +1537,7 @@ function calculateMeshOcclusion(
   const occlusion = new Float32Array(vertexCount)
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     const broadCavity = 1 - smoothstepNumber(0.015, 4.5, cavity[vertex]) * 0.58
-    const interiorVisibility = interiorVertices[vertex] === 1 ? 0.52 : 1
+    const interiorVisibility = interiorVertices[vertex] > 0 ? 0.52 : 1
     occlusion[vertex] = clamp(broadCavity * interiorVisibility, 0.32, 1)
   }
   return occlusion
@@ -1534,7 +1730,7 @@ function calculateColors(
   const colors = new Float32Array(positions.length)
   for (let vertex = 0; vertex < positions.length / 3; vertex += 1) {
     const offset = vertex * 3
-    if (interiorVertices[vertex] === 1) {
+    if (interiorVertices[vertex] > 0) {
       const variation = 0.82 + Math.sin(positions[offset] * 0.14 + positions[offset + 2] * 0.11) * 0.08
       colors[offset] = 0.23 * variation
       colors[offset + 1] = 0.2 * variation

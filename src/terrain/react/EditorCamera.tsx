@@ -254,7 +254,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
       ref={controls}
       makeDefault
       enabled={cameraMode === 'orbit' && !dragging}
-      target={urlView.current.target ?? [540, 190, 140]}
+      target={urlView.current.target ?? [340, 105, 245]}
       enableDamping
       dampingFactor={0.075}
       rotateSpeed={0.65}

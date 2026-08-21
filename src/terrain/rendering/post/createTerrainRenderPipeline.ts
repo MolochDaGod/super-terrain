@@ -14,11 +14,14 @@ import {
   pass,
   renderOutput,
   smoothstep,
+  uv,
   vec3,
   vec4,
 } from 'three/tsl'
 import { bloom } from 'three/addons/tsl/display/BloomNode.js'
+import { smaa } from 'three/addons/tsl/display/SMAANode.js'
 import type { TerrainRenderMode } from '../renderModes'
+import { volumetricValleyFog } from './volumetricValleyFog'
 
 export interface TerrainRenderPipeline {
   pipeline: RenderPipeline
@@ -54,9 +57,24 @@ const grade = /*@__PURE__*/ Fn(([colour]: [any]) => {
     float(0.38),
   )
   const grey = luminance(contrasted)
-  const saturated = mix(vec3(grey), contrasted, float(1.14))
-  const lifted = saturated.add(smoothstep(0.12, 0, grey).mul(0.012))
-  return vec4(lifted.clamp(0, 1), colour.a)
+  const saturated = mix(vec3(grey), contrasted, float(1.11))
+  // Gentle photographic split tone: open-sky shadows retain a cool slate
+  // cast while direct low-sun highlights move toward warm stone. This replaces
+  // the previous uniform brown wash without shifting neutral midtones.
+  const split = smoothstep(0.16, 0.72, grey)
+  const toned = saturated.mul(mix(
+    vec3(0.94, 0.99, 1.055),
+    vec3(1.06, 1.01, 0.94),
+    split,
+  ))
+  const lifted = toned.add(smoothstep(0.12, 0, grey).mul(0.01))
+  const lens = uv().sub(0.5)
+  const radius = lens.x.mul(lens.x)
+    .mul(0.82)
+    .add(lens.y.mul(lens.y).mul(1.08))
+  const vignette = smoothstep(0.16, 0.52, radius)
+  const vignetted = lifted.mul(mix(float(1), float(0.79), vignette))
+  return vec4(vignetted.clamp(0, 1), colour.a)
 })
 
 export function createTerrainRenderPipeline(
@@ -81,15 +99,19 @@ export function createTerrainRenderPipeline(
   // therefore needs only its HDR colour attachment: no per-frame normal MRT,
   // no 48-tap screen kernel and no denoise pass for unchanged geometry.
   const colour = scenePass.getTextureNode('output')
-  const glow = bloom(colour, 0.09, 0.75, 1.5)
+  const depth = scenePass.getTextureNode('depth')
+  const fogged = volumetricValleyFog(colour, depth, camera)
+  const glow = bloom(fogged, 0.21, 0.78, 1.5)
+  // MSAA resolves triangle edges in the scene pass, but the tone curve,
+  // high-frequency normal detail and bloom can recreate display-space stair
+  // steps afterwards. SMAA runs on the final linear HDR image before the
+  // colour transform and catches those residual edges without temporal blur.
+  const antialiased = smaa(fogged.add(glow))
   const graded = renderOutput(
-    colour.add(glow),
+    antialiased,
     renderer.toneMapping,
     renderer.outputColorSpace,
   )
-  // The renderer and this PassNode use 4x MSAA. A second FXAA pass here would
-  // re-filter already-resolved edges, softening the centimetre relief and
-  // forcing an otherwise unnecessary full-resolution RTT.
   const pipeline = new RenderPipeline(renderer, grade(graded))
   pipeline.outputColorTransform = false
 
@@ -99,6 +121,7 @@ export function createTerrainRenderPipeline(
     dispose() {
       pipeline.dispose()
       ;(glow as unknown as InternalBloomNode).dispose()
+      ;(antialiased as unknown as { dispose(): void }).dispose()
     },
   }
 }
@@ -122,6 +145,19 @@ async function warmRenderPipeline(
   // material now, against the same half-float attachment used at runtime.
   const internalBloom = bloomNode as InternalBloomNode | undefined
   if (internalBloom?._highPassFilterMaterial) {
+    // Bloom creates five blur texture nodes with a null value and fills them
+    // during its first updateBefore(). Our warm-up deliberately runs before
+    // the first submitted frame, so give those bindings a valid format-matched
+    // source for compilation. Runtime immediately replaces it with the proper
+    // bright/horizontal target for each pass.
+    for (const material of internalBloom._separableBlurMaterials) {
+      const colorTexture = (material as Material & {
+        colorTexture?: { value?: unknown }
+      }).colorTexture
+      if (colorTexture && !colorTexture.value) {
+        colorTexture.value = internalBloom._renderTargetBright.texture
+      }
+    }
     const materials = [
       internalBloom._highPassFilterMaterial,
       ...internalBloom._separableBlurMaterials,

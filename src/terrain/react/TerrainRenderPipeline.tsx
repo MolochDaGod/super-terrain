@@ -28,7 +28,7 @@ export interface TerrainRenderPipelineProps {
 // Graded for the evening key. AgX puts a 7-degree sun's lit rock near the
 // bottom of its range, and at the editor's old 0.95 everything the sun missed
 // fell off the curve entirely.
-const FULL_EXPOSURE = 1.9
+const FULL_EXPOSURE = 1.18
 
 export function TerrainRenderPipeline({
   mode,

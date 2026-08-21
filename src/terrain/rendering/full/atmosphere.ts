@@ -29,7 +29,7 @@ import { DEFAULT_SUN } from '../environment/sunPosition'
  *      stays crisp. That altitude difference is what separates ridge planes.
  */
 
-export const HAZE_DENSITY = uniform(0.00042)
+export const HAZE_DENSITY = uniform(0.00038)
 /**
  * The valley fog: cloud lying on the floor of the basin.
  *
@@ -41,18 +41,18 @@ export const HAZE_DENSITY = uniform(0.00042)
  * post-process. The ceiling is the setting that matters most here — it is what
  * gives the layer a surface for the crags to rise out of.
  */
-export const MIST_DENSITY = uniform(0.00085)
+export const MIST_DENSITY = uniform(0.0018)
 /** Altitude the fog fills to, and the level below which it is at full strength. */
-export const MIST_CEILING = uniform(78)
+export const MIST_CEILING = uniform(48)
 export const MIST_FLOOR = uniform(-30)
 /**
  * Metres of clear air before the fog starts to accumulate. Without this the
  * layer veils the rock at the viewer's feet as hard as the ridge a kilometre
  * away, and the frame turns to milk instead of gaining depth.
  */
-export const MIST_START = uniform(280)
+export const MIST_START = uniform(170)
 /** Metres of clear air before haze begins to accumulate. */
-export const HAZE_START = uniform(180)
+export const HAZE_START = uniform(320)
 /** Inverse scale height, per metre. Larger means haze hugs the ground more. */
 export const HAZE_HEIGHT_FALLOFF = uniform(0.0042)
 export const SUN_DIRECTION = uniform(DEFAULT_SUN.direction.clone())
@@ -72,8 +72,8 @@ const SUN_HALO = vec3(1.1, 0.92, 0.7)
  * looking into it, and that split across a single frame is most of what makes
  * a fogged valley look lit rather than washed out.
  */
-const MIST_SHADE = vec3(0.4, 0.47, 0.6)
-const MIST_LIT = vec3(1.32, 1.0, 0.74)
+const MIST_SHADE = vec3(0.24, 0.3, 0.39)
+const MIST_LIT = vec3(1.18, 0.88, 0.61)
 
 /**
  * Sky radiance in a direction, matched by eye to the Preetham dome so terrain

@@ -236,6 +236,8 @@ export interface TerrainSlowFields {
   curvature: any
   bedded: any
   buttress: any
+  /** CSG-authored emissive chamber surface; never a separate render mesh. */
+  ember: any
   mottle: any
   regionalTint: any
   occlusion: any
@@ -289,10 +291,18 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
     vec4(attribute('terrainSurface3', 'vec4') as any),
     'terrainSlowWarp',
   )
+  const reliefAttribute = vec4(attribute('terrainSurface4', 'vec4') as any)
+  const buttressEmber = unpackUnitPair(reliefAttribute.x)
   const relief = varying(
-    vec4(attribute('terrainSurface4', 'vec4') as any),
+    vec4(
+      buttressEmber.low,
+      reliefAttribute.y,
+      reliefAttribute.z,
+      reliefAttribute.w,
+    ),
     'terrainSlowRelief',
   )
+  const bakedEmber = varying(buttressEmber.high, 'terrainBakedEmber')
   return {
     grass: bakedCoverage.x,
     meadow: bakedCoverage.y,
@@ -319,6 +329,7 @@ export function terrainSlowFields(position: any): TerrainSlowFields {
     bedded: position.add(warpedAndTint.xyz.mul(2).sub(1).mul(16)),
     regionalTint: warpedAndTint.w,
     buttress: relief.x,
+    ember: bakedEmber,
     occlusion: relief.y,
     flow: relief.z,
   }

@@ -201,6 +201,20 @@ const lighting = await page.evaluate(() => {
   }
 })
 
+if (flags.has('rays')) {
+  const rayPixels = flags.get('rays').split(';').map((entry) =>
+    entry.split(',').map(Number),
+  )
+  const rayHits = await page.evaluate(
+    ({ rayPixels, width, height }) => rayPixels.map(([x, y]) => ({
+      pixel: [x, y],
+      hits: globalThis.__meshterrainScene?.raycastPixel?.(x, y, width, height) ?? [],
+    })),
+    { rayPixels, width: options.width, height: options.height },
+  )
+  console.log(`rays: ${JSON.stringify(rayHits)}`)
+}
+
 const file = resolve(options.out, `${options.name}.png`)
 // A WebGPU canvas only reaches the compositor when the page presents a frame,
 // and this render loop can be down at a handful of frames a second while the

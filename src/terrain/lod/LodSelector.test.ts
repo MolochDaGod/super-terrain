@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   cameraSectionDistance,
   constrainNeighborLods,
+  detailFocusLodCeiling,
   focusedLodCeiling,
   projectedGeometricError,
   selectLod,
@@ -75,6 +76,19 @@ describe('screen-space LOD selection', () => {
     })).toBe(1)
     expect(focusedLodCeiling(Math.SQRT2, 1.75, 4)).toBe(0)
     expect(focusedLodCeiling(Math.sqrt(8), 1.75, 4)).toBe(2)
+  })
+
+  it('keeps a distant presentation subject dense without refining the whole world', () => {
+    const focus = {
+      x: 620,
+      z: 410,
+      radiusSections: 1.5,
+      finestLod: 0,
+    }
+    expect(detailFocusLodCeiling({ x: 5, z: 3 }, focus, 128, 4)).toBe(0)
+    expect(detailFocusLodCeiling({ x: 6, z: 3 }, focus, 128, 4)).toBe(1)
+    expect(detailFocusLodCeiling({ x: 7, z: 3 }, focus, 128, 4)).toBe(2)
+    expect(detailFocusLodCeiling({ x: 10, z: 3 }, focus, 128, 4)).toBe(4)
   })
 
   it('uses hysteresis instead of flipping exactly at the threshold', () => {
