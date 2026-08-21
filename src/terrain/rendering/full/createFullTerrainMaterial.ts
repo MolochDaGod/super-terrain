@@ -1,17 +1,7 @@
 import {
-  type ColorSpace,
-  DataTexture,
   DoubleSide,
-  LinearFilter,
-  LinearMipmapLinearFilter,
   MeshStandardNodeMaterial,
-  MirroredRepeatWrapping,
-  NoColorSpace,
-  RGBAFormat,
-  SRGBColorSpace,
   type Texture,
-  TextureLoader,
-  UnsignedByteType,
 } from 'three/webgpu'
 import {
   cameraPosition,
@@ -37,87 +27,21 @@ import {
 } from '../materialSettings'
 import { applyTerrainPaint } from '../terrainPaintMaterial'
 import { createGeologyDetailTexture } from '../textures/createSurfaceDetailTextures'
+import { getProceduralSurfaceTextures } from '../textures/proceduralSurfaceTextures'
 import { THRUST_FACE_NORMAL } from '../../demo/createThrustFormation'
 import { layerWeights, reliefNormal, terrainSlowFields } from './surface'
 
-const ROCK_SCAN_DIFFUSE_URL = new URL(
-  '../../react/assets/cliff-side-diffuse-2k.jpg',
-  import.meta.url,
-).href
-const ROCK_SCAN_NORMAL_URL = new URL(
-  '../../react/assets/cliff-side-normal-gl-2k.jpg',
-  import.meta.url,
-).href
-const ROCK_SCAN_ARM_URL = new URL(
-  '../../react/assets/cliff-side-arm-1k.jpg',
-  import.meta.url,
-).href
-const ROCK_SCAN_DISPLACEMENT_URL = new URL(
-  '../../react/assets/cliff-side-displacement-1k.jpg',
-  import.meta.url,
-).href
-const GROUND_SCAN_DIFFUSE_URL = new URL(
-  '../../react/assets/rock-ground-diffuse-1k.jpg',
-  import.meta.url,
-).href
-const GROUND_SCAN_NORMAL_URL = new URL(
-  '../../react/assets/rock-ground-normal-gl-1k.jpg',
-  import.meta.url,
-).href
-const GROUND_SCAN_ARM_URL = new URL(
-  '../../react/assets/rock-ground-arm-1k.jpg',
-  import.meta.url,
-).href
-const GROUND_SCAN_DISPLACEMENT_URL = new URL(
-  '../../react/assets/rock-ground-displacement-1k.jpg',
-  import.meta.url,
-).href
-
-function loadTerrainScanTexture(
-  url: string,
-  fallback: readonly [number, number, number, number],
-  name: string,
-  colorSpace: ColorSpace,
-): Texture {
-  let scanTexture: Texture
-  if (typeof document === 'undefined') {
-    scanTexture = new DataTexture(
-      new Uint8Array(fallback),
-      1,
-      1,
-      RGBAFormat,
-      UnsignedByteType,
-    )
-  } else {
-    scanTexture = new TextureLoader().load(url)
-    // TextureLoader returns synchronously and attaches its HTML image later.
-    // WebGPU can reach material warm-up first on a prebaked cold start, and an
-    // empty Source then fails binding permanently. A completed 1 px canvas is
-    // immediately uploadable; TextureLoader replaces it in place on arrival.
-    if (!scanTexture.image) {
-      const canvas = document.createElement('canvas')
-      canvas.width = 1
-      canvas.height = 1
-      const context = canvas.getContext('2d')
-      if (context) {
-        const pixel = context.createImageData(1, 1)
-        pixel.data.set(fallback)
-        context.putImageData(pixel, 0, 0)
-      }
-      scanTexture.image = canvas
-    }
-  }
-  scanTexture.name = name
-  scanTexture.wrapS = MirroredRepeatWrapping
-  scanTexture.wrapT = MirroredRepeatWrapping
-  scanTexture.magFilter = LinearFilter
-  scanTexture.minFilter = LinearMipmapLinearFilter
-  scanTexture.generateMipmaps = true
-  scanTexture.anisotropy = 16
-  scanTexture.colorSpace = colorSpace
-  scanTexture.needsUpdate = true
-  return scanTexture
-}
+/**
+ * The steep and flat surfaces are procedural bakes rather than scans.
+ *
+ * `getProceduralSurfaceTextures` returns the same four textures for every
+ * caller and bakes each surface exactly once per page, off the main thread.
+ * The textures it hands back are valid immediately — a one-pixel average
+ * colour — and the real pixels are written into those same objects when the
+ * bake lands, so this material never has to be rebuilt and no pipeline is
+ * recompiled. Binding them on more meshes, or walking the camera up to a
+ * face, costs nothing beyond the sampling that any texture would need.
+ */
 
 /** Unlit inspection views used by the browser review harness. */
 export type FullMaterialDebug =
@@ -157,54 +81,16 @@ export function createFullTerrainMaterial(
   const materialSettings =
     options.materialSettings ?? DEFAULT_TERRAIN_MATERIAL_SETTINGS
   const detailTexture = createGeologyDetailTexture()
-  const rockScanDiffuse = loadTerrainScanTexture(
-    ROCK_SCAN_DIFFUSE_URL,
-    [112, 82, 61, 255],
-    'terrain stratified cliff scan diffuse',
-    SRGBColorSpace,
-  )
-  const rockScanNormal = loadTerrainScanTexture(
-    ROCK_SCAN_NORMAL_URL,
-    [128, 128, 255, 255],
-    'terrain stratified cliff scan OpenGL normal',
-    NoColorSpace,
-  )
-  const rockScanArm = loadTerrainScanTexture(
-    ROCK_SCAN_ARM_URL,
-    [255, 216, 0, 255],
-    'terrain stratified cliff scan AO roughness metalness',
-    NoColorSpace,
-  )
-  const rockScanDisplacement = loadTerrainScanTexture(
-    ROCK_SCAN_DISPLACEMENT_URL,
-    [128, 128, 128, 255],
-    'terrain stratified cliff scan displacement',
-    NoColorSpace,
-  )
-  const groundScanDiffuse = loadTerrainScanTexture(
-    GROUND_SCAN_DIFFUSE_URL,
-    [92, 88, 82, 255],
-    'terrain fractured ground scan diffuse',
-    SRGBColorSpace,
-  )
-  const groundScanNormal = loadTerrainScanTexture(
-    GROUND_SCAN_NORMAL_URL,
-    [128, 128, 255, 255],
-    'terrain fractured ground scan OpenGL normal',
-    NoColorSpace,
-  )
-  const groundScanArm = loadTerrainScanTexture(
-    GROUND_SCAN_ARM_URL,
-    [255, 224, 0, 255],
-    'terrain fractured ground scan AO roughness metalness',
-    NoColorSpace,
-  )
-  const groundScanDisplacement = loadTerrainScanTexture(
-    GROUND_SCAN_DISPLACEMENT_URL,
-    [128, 128, 128, 255],
-    'terrain fractured ground scan displacement',
-    NoColorSpace,
-  )
+  const cliffSurface = getProceduralSurfaceTextures('cliff-side')
+  const groundSurface = getProceduralSurfaceTextures('rock-ground')
+  const rockScanDiffuse = cliffSurface.albedo
+  const rockScanNormal = cliffSurface.normal
+  const rockScanArm = cliffSurface.arm
+  const rockScanDisplacement = cliffSurface.displacement
+  const groundScanDiffuse = groundSurface.albedo
+  const groundScanNormal = groundSurface.normal
+  const groundScanArm = groundSurface.arm
+  const groundScanDisplacement = groundSurface.displacement
   const material = new MeshStandardNodeMaterial({
     metalness: 0,
     side: DoubleSide,

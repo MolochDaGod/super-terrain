@@ -28,3 +28,5 @@ dist-ssr
 
 .capture
 captures
+.textures
+.pnpm-store
