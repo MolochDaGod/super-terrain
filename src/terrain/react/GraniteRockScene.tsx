@@ -321,20 +321,8 @@ function GraniteRockObject({
         ref={targetRef}
         name={rock.name}
         visible={rock.visible}
-        onPointerDown={(event) => {
-          if (editor.getSnapshot().uiViewMode === 'clean') return
-          event.stopPropagation()
-          queueMicrotask(() => {
-            if (editor.getSnapshot().dragging) return
-            editor.patch({
-              tool: 'select',
-              selectedRockId: rock.id,
-              selectedModifierId: undefined,
-              selectedLightId: undefined,
-              status: `${rock.name} selected · topology is CSG-ready`,
-            })
-          })
-        }}
+        // Picking is resolved once, against the whole scene, in TerrainView.
+        userData={{ pickTarget: { kind: 'rock', id: rock.id } }}
       >
         {resources && materialBundle && (
           <group scale={rock.parameters.placementScale} dispose={null}>

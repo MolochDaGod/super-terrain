@@ -54,28 +54,7 @@ canvas {
   touch-action: none;
 }
 
-.tool-button {
-  display: grid;
-  width: 100%;
-  aspect-ratio: 1;
-  place-items: center;
-  border: 1px solid transparent;
-  border-radius: 0.5rem;
-  color: rgba(255, 255, 255, 0.42);
-  transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
-}
 
-.tool-button:hover {
-  color: rgba(255, 255, 255, 0.8);
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.tool-button[data-active="true"] {
-  color: #b7f6df;
-  border-color: rgba(119, 232, 190, 0.22);
-  background: rgba(119, 232, 190, 0.1);
-  box-shadow: inset 0 0 18px rgba(119, 232, 190, 0.035);
-}
 
 button[data-active="true"] {
   color: #b7f6df;
@@ -148,8 +127,11 @@ button[data-active="true"] {
 }
 
 @media (max-width: 640px) {
-  .tool-button {
-    min-height: 34px;
+  /* A finger needs a larger target than a mouse, and the toolbar is the one
+     control surface that has to stay usable when the panels are hidden. */
+  .bar-button {
+    width: 34px;
+    height: 34px;
   }
 }
 
@@ -483,9 +465,12 @@ button[data-active="true"] {
 
 /* Tool rail hover card: the label, its key and what the tool does. */
 .tool-tip {
+  /* The toolbar is horizontal, so the card hangs below the button it explains
+     and is centred on it rather than sitting beside a vertical rail. */
   position: absolute;
-  left: 46px;
-  top: 0;
+  left: 50%;
+  top: 36px;
+  transform: translateX(-50%);
   z-index: 30;
   padding: 6px 9px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -500,7 +485,53 @@ button[data-active="true"] {
   transition: opacity 120ms ease;
 }
 
-.tool-button:hover .tool-tip,
-.tool-button:focus-visible .tool-tip {
+.bar-button:hover:not(:disabled) .tool-tip,
+.bar-button:focus-visible .tool-tip {
   opacity: 1;
+}
+
+/* Pinned view-setting toggles beside the viewport edge. Small, low-contrast
+   until active: they are always on screen and must not compete with the frame. */
+.quick-pill {
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 0.3rem;
+  font-size: 10.5px;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.42);
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.quick-pill:hover {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.quick-pill[data-active="true"] {
+  color: #b7f6df;
+  border-color: rgba(119, 232, 190, 0.22);
+  background: rgba(119, 232, 190, 0.1);
+}
+
+/* A choice card in the new-world sheet: a whole paragraph is the click target,
+   because the description is what the choice actually is. */
+.preset-card {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 0.55rem;
+  background: rgba(255, 255, 255, 0.018);
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.preset-card:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.preset-card[data-active="true"] {
+  border-color: rgba(119, 232, 190, 0.32);
+  background: rgba(119, 232, 190, 0.08);
 }

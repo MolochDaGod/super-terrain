@@ -88,6 +88,7 @@ export class TerrainWorkerPool {
           lodResolutions: this.config.lodResolutions,
           seed: this.config.seed,
           operationHalo: this.config.operationHalo,
+          worldProfile: this.config.worldProfile,
         },
         levels: levels ? [...levels] : undefined,
         source,

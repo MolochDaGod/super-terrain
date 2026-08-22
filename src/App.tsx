@@ -1,14 +1,27 @@
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Cpu, Wrench } from 'lucide-react'
 import { EditorShortcuts } from './components/editor/EditorShortcuts'
 import { HelpOverlay } from './components/editor/HelpOverlay'
 import { InspectorPanel } from './components/editor/InspectorPanel'
 import { EditorMenuBar } from './components/editor/MenuBar'
-import { ObjectToolbar } from './components/editor/ObjectToolbar'
+import { NewWorldDialog } from './components/editor/NewWorldDialog'
 import { PerformanceHud } from './components/editor/PerformanceHud'
+import {
+  OverlayQuickControl,
+  RenderQuickControls,
+} from './components/editor/QuickControls'
+import { ScenePanel } from './components/editor/ScenePanel'
 import { StatusBar } from './components/editor/StatusBar'
-import { ToolRail } from './components/editor/ToolRail'
+import { Toolbar } from './components/editor/Toolbar'
+import { WelcomeSplash } from './components/editor/WelcomeSplash'
+import { hasSeenWelcome } from './components/editor/welcomeSeen'
 import { WorldTerrain } from './terrain/WorldTerrain'
+import {
+  loadWorldRecipe,
+  saveWorldRecipe,
+  terrainConfigFor,
+  type WorldRecipe,
+} from './terrain/world/worldRecipe'
 import { EditorStore } from './terrain/editor/EditorStore'
 import { TerrainScene } from './terrain/react/TerrainScene'
 import { WebGpuCanvas } from './terrain/react/WebGpuCanvas'
@@ -16,9 +29,37 @@ import { useEditorSnapshot } from './terrain/react/hooks'
 import { currentViewUrlState } from './terrain/react/viewUrlState'
 
 function App() {
-  const terrain = useMemo(() => new WorldTerrain(), [])
   const editor = useMemo(() => new EditorStore(), [])
   const view = useMemo(() => currentViewUrlState(), [])
+  // The recipe is state because generating a world means building a different
+  // WorldTerrain: seed, landform model and authored content are all fixed at
+  // construction, and pretending otherwise would leave half the streaming
+  // pipeline holding the previous world's sections.
+  const [recipe, setRecipe] = useState<WorldRecipe>(() => loadWorldRecipe())
+  const [worldGeneration, setWorldGeneration] = useState(0)
+  const terrain = useMemo(
+    () => new WorldTerrain(terrainConfigFor(recipe)),
+    // A new generation is exactly what "throw this world away" means.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [recipe, worldGeneration],
+  )
+
+  const createWorld = useCallback(
+    (next: WorldRecipe) => {
+      saveWorldRecipe(next)
+      setRecipe(next)
+      setWorldGeneration((generation) => generation + 1)
+      editor.patch({
+        selectedRockId: undefined,
+        selectedModifierId: undefined,
+        selectedLightId: undefined,
+        worldCursor: undefined,
+        lights: [],
+        status: 'Building a new world…',
+      })
+    },
+    [editor],
+  )
   const editorSnapshot = useEditorSnapshot(editor)
   const editorUiVisible = editorSnapshot.uiViewMode === 'editor' && !view.hideUi
   const webGpuAvailable = typeof navigator !== 'undefined' && Boolean(navigator.gpu)
@@ -38,7 +79,11 @@ function App() {
     let active = true
     // `?reset=1` discards the saved world, so the frame is of the shipped scene
     // and not of whatever this browser profile cached from an earlier build.
-    void terrain.initialize({ discardSavedWorld: view.reset }).then(() => {
+    // A generated world always starts from nothing: its document was discarded
+    // when it was made, and loading the previous world's edits into it would
+    // put the demo's caves in a plain that has no massif to cut them from.
+    const discardSavedWorld = view.reset || recipe.preset !== 'showcase'
+    void terrain.initialize({ discardSavedWorld }).then(() => {
       if (active) {
         editor.patch({
           activeSculptLayerId: terrain.getSculptLayers()[0]?.id,
@@ -50,7 +95,7 @@ function App() {
       active = false
       terrain.dispose()
     }
-  }, [editor, terrain, view])
+  }, [editor, recipe, terrain, view])
 
   // Handle for the screenshot harness: it polls streaming telemetry to know
   // when a frame has actually settled instead of guessing with a timeout.
@@ -67,12 +112,19 @@ function App() {
     terrain.setOverlay(editorUiVisible ? editorSnapshot.overlay : 'none')
   }, [editorSnapshot.overlay, editorUiVisible, terrain])
 
+  // First visit only, and never in a capture: the harness would photograph the
+  // dialog instead of the terrain.
+  useEffect(() => {
+    if (view.hideUi || hasSeenWelcome()) return
+    editor.patch({ showWelcome: true })
+  }, [editor, view.hideUi])
+
   return (
     <main className="relative h-svh w-full overflow-hidden bg-[#07100f] text-white">
       {webGpuAvailable ? (
         <div className="absolute inset-0">
           <WebGpuCanvas dpr={dprForMode(editorSnapshot.dprMode)}>
-            <TerrainScene terrain={terrain} editor={editor} />
+            <TerrainScene key={worldGeneration} terrain={terrain} editor={editor} />
           </WebGpuCanvas>
         </div>
       ) : (
@@ -85,11 +137,15 @@ function App() {
       {editorUiVisible && <EditorMenuBar terrain={terrain} editor={editor} />}
       {editorUiVisible && (
         <>
-          <ObjectToolbar terrain={terrain} editor={editor} />
-          <ToolRail editor={editor} />
+          <Toolbar terrain={terrain} editor={editor} />
+          <ScenePanel terrain={terrain} editor={editor} />
           <InspectorPanel terrain={terrain} editor={editor} />
+          <RenderQuickControls editor={editor} />
+          <OverlayQuickControl terrain={terrain} editor={editor} />
           <PerformanceHud terrain={terrain} editor={editor} />
           <HelpOverlay editor={editor} />
+          <WelcomeSplash editor={editor} />
+          <NewWorldDialog editor={editor} current={recipe} onCreate={createWorld} />
           <StatusBar terrain={terrain} editor={editor} />
         </>
       )}

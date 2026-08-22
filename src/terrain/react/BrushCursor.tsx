@@ -42,15 +42,22 @@ export function BrushCursor({ editor }: BrushCursorProps) {
     const cursor = mesh.current
     if (!cursor) return
     const snapshot = editor.getSnapshot()
+    // The viewport verbs — camera, select, 3D cursor — have no brush footprint,
+    // so drawing one would promise an edit that dragging will not make.
     cursor.visible =
       snapshot.uiViewMode === 'editor' &&
       snapshot.cursorVisible &&
-      snapshot.tool !== 'select'
+      snapshot.tool !== 'select' &&
+      snapshot.tool !== 'camera' &&
+      snapshot.tool !== 'cursor'
+    // Water is a level surface, so its footprint is the horizontal disc the
+    // stroke actually floods and not a ring draped over the slope.
     const followsSurface =
-      snapshot.brushDomain === 'mesh' ||
+      snapshot.tool !== 'water' &&
+      (snapshot.brushDomain === 'mesh' ||
       snapshot.tool === 'paint' ||
       snapshot.tool === 'tunnel' ||
-      snapshot.tool === 'dig'
+      snapshot.tool === 'dig')
     cursorNormal
       .set(
         followsSurface ? snapshot.cursorNormal.x : 0,
@@ -70,9 +77,19 @@ export function BrushCursor({ editor }: BrushCursorProps) {
       ? snapshot.tunnelRadius
       : snapshot.tool === 'dig'
         ? snapshot.digRadius
-        : snapshot.brushRadius
+        : snapshot.tool === 'water'
+          ? snapshot.waterRadius
+          : snapshot.brushRadius
     cursor.scale.setScalar(radius)
-    material.color.set(snapshot.dragging ? 0x65e8ff : 0xb7f6df)
+    material.color.set(
+      snapshot.tool === 'water'
+        ? snapshot.waterMode === 'add'
+          ? 0x6fd0ff
+          : 0xffa56f
+        : snapshot.dragging
+          ? 0x65e8ff
+          : 0xb7f6df,
+    )
   })
 
   return (

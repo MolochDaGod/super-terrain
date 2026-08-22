@@ -8,7 +8,6 @@ import {
   Flashlight,
   Layers3,
   Lightbulb,
-  MousePointer2,
   Mountain,
   Move3D,
   RotateCw,
@@ -20,6 +19,7 @@ import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore, TransformMode } from '../../terrain/editor/EditorStore'
 import { useEditorSnapshot, useGraniteRockRevision, useModifierRevision } from '../../terrain/react/hooks'
 import { Menu, MenuBar, MenuItem, MenuSeparator } from './ui/Menu'
+import { TOOLS, type ToolDefinition } from './tools'
 import {
   addCsgVolume,
   addLight,
@@ -39,13 +39,25 @@ const TRANSFORMS: { mode: TransformMode; label: string; shortcut: string; icon: 
   { mode: 'scale', label: 'Scale', shortcut: 'R', icon: Scaling },
 ]
 
+/** Tool groups, in the order they appear on the bar. */
+const GROUPS: ToolDefinition['group'][] = [
+  'viewport',
+  'primary',
+  'detail',
+  'paint',
+  'topology',
+]
+
 /**
- * The object toolbar: pick, place, transform and remove things in the
- * viewport. These are verbs, so they belong on a toolbar next to the viewport
- * and not among the parameter fields in the inspector — the inspector answers
- * "what is this object like", this bar answers "what do I do to it".
+ * The one toolbar.
+ *
+ * Everything the pointer can be put into a mode to do, and everything that can
+ * be done to the thing it selected, is on this bar — modes on the left, verbs on
+ * the right. The panels either side of the viewport hold no actions at all: the
+ * left one lists what is in the scene, the right one lists what the selected
+ * thing's numbers are.
  */
-export function ObjectToolbar({
+export function Toolbar({
   terrain,
   editor,
 }: {
@@ -60,16 +72,30 @@ export function ObjectToolbar({
   return (
     <div
       role="toolbar"
-      aria-label="Object actions"
-      className="pointer-events-auto absolute left-3 top-[46px] z-20 flex h-9 items-center gap-1 rounded-lg border border-white/[0.09] bg-[#0b1312]/92 px-1 shadow-2xl shadow-black/30 backdrop-blur-xl"
+      aria-label="Tools and object actions"
+      // Wraps to a second row on a narrow window rather than pushing its
+      // right-hand verbs past the screen edge. It cannot scroll instead: an
+      // overflow container would clip the hover cards that hang below it.
+      className="pointer-events-auto absolute left-1/2 top-[46px] z-20 flex min-h-9 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-0.5 rounded-lg border border-white/[0.09] bg-[#0b1312]/92 px-1 py-0.5 shadow-2xl shadow-black/30 backdrop-blur-xl"
     >
-      <BarButton
-        icon={MousePointer2}
-        label="Select"
-        shortcut="1"
-        active={snapshot.tool === 'select'}
-        onClick={() => editor.patch({ tool: 'select', status: 'Inspect tool active' })}
-      />
+      {GROUPS.map((group, groupIndex) => (
+        <div key={group} className="flex items-center gap-0.5">
+          {groupIndex > 0 && <Divider />}
+          {TOOLS.filter((tool) => tool.group === group).map((tool) => (
+            <BarButton
+              key={tool.id}
+              icon={tool.icon}
+              label={tool.label}
+              hint={tool.description}
+              shortcut={tool.shortcut}
+              active={snapshot.tool === tool.id}
+              onClick={() =>
+                editor.patch({ tool: tool.id, status: `${tool.label} tool active` })
+              }
+            />
+          ))}
+        </div>
+      ))}
 
       <Divider />
 
@@ -78,6 +104,7 @@ export function ObjectToolbar({
           key={mode}
           icon={icon}
           label={label}
+          hint={`Transform the selection along ${label === 'Scale' ? 'its own axes' : 'the world axes'}.`}
           shortcut={shortcut}
           active={snapshot.tool === 'select' && snapshot.transformMode === mode}
           onClick={() => editor.patch({ transformMode: mode, tool: 'select' })}
@@ -89,7 +116,7 @@ export function ObjectToolbar({
       <MenuBar>
         <Menu label="Add" caret>
           <MenuItem
-            label="Granite rock at cursor"
+            label="Granite rock"
             icon={Mountain}
             onSelect={() => addRock(terrain, editor)}
           />
@@ -165,29 +192,18 @@ export function ObjectToolbar({
         disabled={!selection}
         onClick={() => deleteSelection(terrain, editor)}
       />
-
-      {selection && (
-        <>
-          <Divider />
-          <span
-            className="max-w-[140px] truncate pl-1 pr-1.5 text-[11px] text-white/50"
-            title={`${selection.name} selected`}
-          >
-            {selection.name}
-          </span>
-        </>
-      )}
     </div>
   )
 }
 
 function Divider() {
-  return <span className="mx-0.5 h-4 w-px bg-white/[0.09]" />
+  return <span className="mx-1 h-4 w-px bg-white/[0.09]" />
 }
 
 function BarButton({
   icon: Icon,
   label,
+  hint,
   shortcut,
   active,
   disabled,
@@ -196,6 +212,8 @@ function BarButton({
 }: {
   icon: LucideIcon
   label: string
+  /** One line of explanation, shown under the label in the hover card. */
+  hint?: string
   shortcut?: string
   active?: boolean
   disabled?: boolean
@@ -207,14 +225,22 @@ function BarButton({
       type="button"
       aria-label={label}
       aria-pressed={active}
-      title={shortcut ? `${label} · ${shortcut}` : label}
       data-active={active}
       data-danger={danger}
       disabled={disabled}
-      className="bar-button"
+      className="bar-button group relative"
       onClick={onClick}
     >
       <Icon size={14} strokeWidth={1.7} />
+      <span className="tool-tip w-96">
+        <span className="text-white/80">{label}</span>
+        {shortcut && <kbd className="ml-2 text-white/35">{shortcut}</kbd>}
+        {hint && (
+          <span className="mt-1 block max-w-[420px] whitespace-normal text-[10px] leading-relaxed text-white/40">
+            {hint}
+          </span>
+        )}
+      </span>
     </button>
   )
 }

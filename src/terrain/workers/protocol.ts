@@ -46,7 +46,10 @@ export interface CompileSectionRequest {
   config: Pick<
     TerrainConfig,
     'sectionSize' | 'lodResolutions' | 'seed' | 'operationHalo'
-  >
+  > &
+    // Optional so a request built before the profile existed still compiles the
+    // natural landform model rather than failing to type-check a test fixture.
+    Partial<Pick<TerrainConfig, 'worldProfile'>>
   /**
    * Optional subset of LOD levels to return. Exact Boolean topology can be
    * evaluated directly on the finest requested screen-error grid; sampled

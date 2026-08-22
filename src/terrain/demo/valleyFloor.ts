@@ -15,7 +15,14 @@ import type { AABB } from '../core/types'
  */
 export { WATER_LEVEL }
 
-/** Extent the water mesh is built over, in world metres. */
+/**
+ * Extent the demo's water mesh used to be built over, in world metres.
+ *
+ * The editor now derives the meshed extent from the painted water mask instead,
+ * so this survives only as the fixed region the surface builder is tested
+ * against — a stable rectangle is what makes that test about the mesher rather
+ * than about whatever happens to be flooded.
+ */
 export const WATER_REGION: AABB = {
   min: { x: 0, y: WATER_LEVEL, z: -500 },
   max: { x: 420, y: WATER_LEVEL, z: 720 },

@@ -19,7 +19,12 @@ export function StatusBar({ terrain, editor }: StatusBarProps) {
   const snapshot = useEditorSnapshot(editor)
   const tool = TOOL_BY_ID[snapshot.tool]
   const selection = currentSelection(terrain, snapshot)
-  const showsRadius = tool.kind === 'sculpt' || tool.kind === 'paint' || tool.id === 'tunnel' || tool.id === 'dig'
+  const showsRadius =
+    tool.kind === 'sculpt' ||
+    tool.kind === 'paint' ||
+    tool.kind === 'water' ||
+    tool.id === 'tunnel' ||
+    tool.id === 'dig'
 
   return (
     <footer className="pointer-events-none absolute inset-x-0 bottom-0 z-30 flex h-7 items-center gap-2.5 border-t border-white/[0.08] bg-[#07100f]/92 px-3 text-[10px] text-white/40 backdrop-blur-xl">
@@ -53,6 +58,16 @@ export function StatusBar({ terrain, editor }: StatusBarProps) {
           ? `${round(snapshot.cursorPosition.x)} ${round(snapshot.cursorPosition.y)} ${round(snapshot.cursorPosition.z)}`
           : '— — —'}
       </span>
+
+      {snapshot.worldCursor && (
+        <span
+          className="hidden shrink-0 items-center gap-1.5 font-mono tabular-nums text-[#ffd08a]/70 lg:flex"
+          title="Placed 3D cursor · where Add puts the next object"
+        >
+          <Crosshair size={10} strokeWidth={2.2} />
+          {`${round(snapshot.worldCursor.x)} ${round(snapshot.worldCursor.y)} ${round(snapshot.worldCursor.z)}`}
+        </span>
+      )}
 
       {snapshot.selectedSection && (
         <span className="hidden shrink-0 items-center gap-1.5 font-mono lg:flex">

@@ -7,6 +7,8 @@ import {
   Eye,
   FileUp,
   Gauge,
+  Globe2,
+  Hand,
   Layers3,
   Lightbulb,
   Flashlight,
@@ -26,13 +28,8 @@ import {
   HardDrive,
 } from 'lucide-react'
 import type { BenchmarkScenario, WorldTerrain } from '../../terrain/WorldTerrain'
-import type {
-  DprMode,
-  EditorStore,
-  TerrainOverlay,
-  TransformMode,
-} from '../../terrain/editor/EditorStore'
-import type { TerrainRenderMode } from '../../terrain/rendering/renderModes'
+import type { EditorStore, TransformMode } from '../../terrain/editor/EditorStore'
+import { DPR_OPTIONS, OVERLAY_OPTIONS, QUALITY_OPTIONS } from './viewOptions'
 import { useEditorSnapshot, useTerrainMetrics } from '../../terrain/react/hooks'
 import {
   Menu,
@@ -58,25 +55,6 @@ import {
   saveWorld,
   toggleSelectionVisible,
 } from './editorActions'
-
-const OVERLAY_LABELS: { value: TerrainOverlay; label: string }[] = [
-  { value: 'none', label: 'No overlay' },
-  { value: 'sections', label: 'Section grid' },
-  { value: 'lod', label: 'LOD tiers' },
-  { value: 'density', label: 'Triangle density' },
-  { value: 'streaming', label: 'Streaming state' },
-]
-
-const QUALITY_LABELS: { value: TerrainRenderMode; label: string }[] = [
-  { value: 'preview', label: 'Preview quality' },
-  { value: 'full', label: 'Full quality' },
-]
-
-const DPR_LABELS: { value: DprMode; label: string }[] = [
-  { value: 'low', label: 'Resolution 0.75×' },
-  { value: 'medium', label: 'Resolution 1×' },
-  { value: 'full', label: 'Resolution native' },
-]
 
 const TRANSFORM_LABELS: {
   value: TransformMode
@@ -126,6 +104,12 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
 
       <MenuBar>
         <Menu label="File">
+          <MenuItem
+            label="New world…"
+            icon={Globe2}
+            onSelect={() => editor.patch({ showNewWorld: true })}
+          />
+          <MenuSeparator />
           <MenuItem
             label="Save world"
             shortcut={`${mod}S`}
@@ -184,13 +168,42 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
         </Menu>
 
         <Menu label="Selection">
+          <MenuGroupLabel>Pointer</MenuGroupLabel>
           <MenuItem
-            label="Select tool"
+            label="Camera"
+            shortcut="Q"
+            icon={Hand}
+            checked={snapshot.tool === 'camera'}
+            onSelect={() =>
+              editor.patch({ tool: 'camera', status: 'Camera tool active' })
+            }
+          />
+          <MenuItem
+            label="Select"
             shortcut="1"
             icon={MousePointer2}
             checked={snapshot.tool === 'select'}
             onSelect={() =>
-              editor.patch({ tool: 'select', status: 'Inspect tool active' })
+              editor.patch({ tool: 'select', status: 'Select tool active' })
+            }
+          />
+          <MenuItem
+            label="Place 3D cursor"
+            shortcut="X"
+            icon={Crosshair}
+            checked={snapshot.tool === 'cursor'}
+            onSelect={() =>
+              editor.patch({
+                tool: 'cursor',
+                status: 'Click the terrain to place the 3D cursor · right-click works from any tool',
+              })
+            }
+          />
+          <MenuItem
+            label="Clear 3D cursor"
+            disabled={!snapshot.worldCursor}
+            onSelect={() =>
+              editor.patch({ worldCursor: undefined, status: '3D cursor cleared' })
             }
           />
           <MenuSeparator />
@@ -237,7 +250,7 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
 
         <Menu label="Add">
           <MenuItem
-            label="Granite rock at cursor"
+            label="Granite rock at 3D cursor"
             icon={Mountain}
             onSelect={() => addRock(terrain, editor)}
           />
@@ -297,7 +310,7 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
           />
           <MenuSeparator />
           <MenuGroupLabel>Rendering</MenuGroupLabel>
-          {QUALITY_LABELS.map(({ value, label }) => (
+          {QUALITY_OPTIONS.map(({ value, label }) => (
             <MenuItem
               key={value}
               label={label}
@@ -305,7 +318,7 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
               onSelect={() => editor.patch({ renderMode: value })}
             />
           ))}
-          {DPR_LABELS.map(({ value, label }) => (
+          {DPR_OPTIONS.map(({ value, label }) => (
             <MenuItem
               key={value}
               label={label}
@@ -315,7 +328,7 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
           ))}
           <MenuSeparator />
           <MenuGroupLabel>Overlay</MenuGroupLabel>
-          {OVERLAY_LABELS.map(({ value, label }) => (
+          {OVERLAY_OPTIONS.map(({ value, label }) => (
             <MenuItem
               key={value}
               label={label}
@@ -372,6 +385,11 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
         </Menu>
 
         <Menu label="Help">
+          <MenuItem
+            label="Welcome & what this is"
+            icon={Sparkles}
+            onSelect={() => editor.patch({ showWelcome: true })}
+          />
           <MenuItem
             label="Controls & shortcuts"
             shortcut="?"

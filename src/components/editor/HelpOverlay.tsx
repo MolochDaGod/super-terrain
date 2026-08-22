@@ -32,7 +32,7 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
             title="Navigate"
             rows={[
               ['Orbit / Fly', 'Switch camera mode in the View menu'],
-              ['LMB drag', 'Orbit in Inspect mode'],
+              ['LMB drag', 'Orbit in Camera and Select modes'],
               ['Alt + LMB', 'Orbit while editing'],
               ['RMB drag', 'Pan camera'],
               ['Wheel / middle', 'Zoom'],
@@ -46,9 +46,12 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
           <HelpGroup
             title="Edit"
             rows={[
-              ['1—0', 'Select sculpt tools'],
-              ['P / G / T / C', 'Paint / density / tunnel / cave dig'],
+              ['Q / 1 / X', 'Camera / Select / 3D cursor'],
+              ['1—0', 'Select and sculpt tools'],
+              ['K / P', 'Water / paint'],
+              ['G / T / C', 'Density / tunnel / cave dig'],
               ['LMB drag', 'Apply active brush'],
+              ['RMB click', 'Place the 3D cursor'],
               ['[ / ]', 'Change brush radius'],
               ['H', 'Toggle frame telemetry'],
             ]}
@@ -61,21 +64,22 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
               ['⌘ / Ctrl + D', 'Duplicate rock or light'],
               ['Alt + H', 'Hide or show the selection'],
               ['Del', 'Delete the selection'],
-              ['Esc', 'Close dialog, then deselect, then Inspect'],
+              ['LMB click', 'Select or deselect, in Select mode'],
+              ['Esc', 'Close dialog, deselect, clear cursor, Camera'],
             ]}
           />
           <HelpGroup
             title="Where things live"
             rows={[
               ['Menu bar', 'File, Edit, Selection, Add, View, Run, Help'],
-              ['Object toolbar', 'Select, transform, add, duplicate, delete'],
-              ['Tool rail', 'Sculpt, paint and topology brushes'],
+              ['Toolbar', 'Pointer modes, brushes, add and object verbs'],
+              ['Left panel', 'Everything in the scene, as one list'],
               ['Right panel', 'Parameters for the tool and the selection'],
             ]}
           />
         </div>
         <div className="border-t border-white/[0.08] bg-white/[0.02] px-5 py-4 text-[11px] leading-relaxed text-white/38">
-Verbs live on the menu bar and the toolbars; the right panel is only parameters — the active tool's, then whatever is selected, then one scene collection. Every edit stays non-destructive: strokes belong to layers, rocks and CSG volumes stay editable in the modifier stack, and workers rebuild only dirty sections while the previous mesh stays visible.
+Verbs live on the menu bar and the toolbar, the scene lives on the left, and the right panel shows only what the current tool and the current selection actually have parameters for. Every edit stays non-destructive: strokes belong to layers, rocks and CSG volumes stay editable in the modifier stack, water is a painted mask over the terrain rather than a baked shoreline, and workers rebuild only dirty sections while the previous mesh stays visible.
         </div>
       </section>
     </div>

@@ -19,7 +19,6 @@ export function EditorLights({ editor }: { editor: EditorStore }) {
           light={light}
           selected={light.id === selectedLightId}
           showMarker={uiViewMode === 'editor'}
-          editor={editor}
         />
       ))}
     </group>
@@ -30,12 +29,10 @@ function EditorLightObject({
   light,
   selected,
   showMarker,
-  editor,
 }: {
   light: EditorLight
   selected: boolean
   showMarker: boolean
-  editor: EditorStore
 }) {
   const position: [number, number, number] = [
     light.position.x,
@@ -62,7 +59,6 @@ function EditorLightObject({
         <LightMarker
           light={light}
           selected={selected}
-          editor={editor}
           position={position}
         />
       )}
@@ -97,12 +93,10 @@ function EditorSpotLightObject({ light }: { light: EditorSpotLight }) {
 function LightMarker({
   light,
   selected,
-  editor,
   position,
 }: {
   light: EditorLight
   selected: boolean
-  editor: EditorStore
   position: [number, number, number]
 }) {
   const geometry = useMemo(() => new SphereGeometry(2.2, 12, 8), [])
@@ -128,10 +122,7 @@ function LightMarker({
       scale={selected ? 1.5 : 1}
       renderOrder={1000}
       visible={light.visible}
-      onPointerDown={(event) => {
-        event.stopPropagation()
-        editor.selectLight(light.id)
-      }}
+      userData={{ pickTarget: { kind: 'light', id: light.id } }}
     />
   )
 }

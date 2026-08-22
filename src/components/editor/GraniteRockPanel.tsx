@@ -24,10 +24,8 @@ import {
 } from '../../terrain/react/hooks'
 import { randomSeed } from './editorActions'
 import { RangeField } from './RangeField'
-import { CollapsibleSection } from './ui/Section'
+import { Section } from './ui/Section'
 import { Segmented, type SegmentedOption } from './ui/Segmented'
-import { ListRow } from './ui/ListRow'
-import { EmptyHint } from './ui/EmptyHint'
 
 const MASSINGS: SegmentedOption<GraniteMassing>[] = [
   { value: 'erratic', label: 'Erratic', icon: Circle },
@@ -58,20 +56,23 @@ const TOPOLOGIES: SegmentedOption<`${GraniteTopologyDetail}`>[] = [
 /** The field's finest displacement band is only resolved by the 72³ grid. */
 const CHIP_BAND_CELLS = 72
 
+/**
+ * Granite parameters.
+ *
+ * Dual-purpose by design: with a rock selected it edits that rock, and with
+ * nothing selected it is the recipe the next one is built from. Both are the
+ * same set of numbers, and splitting them into two panels would only make the
+ * user learn which of the two they were looking at.
+ */
 export function GraniteRockPanel({
   terrain,
   editor,
-  open,
-  onToggle,
 }: {
   terrain: WorldTerrain
   editor: EditorStore
-  open: boolean
-  onToggle: () => void
 }) {
   useGraniteRockRevision(terrain)
   const snapshot = useEditorSnapshot(editor)
-  const rocks = terrain.rocks.snapshot()
   const selected = snapshot.selectedRockId
     ? terrain.rocks.get(snapshot.selectedRockId)
     : undefined
@@ -90,12 +91,12 @@ export function GraniteRockPanel({
   ) => patchParameters({ ...parameters, [key]: value })
 
   return (
-    <CollapsibleSection
+    <Section
       icon={Mountain}
-      title="Rocks"
-      badge={rocks.length}
-      open={open}
-      onToggle={onToggle}
+      // The selection section above already names the rock, so this one names
+      // what it actually contains rather than repeating the heading.
+      title={selected ? 'Granite surface' : 'Rock recipe'}
+      badge={selected ? undefined : 'next'}
     >
       <Segmented
         ariaLabel="Rock massing"
@@ -171,39 +172,6 @@ export function GraniteRockPanel({
         </p>
       </div>
 
-      {rocks.length === 0 ? (
-        <EmptyHint>No rocks placed yet.</EmptyHint>
-      ) : (
-        <div className="max-h-40 space-y-1 overflow-y-auto">
-          {rocks.map((rock) => (
-            <ListRow
-              key={rock.id}
-              title={rock.name}
-              meta={`${graniteMassingOfSeed(rock.parameters.seed)} · seed ${rock.parameters.seed}`}
-              selected={rock.id === selected?.id}
-              visible={rock.visible}
-              onSelect={() =>
-                editor.patch({
-                  selectedRockId: rock.id,
-                  selectedModifierId: undefined,
-                  selectedLightId: undefined,
-                  tool: 'select',
-                  status: `${rock.name} selected`,
-                })
-              }
-              onToggleVisible={() =>
-                terrain.setGraniteRockVisible(rock.id, !rock.visible)
-              }
-              onDelete={() => {
-                terrain.removeGraniteRock(rock.id)
-                if (selected?.id === rock.id) {
-                  editor.patch({ selectedRockId: undefined })
-                }
-              }}
-            />
-          ))}
-        </div>
-      )}
-    </CollapsibleSection>
+    </Section>
   )
 }

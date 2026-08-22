@@ -67,7 +67,10 @@ export function EditorShortcuts({
       }
 
       const tool = TOOL_BY_KEY_CODE[event.code]
-      if (tool) {
+      // Fly mode owns the letter keys — WASD to move, Q/E for altitude — so a
+      // letter shortcut there would change the tool under a camera that is
+      // being flown. The digits are unclaimed and keep working.
+      if (tool && !(snapshot.cameraMode === 'fly' && event.code.startsWith('Key'))) {
         editor.patch({ tool, status: `${TOOL_BY_ID[tool].label} tool active` })
         return
       }
@@ -94,10 +97,15 @@ export function EditorShortcuts({
           break
         case 'Escape':
           // One escape hatch, applied in the order the user expects to undo
-          // state: close the dialog, then drop the selection, then the tool.
-          if (snapshot.showHelp) editor.patch({ showHelp: false })
+          // state: close whatever is open, then drop the selection, then the
+          // 3D cursor, then fall back to the camera.
+          if (snapshot.showWelcome) editor.patch({ showWelcome: false })
+          else if (snapshot.showNewWorld) editor.patch({ showNewWorld: false })
+          else if (snapshot.showHelp) editor.patch({ showHelp: false })
           else if (currentSelection(terrain, snapshot)) clearSelection(editor)
-          else editor.patch({ tool: 'select', status: 'Inspect tool active' })
+          else if (snapshot.worldCursor) {
+            editor.patch({ worldCursor: undefined, status: '3D cursor cleared' })
+          } else editor.patch({ tool: 'camera', status: 'Camera tool active' })
           break
         default:
           break

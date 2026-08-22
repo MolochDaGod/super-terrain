@@ -25,6 +25,13 @@ import {
 } from './config'
 import { BenchmarkHistory } from './benchmarks/BenchmarkHistory'
 import { evaluateHeight } from './compiler/TerrainField'
+import { WATER_LEVEL } from './compiler/climate'
+import {
+  sampleHeightFieldCached,
+  setWorldProfile,
+} from './compiler/heightField'
+import { createOutcropFieldModifiers } from './demo/createOutcropField'
+import { WaterStore } from './water/WaterStore'
 import { TerrainCompiler } from './compiler/TerrainCompiler'
 import {
   createShowcaseTerrainModifiers,
@@ -108,6 +115,7 @@ import { ensureGraniteTopology } from './rocks/graniteTopologyLoader'
 import {
   GRANITE_PLANTING_CELLS,
   normalizeGraniteRockParameters,
+  randomGraniteRockParameters,
   normalizeGraniteRockTransform,
   type GraniteRockParameters,
   type GraniteRockTransform,
@@ -235,6 +243,7 @@ export class WorldTerrain {
   readonly partition: MeshPartition
   readonly modifiers = new ModifierStack()
   readonly rocks = new GraniteRockStore()
+  readonly water: WaterStore
   readonly metrics = new ExternalStore<TerrainMetrics>(EMPTY_METRICS)
   readonly coordinates: WorldCoordinates
   private readonly compiler: TerrainCompiler
@@ -298,6 +307,10 @@ export class WorldTerrain {
     storage: TerrainStorage = new IndexedDbTerrainStorage(),
   ) {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config }
+    // The main thread samples the same height field the workers do — for rock
+    // planting, water and `sampleHeight` — so it needs the profile too.
+    setWorldProfile(this.config.worldProfile)
+    this.water = new WaterStore(this.config.worldSize)
     this.horizonProxyMask = new HorizonProxyMask(
       this.config.worldSize,
       this.config.sectionSize,
@@ -536,7 +549,17 @@ export class WorldTerrain {
     if (this.activeTunnel) return this.activeTunnel.id
     if (this.activeDig) return this.activeDig.modifier.id
     this.editFocus = { ...point }
-    if (editor.tool === 'select') return
+    // Tools that do not deform the terrain never open a stroke. Water paints
+    // its own coverage field, and the viewport verbs only move the camera, the
+    // selection or the 3D cursor.
+    if (
+      editor.tool === 'select' ||
+      editor.tool === 'camera' ||
+      editor.tool === 'cursor' ||
+      editor.tool === 'water'
+    ) {
+      return
+    }
     if (editor.tool === 'tunnel') {
       const portal = { ...point, normal: { ...normal } }
       const modifier = createTunnelModifier({
@@ -1336,6 +1359,7 @@ export class WorldTerrain {
       this.rocks.snapshot(),
     )
     await this.flushCompiledCacheWrites()
+    this.persistWater()
     this.savedModifierRevision = modifierRevision
     this.savedRockRevision = rockRevision
     if (
@@ -1351,7 +1375,10 @@ export class WorldTerrain {
     await this.storage.clear('default')
     this.modifiers.clear()
     this.rocks.clear()
+    this.water.clear()
+    if (this.config.worldContent.water) this.water.seedFromRiver(this.config.seed)
     this.installDemoModifiers()
+    this.installProceduralRocks(this.config.worldContent.rocks)
     this.ensureDocumentModifiers()
     this.renderer?.setMaterialSettings(this.getMaterialSettings())
     const now = performance.now()
@@ -1463,9 +1490,14 @@ export class WorldTerrain {
         installedFreshShowcase = true
       }
       this.rocks.replace(savedRocks ?? [])
+      this.restoreWater()
       this.ensureDocumentModifiers()
+      if (installedFreshShowcase) {
+        this.installProceduralRocks(this.config.worldContent.rocks)
+      }
       if (
         installedFreshShowcase &&
+        this.config.worldContent.showcase &&
         !SHOWCASE_BAKED_SECTION_IDS.every((id) =>
           this.persistedCompiledSectionIds.has(id),
         )
@@ -1489,9 +1521,93 @@ export class WorldTerrain {
     }
   }
 
+  /** Local-storage key. Scoped to the world, so a new world starts dry. */
+  private get waterStorageKey(): string {
+    return `meshterrain.water.${this.config.worldProfile}.${this.config.seed}`
+  }
+
+  private restoreWater(): void {
+    let restored = false
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const raw = localStorage.getItem(this.waterStorageKey)
+        if (raw) {
+          this.water.restore(JSON.parse(raw) as { coverage?: string })
+          restored = true
+        }
+      } catch {
+        restored = false
+      }
+    }
+    if (restored) return
+    if (this.config.worldContent.water) this.water.seedFromRiver(this.config.seed)
+  }
+
+  private persistWater(): void {
+    if (typeof localStorage === 'undefined') return
+    try {
+      localStorage.setItem(this.waterStorageKey, JSON.stringify(this.water.serialize()))
+    } catch {
+      // Water that cannot be saved is still water that can be painted.
+    }
+  }
+
   private installDemoModifiers(): void {
-    for (const modifier of createShowcaseTerrainModifiers(this.config.seed)) {
-      this.modifiers.add(modifier)
+    const content = this.config.worldContent
+    if (content.showcase) {
+      for (const modifier of createShowcaseTerrainModifiers(this.config.seed)) {
+        this.modifiers.add(modifier)
+      }
+      return
+    }
+    // A generated world gets the same outcrop generator the demo uses, on its
+    // own seed. There is no cheaper substitute here: the patches are genuine
+    // Boolean topology, and swapping them for a noise bump would be exactly the
+    // drop in quality a "new world" is not allowed to have.
+    if (content.outcrops) {
+      for (const modifier of createOutcropFieldModifiers(this.config.seed)) {
+        this.modifiers.add(modifier)
+      }
+    }
+  }
+
+  /**
+   * Plant the world's glacial erratics.
+   *
+   * Sites are drawn from the height field rather than from a list: a rock wants
+   * ground that is neither underwater nor a cliff face, and that is a property
+   * of the terrain the seed produced, not of the seed itself.
+   */
+  private installProceduralRocks(count: number): void {
+    if (count <= 0) return
+    const spread = Math.min(this.config.worldSize * 0.12, 460)
+    // Gather candidates first and rank them, rather than accepting the first
+    // sites that pass a threshold. A seed whose whole near field is a cliff
+    // face would otherwise plant nothing at all and silently give the user an
+    // empty world where they asked for erratics.
+    const candidates: { x: number; z: number; y: number; steepness: number }[] = []
+    for (let attempt = 0; attempt < count * 30; attempt += 1) {
+      const angle = hashUnit(attempt, 17, this.config.seed) * Math.PI * 2
+      const radius = 40 + Math.sqrt(hashUnit(attempt, 29, this.config.seed)) * spread
+      const x = Math.cos(angle) * radius
+      const z = Math.sin(angle) * radius
+      const sample = sampleHeightFieldCached(x, z, this.config.seed)
+      // Underwater is the one hard rejection: a submerged boulder is invisible.
+      if (sample.height < WATER_LEVEL + 2) continue
+      candidates.push({ x, z, y: sample.height, steepness: sample.steepness })
+    }
+    candidates.sort((first, second) => first.steepness - second.steepness)
+
+    for (const [index, site] of candidates.slice(0, count).entries()) {
+      const seed = Math.floor(hashUnit(index, 37, this.config.seed) * 4096) + 1
+      this.addGraniteRock(
+        {
+          ...randomGraniteRockParameters(seed),
+          placementScale: 4 + hashUnit(index, 41, this.config.seed) * 12,
+          detail: 3,
+        },
+        { x: site.x, y: site.y, z: site.z },
+      )
     }
   }
 
@@ -2406,4 +2522,19 @@ function distance3(a: Vec3Like, b: Vec3Like): number {
 
 function dot3(a: Vec3Like, b: Vec3Like): number {
   return a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+/**
+ * A stable 0..1 draw from three integers.
+ *
+ * Rock placement has to be a pure function of the world seed: the same world
+ * must plant the same erratics in the same places on every machine and on every
+ * reload, and `Math.random` cannot promise that.
+ */
+function hashUnit(a: number, b: number, seed: number): number {
+  let h = Math.imul(a ^ 0x9e37_79b9, 0x85eb_ca6b)
+  h = Math.imul(h ^ b ^ 0xc2b2_ae35, 0x27d4_eb2f)
+  h = Math.imul(h ^ seed, 0x165_667b1)
+  h ^= h >>> 15
+  return ((h >>> 0) % 100_003) / 100_003
 }

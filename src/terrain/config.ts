@@ -1,3 +1,5 @@
+import type { WorldProfile } from './compiler/heightField'
+
 export interface TerrainConfig {
   worldSize: number
   sectionSize: number
@@ -22,6 +24,22 @@ export interface TerrainConfig {
   terrainCpuBudgetMs: number
   sectionRetentionMs: number
   seed: number
+  /** Landform model the world is built from. See `setWorldProfile`. */
+  worldProfile: WorldProfile
+  /** What is authored into a document that has never been edited. */
+  worldContent: WorldContent
+}
+
+/** The generated content of a fresh document. See `WorldRecipe`. */
+export interface WorldContent {
+  /** The hand-composed demo massif, its caves and its baked sections. */
+  showcase: boolean
+  /** Seeded granite outcrop patches. */
+  outcrops: boolean
+  /** Number of glacial erratics planted on the surface. */
+  rocks: number
+  /** Whether the basin starts flooded. */
+  water: boolean
 }
 
 export interface TerrainLodDetailFocus {
@@ -100,4 +118,6 @@ export const DEFAULT_TERRAIN_CONFIG: TerrainConfig = {
   terrainCpuBudgetMs: 1.5,
   sectionRetentionMs: 12_000,
   seed: 13_371,
+  worldProfile: 'natural',
+  worldContent: { showcase: true, outcrops: true, rocks: 0, water: true },
 }

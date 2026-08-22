@@ -29,3 +29,11 @@ export function useGraniteRockRevision(terrain: WorldTerrain) {
     terrain.rocks.getSnapshot,
   )
 }
+
+export function useWaterState(terrain: WorldTerrain) {
+  return useSyncExternalStore(
+    terrain.water.subscribe,
+    terrain.water.getSnapshot,
+    terrain.water.getSnapshot,
+  )
+}

@@ -20,7 +20,10 @@ import {
 } from './lights'
 
 export type EditorTool =
+  | 'camera'
   | 'select'
+  | 'cursor'
+  | 'water'
   | 'raise'
   | 'lower'
   | 'smooth'
@@ -46,6 +49,7 @@ export type TerrainOverlay =
   | 'streaming'
 
 export type CameraMode = 'orbit' | 'fly'
+export type WaterPaintMode = 'add' | 'remove'
 export type UiViewMode = 'editor' | 'clean'
 export type DprMode = 'low' | 'medium' | 'full'
 
@@ -66,6 +70,9 @@ export function inspectorSectionForTool(tool: EditorTool): InspectorSection {
   switch (tool) {
     case 'paint':
       return 'materials'
+    case 'camera':
+    case 'cursor':
+    case 'water':
     case 'select':
     case 'tunnel':
     case 'dig':
@@ -96,6 +103,9 @@ export interface EditorSnapshot {
   digSpeed: number
   digNoise: number
   digNoiseScale: number
+  waterMode: WaterPaintMode
+  waterRadius: number
+  waterStrength: number
   csgPrimitive: CsgPrimitive
   csgOperation: CsgOperation
   csgSize: number
@@ -110,9 +120,23 @@ export interface EditorSnapshot {
   dprMode: DprMode
   showHud: boolean
   showHelp: boolean
+  /** The first-run introduction. Reopenable from the Help menu. */
+  showWelcome: boolean
+  /** The new-world sheet. */
+  showNewWorld: boolean
   cursorPosition: Vec3Like
   cursorNormal: Vec3Like
   cursorVisible: boolean
+  /**
+   * The placed 3D cursor, in world space.
+   *
+   * "Add at cursor" needs a point that survives the pointer leaving the
+   * viewport to reach a menu, which the hovered surface point cannot: by the
+   * time a menu item is clicked the pointer is over the menu. Undefined until
+   * the user places one, in which case placement falls back to the last hovered
+   * surface point.
+   */
+  worldCursor?: Vec3Like
   dragging: boolean
   /**
    * Set by "frame selection". The camera consumes it once and the nonce is
@@ -128,7 +152,7 @@ export interface EditorSnapshot {
 }
 
 const INITIAL_EDITOR_STATE: EditorSnapshot = {
-  tool: 'select',
+  tool: 'camera',
   brushDomain: 'mesh',
   brushRadius: 22,
   brushStrength: 0.38,
@@ -146,6 +170,9 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   digSpeed: 18,
   digNoise: 0.9,
   digNoiseScale: 2.6,
+  waterMode: 'add',
+  waterRadius: 45,
+  waterStrength: 0.5,
   csgPrimitive: 'box',
   csgOperation: 'subtract',
   csgSize: 16,
@@ -157,8 +184,12 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   cameraMode: 'orbit',
   uiViewMode: 'editor',
   dprMode: 'medium',
-  showHud: true,
+  // Frame telemetry is diagnostic, not part of authoring. It is one keystroke
+  // and one menu-bar button away for anyone who wants it.
+  showHud: false,
   showHelp: false,
+  showWelcome: false,
+  showNewWorld: false,
   cursorPosition: { x: 0, y: 0, z: 0 },
   cursorNormal: { x: 0, y: 1, z: 0 },
   cursorVisible: false,
@@ -200,6 +231,16 @@ export class EditorStore extends ExternalStore<EditorSnapshot> {
     const previous = this.getSnapshot().focusRequest
     this.patch({
       focusRequest: { position: { ...position }, nonce: (previous?.nonce ?? 0) + 1 },
+    })
+  }
+
+  /** Select one object, dropping whatever was selected before. */
+  select(kind: 'rock' | 'modifier' | 'light', id: string, status: string): void {
+    this.patch({
+      selectedRockId: kind === 'rock' ? id : undefined,
+      selectedModifierId: kind === 'modifier' ? id : undefined,
+      selectedLightId: kind === 'light' ? id : undefined,
+      status,
     })
   }
 

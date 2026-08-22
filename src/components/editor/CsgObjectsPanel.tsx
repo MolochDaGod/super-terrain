@@ -3,7 +3,7 @@ import type { CsgPrimitive, EditorStore } from '../../terrain/editor/EditorStore
 import type { CsgOperation } from '../../terrain/modifiers/types'
 import { useEditorSnapshot } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
-import { CollapsibleSection } from './ui/Section'
+import { Section } from './ui/Section'
 import { Segmented, type SegmentedOption } from './ui/Segmented'
 
 const PRIMITIVES: SegmentedOption<CsgPrimitive>[] = [
@@ -18,22 +18,20 @@ const OPERATIONS: SegmentedOption<CsgOperation>[] = [
 ]
 
 /**
- * The recipe the next CSG volume is built from. Placing one is an Add action
- * on the object toolbar; this section only decides what gets placed.
+ * The recipe the next CSG volume is built from. Placing one is an Add action on
+ * the toolbar; this section only decides what gets placed, which is why it
+ * disappears as soon as something is selected and there is a real object to
+ * show numbers for instead.
  */
 export function CsgObjectsPanel({
   editor,
-  open,
-  onToggle,
 }: {
   editor: EditorStore
-  open: boolean
-  onToggle: () => void
 }) {
   const snapshot = useEditorSnapshot(editor)
 
   return (
-    <CollapsibleSection icon={Box} title="CSG" open={open} onToggle={onToggle}>
+    <Section icon={Box} title="CSG recipe" badge="next">
       <Segmented
         ariaLabel="CSG primitive"
         options={PRIMITIVES}
@@ -55,6 +53,6 @@ export function CsgObjectsPanel({
         unit=" m"
         onChange={(csgSize) => editor.patch({ csgSize })}
       />
-    </CollapsibleSection>
+    </Section>
   )
 }

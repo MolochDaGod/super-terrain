@@ -27,6 +27,7 @@ import type {
 import { materializeModifierTransforms } from '../modifiers/transform'
 import type { CompileSectionRequest } from '../workers/protocol'
 import { decodeModifiers } from '../workers/protocol'
+import { setWorldProfile } from './heightField'
 import {
   evaluateEditableTerrainPoint,
   evaluateTerrainPoint,
@@ -79,6 +80,9 @@ try {
 export function compileTerrainSection(
   request: CompileSectionRequest,
 ): CompiledSection {
+  // The worker is long-lived and compiles for whichever world is current, so
+  // the profile is applied per request rather than once at worker startup.
+  setWorldProfile(request.config.worldProfile ?? 'natural')
   const started = performance.now()
   const modifiers = materializeModifierTransforms(
     decodeModifiers(request.modifiers),

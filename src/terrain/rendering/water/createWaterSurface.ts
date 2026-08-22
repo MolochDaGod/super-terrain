@@ -11,6 +11,12 @@ export interface WaterSurfaceOptions {
   seed: number
   /** Grid spacing in metres. Only affects the depth attribute, not the plane. */
   step?: number
+  /**
+   * 0..1 permission for water to exist at a point. Defaults to the demo's
+   * authored outlet corridor, which is what the shipped scene floods; the
+   * editor passes the painted water mask instead.
+   */
+  coverage?: (x: number, z: number) => number
 }
 
 /**
@@ -30,6 +36,7 @@ export interface WaterSurfaceOptions {
 export function createWaterSurface(options: WaterSurfaceOptions): BufferGeometry {
   const step = options.step ?? 4
   const { region, level, seed } = options
+  const coverageAt = options.coverage ?? ((x: number, z: number) => sampleShowcaseRiver(x, z, seed))
   const columns = Math.max(2, Math.round((region.max.x - region.min.x) / step) + 1)
   const rows = Math.max(2, Math.round((region.max.z - region.min.z) / step) + 1)
 
@@ -45,7 +52,7 @@ export function createWaterSurface(options: WaterSurfaceOptions): BufferGeometry
       positions[index * 3 + 1] = level
       positions[index * 3 + 2] = z
       depths[index] = level - sampleHeight(x, z, seed)
-      river[index] = sampleShowcaseRiver(x, z, seed)
+      river[index] = coverageAt(x, z)
     }
   }
 

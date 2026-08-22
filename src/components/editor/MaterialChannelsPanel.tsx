@@ -6,7 +6,7 @@ import {
   useModifierRevision,
 } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
-import { CollapsibleSection } from './ui/Section'
+import { Section } from './ui/Section'
 
 function hex(color: number): string {
   return `#${color.toString(16).padStart(6, '0')}`
@@ -15,13 +15,9 @@ function hex(color: number): string {
 export function MaterialChannelsPanel({
   terrain,
   editor,
-  open,
-  onToggle,
 }: {
   terrain: WorldTerrain
   editor: EditorStore
-  open: boolean
-  onToggle: () => void
 }) {
   useModifierRevision(terrain)
   const snapshot = useEditorSnapshot(editor)
@@ -32,12 +28,10 @@ export function MaterialChannelsPanel({
     ) ?? settings.channels[0]
 
   return (
-    <CollapsibleSection
+    <Section
       icon={Paintbrush}
       title="Materials"
       badge={active.name}
-      open={open}
-      onToggle={onToggle}
     >
       <div className="grid grid-cols-2 gap-1.5">
         {settings.channels.map((channel) => (
@@ -95,6 +89,6 @@ export function MaterialChannelsPanel({
           }
         />
       </div>
-    </CollapsibleSection>
+    </Section>
   )
 }

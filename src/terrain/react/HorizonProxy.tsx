@@ -74,12 +74,12 @@ export function HorizonProxy({
       else next.dispose()
       worker.terminate()
     }
-    worker.postMessage({ worldSize, seed })
+    worker.postMessage({ worldSize, seed, worldProfile: terrain.config.worldProfile })
     return () => {
       active = false
       worker.terminate()
     }
-  }, [seed, worldSize])
+  }, [terrain, seed, worldSize])
 
   useEffect(
     () => () => {

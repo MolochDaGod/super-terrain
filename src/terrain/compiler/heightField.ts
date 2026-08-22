@@ -124,11 +124,66 @@ const FOOTHILL_AMPLITUDE = 62
 const PLAIN_AMPLITUDE = 16
 const SEA_LEVEL = -8
 
+/**
+ * Which landform model the world is built from.
+ *
+ * `natural` is the full composition documented above. `flat` replaces stages
+ * one through five with a near-level plain, which is what "start from nothing"
+ * has to mean for a terrain editor: a surface with enough roughness to catch
+ * light and to show a brush working, and no landforms the user did not put
+ * there. It is deliberately not a separate code path anywhere downstream —
+ * materials, strata and water all read the same sample fields either way.
+ */
+export type WorldProfile = 'natural' | 'flat'
+
+let worldProfile: WorldProfile = 'natural'
+
+/**
+ * Set once per world, on the main thread and inside every compile worker.
+ *
+ * It is module state rather than a parameter because the height field is
+ * sampled from roughly forty call sites across meshing, materials, water and
+ * rock planting, and threading a world-lifetime constant through all of them
+ * would say nothing that this does not.
+ */
+export function setWorldProfile(profile: WorldProfile): void {
+  if (profile === worldProfile) return
+  worldProfile = profile
+  sampleCache.clear()
+}
+
+export function getWorldProfile(): WorldProfile {
+  return worldProfile
+}
+
+/** Elevation the flat profile sits at: above the water level, so a new world is dry. */
+export const FLAT_GROUND_LEVEL = WATER_LEVEL + 12
+
+function sampleFlatField(x: number, z: number, seed: number): HeightFieldSample {
+  // A couple of metres of very broad undulation plus centimetre grain. Without
+  // it the plain shades as one flat colour and neither the sun angle nor an
+  // early brush stroke is legible against it.
+  const swell = fbm(x * 0.0009, z * 0.0009, seed + 61, 2, 2.1, 0.5) * 2.4
+  const grain = fbm(x * 0.021, z * 0.021, seed + 67, 2, 2.1, 0.5) * 0.35
+  return {
+    height: FLAT_GROUND_LEVEL + swell + grain,
+    massif: 0,
+    valley: 0,
+    flow: 0,
+    aridity: 0.25,
+    erg: 0,
+    steepness: 0.02,
+    bedding: sampleBedding(x, z, seed),
+  }
+}
+
 export function sampleHeightField(
   x: number,
   z: number,
   seed: number,
 ): HeightFieldSample {
+  if (worldProfile === 'flat') return sampleFlatField(x, z, seed)
+
   // --- 1. where mountains live -----------------------------------------
   // Two very low frequency fields: one selects the massif, one tilts the whole
   // region so the range has a dominant strike direction like a real orogeny.
@@ -413,7 +468,7 @@ export function sampleHeightFieldCached(
   z: number,
   seed: number,
 ): HeightFieldSample {
-  const key = `${x}:${z}:${seed}`
+  const key = `${worldProfile}:${x}:${z}:${seed}`
   const hit = sampleCache.get(key)
   if (hit) return hit
   const sample = sampleHeightField(x, z, seed)

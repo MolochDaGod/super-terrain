@@ -8,7 +8,10 @@ import {
   Focus,
   Grid3X3,
   Layers3,
+  Hand,
   MousePointer2,
+  Crosshair,
+  Droplets,
   Paintbrush,
   Pickaxe,
   Drill,
@@ -18,7 +21,7 @@ import {
 import type { EditorTool } from '../../terrain/editor/EditorStore'
 
 /** Decides which parameters the inspector shows for a tool. */
-export type ToolKind = 'inspect' | 'sculpt' | 'paint' | 'topology'
+export type ToolKind = 'viewport' | 'sculpt' | 'paint' | 'topology' | 'water'
 
 export interface ToolDefinition {
   id: EditorTool
@@ -29,13 +32,15 @@ export interface ToolDefinition {
   icon: LucideIcon
   kind: ToolKind
   /** Rail rendering inserts a divider between groups. */
-  group: 'primary' | 'detail' | 'paint' | 'topology'
+  group: 'viewport' | 'primary' | 'detail' | 'paint' | 'topology'
   /** Shown on hover only; the inspector no longer prints it as body copy. */
   description: string
 }
 
 export const TOOLS: ToolDefinition[] = [
-  { id: 'select', label: 'Inspect', shortcut: '1', code: 'Digit1', icon: MousePointer2, kind: 'inspect', group: 'primary', description: 'Inspect sections and select modifiers without modifying source data.' },
+  { id: 'camera', label: 'Camera', shortcut: 'Q', code: 'KeyQ', icon: Hand, kind: 'viewport', group: 'viewport', description: 'Orbit, pan and fly. Dragging moves the view and never the world.' },
+  { id: 'select', label: 'Select', shortcut: '1', code: 'Digit1', icon: MousePointer2, kind: 'viewport', group: 'viewport', description: 'Click a rock, light or CSG volume to select it. Clicking bare terrain clears the selection.' },
+  { id: 'cursor', label: '3D cursor', shortcut: 'X', code: 'KeyX', icon: Crosshair, kind: 'viewport', group: 'viewport', description: 'Click the terrain to place the point that Add uses. Right-click places it from any tool.' },
   { id: 'raise', label: 'Raise', shortcut: '2', code: 'Digit2', icon: ArrowUp, kind: 'sculpt', group: 'primary', description: 'Push the surface outward along its normal, or up along world Y in heightfield mode.' },
   { id: 'lower', label: 'Lower', shortcut: '3', code: 'Digit3', icon: ArrowDown, kind: 'sculpt', group: 'primary', description: 'Pull the surface inward along its normal, or down along world Y in heightfield mode.' },
   { id: 'smooth', label: 'Smooth', shortcut: '4', code: 'Digit4', icon: Waves, kind: 'sculpt', group: 'primary', description: 'Relax local detail toward the broad terrain field.' },
@@ -45,6 +50,7 @@ export const TOOLS: ToolDefinition[] = [
   { id: 'scrape', label: 'Scrape', shortcut: '8', code: 'Digit8', icon: CircleMinus, kind: 'sculpt', group: 'detail', description: 'Plane away only material above the sampled surface.' },
   { id: 'terrace', label: 'Terrace', shortcut: '9', code: 'Digit9', icon: Layers3, kind: 'sculpt', group: 'detail', description: 'Quantize elevation into editable stepped benches.' },
   { id: 'noise', label: 'Noise', shortcut: '0', code: 'Digit0', icon: Sparkles, kind: 'sculpt', group: 'detail', description: 'Stamp seeded surface breakup at a configurable world scale.' },
+  { id: 'water', label: 'Water', shortcut: 'K', code: 'KeyK', icon: Droplets, kind: 'water', group: 'paint', description: 'Brush standing water in or out. The shoreline follows the ground, so sculpting under a lake moves its edge.' },
   { id: 'paint', label: 'Paint', shortcut: 'P', code: 'KeyP', icon: Paintbrush, kind: 'paint', group: 'paint', description: 'Paint or erase one of four material weight channels.' },
   { id: 'remesh', label: 'Density', shortcut: 'G', code: 'KeyG', icon: Grid3X3, kind: 'topology', group: 'topology', description: 'Inject local coordinate bands at the requested edge length.' },
   { id: 'tunnel', label: 'Tunnel', shortcut: 'T', code: 'KeyT', icon: Pickaxe, kind: 'topology', group: 'topology', description: 'Press one portal, drag to the second, then release. The swept Boolean stays editable in the modifier stack.' },

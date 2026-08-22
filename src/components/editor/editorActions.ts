@@ -177,11 +177,14 @@ export function focusSelection(
   editor.patch({ status: `Framed ${selection.name}` })
 }
 
-/** Where "add at cursor" puts things: the hovered surface, or the ground under it. */
+/** Where "add at cursor" puts things: the 3D cursor, the hovered surface, or the ground under it. */
 export function placementPoint(
   terrain: WorldTerrain,
   snapshot: EditorSnapshot,
 ): Vec3Like {
+  // The placed 3D cursor wins: it is the only point that is still meaningful
+  // once the pointer has left the viewport to reach the menu that is asking.
+  if (snapshot.worldCursor) return snapshot.worldCursor
   if (snapshot.cursorVisible) return snapshot.cursorPosition
   return {
     x: snapshot.cursorPosition.x,
@@ -351,6 +354,10 @@ export async function resetWorld(
 
 export function adjustBrushRadius(editor: EditorStore, delta: number): void {
   const snapshot = editor.getSnapshot()
+  if (snapshot.tool === 'water') {
+    editor.patch({ waterRadius: clamp(snapshot.waterRadius + delta * 2, 8, 260) })
+    return
+  }
   if (snapshot.tool === 'tunnel') {
     editor.patch({
       tunnelRadius: clamp(snapshot.tunnelRadius + delta, 2, 128),
@@ -368,6 +375,7 @@ export function adjustBrushRadius(editor: EditorStore, delta: number): void {
 export function activeRadius(snapshot: EditorSnapshot): number {
   if (snapshot.tool === 'tunnel') return snapshot.tunnelRadius
   if (snapshot.tool === 'dig') return snapshot.digRadius
+  if (snapshot.tool === 'water') return snapshot.waterRadius
   return snapshot.brushRadius
 }
 

@@ -1,22 +1,18 @@
 import { useEffect, useRef } from 'react'
 import { Info } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
-import type {
-  EditorStore,
-  InspectorSection,
-} from '../../terrain/editor/EditorStore'
+import type { EditorStore } from '../../terrain/editor/EditorStore'
 import { inspectorSectionForTool } from '../../terrain/editor/EditorStore'
 import type { BrushDomain, PaintMode } from '../../terrain/modifiers/types'
 import { useEditorSnapshot } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
-import { ModifierStackPanel } from './ModifierStackPanel'
-import { SculptLayersPanel } from './SculptLayersPanel'
 import { MaterialChannelsPanel } from './MaterialChannelsPanel'
 import { CsgObjectsPanel } from './CsgObjectsPanel'
 import { GraniteRockPanel } from './GraniteRockPanel'
 import { SelectionPanel } from './SelectionPanel'
-import { LightsSection } from './LightsSection'
+import { WaterPanel } from './WaterPanel'
 import { Section } from './ui/Section'
+import { EmptyHint } from './ui/EmptyHint'
 import { Segmented, type SegmentedOption } from './ui/Segmented'
 import { TOOL_BY_ID } from './tools'
 
@@ -49,24 +45,23 @@ export function InspectorPanel({
     editor.patch({ openSection: inspectorSectionForTool(snapshot.tool) })
   }, [editor, snapshot.tool])
 
-  const toggle = (section: InspectorSection) =>
-    editor.patch({
-      openSection: snapshot.openSection === section ? undefined : section,
-    })
-  const sectionProps = (section: InspectorSection) => ({
-    open: snapshot.openSection === section,
-    onToggle: () => toggle(section),
-  })
-
   const isSculpt = tool.kind === 'sculpt'
   const isPaint = tool.kind === 'paint'
   const hasBrush = isSculpt || isPaint
+  const hasSelection = Boolean(
+    snapshot.selectedRockId ?? snapshot.selectedLightId ?? snapshot.selectedModifierId,
+  )
+  // A viewport verb has no parameters of its own, so showing its section would
+  // be a heading over an explanation and nothing else.
+  const showToolSection = tool.kind !== 'viewport'
 
   return (
     <aside
       aria-label="Parameters"
       className="pointer-events-auto absolute bottom-7 right-3 top-[46px] z-20 hidden w-[272px] overflow-y-auto rounded-lg border border-white/[0.09] bg-[#0b1312]/92 shadow-2xl shadow-black/30 backdrop-blur-xl md:block"
     >
+      {tool.kind === 'water' && <WaterPanel terrain={terrain} editor={editor} />}
+      {showToolSection && tool.kind !== 'water' && (
       <Section icon={tool.icon} title={tool.label} badge={tool.shortcut}>
         <div className="flex items-start gap-2 text-[11px] leading-relaxed text-white/34">
           <Info size={12} className="mt-0.5 shrink-0 text-white/22" />
@@ -241,15 +236,26 @@ export function InspectorPanel({
           </>
         )}
       </Section>
+      )}
+
+      {isPaint && <MaterialChannelsPanel terrain={terrain} editor={editor} />}
 
       <SelectionPanel terrain={terrain} editor={editor} />
 
-      <SculptLayersPanel terrain={terrain} editor={editor} {...sectionProps('layers')} />
-      <MaterialChannelsPanel terrain={terrain} editor={editor} {...sectionProps('materials')} />
-      <GraniteRockPanel terrain={terrain} editor={editor} {...sectionProps('rocks')} />
-      <CsgObjectsPanel editor={editor} {...sectionProps('csg')} />
-      <LightsSection editor={editor} {...sectionProps('lights')} />
-      <ModifierStackPanel terrain={terrain} editor={editor} {...sectionProps('modifiers')} />
+      {/* The granite recipe is the selected rock's parameters when there is a
+          rock, and the next rock's parameters when there is not. */}
+      {(snapshot.selectedRockId !== undefined || !hasSelection) && (
+        <GraniteRockPanel terrain={terrain} editor={editor} />
+      )}
+      {!hasSelection && <CsgObjectsPanel editor={editor} />}
+
+      {!hasSelection && !showToolSection && (
+        <div className="p-3">
+          <EmptyHint>
+            Select something in the viewport or the scene list, and its parameters appear here.
+          </EmptyHint>
+        </div>
+      )}
     </aside>
   )
 }
