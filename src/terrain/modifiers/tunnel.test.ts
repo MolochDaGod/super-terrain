@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createTunnelModifier } from './factories'
+import { tunnelCutterVolumes } from './boolean/MeshBooleanBackend'
+import { cutterDisplacementBudget } from './boolean/cutterDisplacement'
 import type { BooleanSubtractModifier } from './types'
 import {
   normalizeTunnelModifier,
@@ -55,5 +57,37 @@ describe('tunnel modifiers', () => {
     expect(migrated.portals[0]).toMatchObject({ x: 10, y: 18, z: 0 })
     expect(migrated.portals[1]).toMatchObject({ x: 10, y: 18, z: 40 })
     expect(migrated.depth).toBe(14)
+    expect(migrated.noise).toBe(1)
+    expect(migrated.noiseScale).toBe(2.6)
+  })
+
+  it('authors tunnel noise intensity and world-space scale', () => {
+    const quiet = createTunnelModifier({
+      center: { x: 0, y: 0, z: 0 },
+      length: 48,
+      noise: 0,
+      noiseScale: 1,
+    })
+    const rough = createTunnelModifier({
+      center: { x: 0, y: 0, z: 0 },
+      length: 48,
+      noise: 1.8,
+      noiseScale: 12,
+    })
+    const quietCutter = tunnelCutterVolumes(quiet)[0]
+    const roughCutter = tunnelCutterVolumes(rough)[0]
+
+    expect(quietCutter.noise).toBe(0)
+    expect(roughCutter.noise).toBe(1.8)
+    expect(roughCutter.noiseScale).toBe(12)
+    expect(cutterDisplacementBudget(quietCutter)).toBe(0)
+    expect(cutterDisplacementBudget(roughCutter)).toBeGreaterThan(0)
+    expect(quietCutter.kind).toBe('sweep')
+    expect(roughCutter.kind).toBe('sweep')
+    if (quietCutter.kind === 'sweep' && roughCutter.kind === 'sweep') {
+      expect(quietCutter.rings[10].horizontalRadius).not.toBeCloseTo(
+        roughCutter.rings[10].horizontalRadius,
+      )
+    }
   })
 })

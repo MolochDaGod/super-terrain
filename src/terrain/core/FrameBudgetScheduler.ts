@@ -35,20 +35,21 @@ export class FrameBudgetScheduler {
     this.options = options
   }
 
-  beginFrame(frameMs: number): void {
+  beginFrame(frameMs: number, startupScale = 1): void {
     const target = this.options.targetFrameMs ?? 16.67
     this.averageFrameMs = lerp(this.averageFrameMs, frameMs, 0.04)
+    const scale = clamp(startupScale, 1, 6)
 
     // Preserve a small progress floor under pressure. Otherwise a ready swap
     // whose estimate is larger than the reduced allowance can starve forever.
     const pressure = clamp((target * 1.35 - this.averageFrameMs) / target, 0.35, 1)
-    this.remainingCpuMs = this.options.cpuTerrainMs * pressure
+    this.remainingCpuMs = this.options.cpuTerrainMs * pressure * scale
     this.remainingUploadBytes = Math.floor(
-      this.options.gpuUploadBytes * Math.max(0.35, this.qualityScale),
+      this.options.gpuUploadBytes * Math.max(0.35, this.qualityScale) * scale,
     )
     this.remainingSwaps = Math.max(
       1,
-      Math.floor(this.options.sectionSwaps * this.qualityScale),
+      Math.floor(this.options.sectionSwaps * this.qualityScale * scale),
     )
     this.terrainTimeMs = 0
     this.uploadBytes = 0

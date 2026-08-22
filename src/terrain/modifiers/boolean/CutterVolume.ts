@@ -9,6 +9,7 @@ import {
   Vector3,
 } from 'three'
 import type { AABB, Vec3Like } from '../../core/types'
+import { distanceToAabb } from '../../core/bounds'
 import {
   DISPLACEMENT_PROFILES,
   cutterDisplacementBudget,
@@ -42,6 +43,10 @@ interface CutterBase {
    * meant to look like rock.
    */
   surface?: keyof typeof DISPLACEMENT_PROFILES | 'none'
+  /** Relative displacement and authored cross-section roughness. */
+  noise?: number
+  /** Close-noise wavelength in world metres. */
+  noiseScale?: number
   /**
    * Material classification for faces exposed by subtraction.
    *
@@ -293,8 +298,8 @@ function buildSweptCaveGeometry(
       // separation prevents a circular mouth even when close noise is subtle.
       const crossSectionScale =
         1 +
-        Math.sin(angle * 3 + pathPhase) * 0.095 +
-        Math.sin(angle * 5 - pathPhase * 1.35) * 0.045
+        Math.sin(angle * 3 + pathPhase) * 0.095 * sweepShapeNoise(cutter) +
+        Math.sin(angle * 5 - pathPhase * 1.35) * 0.045 * sweepShapeNoise(cutter)
       const horizontal =
         Math.cos(angle) * ring.horizontalRadius * crossSectionScale
       const vertical =
@@ -561,6 +566,70 @@ export function cutterBounds(cutter: CutterVolume): AABB {
   }
 }
 
+/** Exterior distance from a point to an authored cutter; zero means inside. */
+export function distanceToCutterVolume(
+  point: Vec3Like,
+  cutter: CutterVolume,
+): number {
+  const margin = cutterDisplacementBudget(cutter)
+  if (cutter.kind === 'mesh') return distanceToAabb(point, cutterBounds(cutter))
+  if (cutter.kind === 'capsule') {
+    return Math.max(
+      0,
+      distanceToSegment(point, cutter.start, cutter.end) - cutter.radius - margin,
+    )
+  }
+  if (cutter.kind === 'sweep') {
+    if (cutter.rings.length === 0) return Infinity
+    if (cutter.rings.length === 1) {
+      const ring = cutter.rings[0]
+      return Math.max(
+        0,
+        distance(point, ring) -
+          Math.max(ring.horizontalRadius, ring.verticalRadius) -
+          margin,
+      )
+    }
+    let nearest = Infinity
+    for (let index = 0; index < cutter.rings.length - 1; index += 1) {
+      const start = cutter.rings[index]
+      const end = cutter.rings[index + 1]
+      const projection = segmentProjection(point, start, end)
+      const radius =
+        Math.max(start.horizontalRadius, start.verticalRadius) *
+          (1 - projection.t) +
+        Math.max(end.horizontalRadius, end.verticalRadius) * projection.t
+      nearest = Math.min(nearest, projection.distance - radius - margin)
+    }
+    return Math.max(0, nearest)
+  }
+
+  const frame = cutterFrame(cutter.forward, cutter.up)
+  const dx = point.x - cutter.center.x
+  const dy = point.y - cutter.center.y
+  const dz = point.z - cutter.center.z
+  const localX = dx * frame.forward.x + dy * frame.forward.y + dz * frame.forward.z
+  const localY = dx * frame.up.x + dy * frame.up.y + dz * frame.up.z
+  const localZ = dx * frame.side.x + dy * frame.side.y + dz * frame.side.z
+  const size = cutter.kind === 'ellipsoid' ? cutter.radii : cutter.halfExtents
+  if (cutter.kind === 'box') {
+    return Math.max(
+      0,
+      Math.hypot(
+        Math.max(0, Math.abs(localX) - size.x - margin),
+        Math.max(0, Math.abs(localY) - size.y - margin),
+        Math.max(0, Math.abs(localZ) - size.z - margin),
+      ),
+    )
+  }
+  const normalizedDistance = Math.hypot(
+    localX / Math.max(1e-6, size.x + margin),
+    localY / Math.max(1e-6, size.y + margin),
+    localZ / Math.max(1e-6, size.z + margin),
+  )
+  return Math.max(0, normalizedDistance - 1) * Math.min(size.x, size.y, size.z)
+}
+
 /** Union of several bounds; returns null for an empty list. */
 export function unionBounds(all: readonly AABB[]): AABB | null {
   if (all.length === 0) return null
@@ -581,4 +650,76 @@ export function unionBounds(all: readonly AABB[]): AABB | null {
 
 function distance(a: Vec3Like, b: Vec3Like): number {
   return Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z)
+}
+
+function sweepShapeNoise(cutter: SweptCaveCutter): number {
+  return Math.max(0, Math.min(1.75, cutter.noise ?? 1))
+}
+
+function distanceToSegment(
+  point: Vec3Like,
+  start: Vec3Like,
+  end: Vec3Like,
+): number {
+  return segmentProjection(point, start, end).distance
+}
+
+function segmentProjection(
+  point: Vec3Like,
+  start: Vec3Like,
+  end: Vec3Like,
+): { distance: number; t: number } {
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const dz = end.z - start.z
+  const lengthSquared = dx * dx + dy * dy + dz * dz
+  const t = lengthSquared > 1e-8
+    ? Math.max(
+        0,
+        Math.min(
+          1,
+          ((point.x - start.x) * dx +
+            (point.y - start.y) * dy +
+            (point.z - start.z) * dz) /
+            lengthSquared,
+        ),
+      )
+    : 0
+  const nearest = {
+    x: start.x + dx * t,
+    y: start.y + dy * t,
+    z: start.z + dz * t,
+  }
+  return { distance: distance(point, nearest), t }
+}
+
+function cutterFrame(
+  forwardValue: Vec3Like,
+  upValue: Vec3Like | undefined,
+): { forward: Vec3Like; up: Vec3Like; side: Vec3Like } {
+  const forward = normalizeVector(forwardValue, { x: 1, y: 0, z: 0 })
+  const requestedUp = normalizeVector(upValue ?? { x: 0, y: 1, z: 0 }, {
+    x: 0,
+    y: 1,
+    z: 0,
+  })
+  let side = cross(forward, requestedUp)
+  if (Math.hypot(side.x, side.y, side.z) < 1e-6) side = { x: 0, y: 0, z: 1 }
+  side = normalizeVector(side, { x: 0, y: 0, z: 1 })
+  return { forward, side, up: normalizeVector(cross(side, forward), requestedUp) }
+}
+
+function cross(a: Vec3Like, b: Vec3Like): Vec3Like {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  }
+}
+
+function normalizeVector(value: Vec3Like, fallback: Vec3Like): Vec3Like {
+  const length = Math.hypot(value.x, value.y, value.z)
+  return length > 1e-8
+    ? { x: value.x / length, y: value.y / length, z: value.z / length }
+    : { ...fallback }
 }

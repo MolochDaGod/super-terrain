@@ -143,6 +143,7 @@ export function cloneModifier(modifier: TerrainModifier): TerrainModifier {
         ...portal,
         normal: { ...portal.normal },
       })) as typeof normalized.portals,
+      carves: normalized.carves?.map(cloneCutterVolume),
     }
     clone.bounds = modifierWorldBounds(clone)
     return clone

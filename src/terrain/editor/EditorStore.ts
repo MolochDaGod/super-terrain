@@ -33,6 +33,7 @@ export type EditorTool =
   | 'paint'
   | 'remesh'
   | 'tunnel'
+  | 'dig'
 
 export type TransformMode = 'translate' | 'rotate' | 'scale'
 export type CsgPrimitive = 'box' | 'sphere' | 'capsule'
@@ -67,6 +68,7 @@ export function inspectorSectionForTool(tool: EditorTool): InspectorSection {
       return 'materials'
     case 'select':
     case 'tunnel':
+    case 'dig':
     case 'remesh':
       return 'modifiers'
     default:
@@ -88,6 +90,12 @@ export interface EditorSnapshot {
   targetEdgeLength: number
   tunnelRadius: number
   tunnelDepth: number
+  tunnelNoise: number
+  tunnelNoiseScale: number
+  digRadius: number
+  digSpeed: number
+  digNoise: number
+  digNoiseScale: number
   csgPrimitive: CsgPrimitive
   csgOperation: CsgOperation
   csgSize: number
@@ -127,6 +135,12 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   targetEdgeLength: 2.5,
   tunnelRadius: 8,
   tunnelDepth: 14,
+  tunnelNoise: 1,
+  tunnelNoiseScale: 2.6,
+  digRadius: 7,
+  digSpeed: 18,
+  digNoise: 0.9,
+  digNoiseScale: 2.6,
   csgPrimitive: 'box',
   csgOperation: 'subtract',
   csgSize: 16,

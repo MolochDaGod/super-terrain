@@ -14,18 +14,29 @@ export function serializeWorld(
   modifiers: TerrainModifier[],
   rocks: GraniteRock[] = [],
 ): string {
-  const payload: SerializedTerrainWorld = {
+  return JSON.stringify(createSerializedWorld(worldId, modifiers, rocks))
+}
+
+export function createSerializedWorld(
+  worldId: string,
+  modifiers: TerrainModifier[],
+  rocks: GraniteRock[] = [],
+): SerializedTerrainWorld {
+  return {
     version: 6,
     worldId,
     savedAt: Date.now(),
     modifiers,
     rocks,
   }
-  return JSON.stringify(payload)
 }
 
-export function deserializeWorld(serialized: string): SerializedTerrainWorld {
-  const parsed = JSON.parse(serialized) as {
+export function deserializeWorld(
+  serialized: string | SerializedTerrainWorld,
+): SerializedTerrainWorld {
+  const parsed = (typeof serialized === 'string'
+    ? JSON.parse(serialized)
+    : serialized) as {
     version?: number
     worldId?: string
     savedAt?: number

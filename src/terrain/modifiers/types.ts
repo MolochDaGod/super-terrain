@@ -118,6 +118,12 @@ export interface BooleanSubtractModifier extends ModifierBase {
   radius: number
   /** Distance each portal travels inward before the two ends are connected. */
   depth: number
+  /** Relative wall and cross-section roughness. Zero produces a clean sweep. */
+  noise: number
+  /** World-space wavelength of the tunnel's close surface breakup. */
+  noiseScale: number
+  /** Camera-drilled branches joined into this same subtractive CSG modifier. */
+  carves?: CutterVolume[]
   backend: string
 }
 

@@ -180,8 +180,8 @@ export function InspectorPanel({
               label="Portal radius"
               value={snapshot.tunnelRadius}
               min={2}
-              max={24}
-              step={0.5}
+              max={128}
+              step={1}
               unit=" m"
               onChange={(tunnelRadius) => editor.patch({ tunnelRadius })}
             />
@@ -189,10 +189,66 @@ export function InspectorPanel({
               label="Burial depth"
               value={snapshot.tunnelDepth}
               min={3}
-              max={48}
+              max={256}
               step={1}
               unit=" m"
               onChange={(tunnelDepth) => editor.patch({ tunnelDepth })}
+            />
+            <RangeField
+              label="Surface noise"
+              value={snapshot.tunnelNoise}
+              min={0}
+              max={2}
+              step={0.05}
+              onChange={(tunnelNoise) => editor.patch({ tunnelNoise })}
+            />
+            <RangeField
+              label="Noise scale"
+              value={snapshot.tunnelNoiseScale}
+              min={0.5}
+              max={32}
+              step={0.5}
+              unit=" m"
+              onChange={(tunnelNoiseScale) => editor.patch({ tunnelNoiseScale })}
+            />
+          </>
+        )}
+        {snapshot.tool === 'dig' && (
+          <>
+            <RangeField
+              label="Dig radius"
+              value={snapshot.digRadius}
+              min={1}
+              max={64}
+              step={0.5}
+              unit=" m"
+              onChange={(digRadius) => editor.patch({ digRadius })}
+            />
+            <RangeField
+              label="Drill speed"
+              value={snapshot.digSpeed}
+              min={2}
+              max={96}
+              step={1}
+              unit=" m/s"
+              onChange={(digSpeed) => editor.patch({ digSpeed })}
+            />
+            <RangeField
+              label="Surface noise"
+              value={snapshot.digNoise}
+              min={0}
+              max={2}
+              step={0.05}
+              onChange={(digNoise) => editor.patch({ digNoise })}
+            />
+            <RangeField
+              label="Noise scale"
+              value={snapshot.digNoiseScale}
+              min={0.5}
+              max={32}
+              step={0.5}
+              unit=" m"
+              onChange={(digNoiseScale) => editor.patch({ digNoiseScale })}
             />
           </>
         )}

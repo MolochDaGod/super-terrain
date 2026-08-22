@@ -1,5 +1,6 @@
 import { boundsFromSphere, unionBounds } from '../core/bounds'
 import type { AABB, Vec3Like } from '../core/types'
+import { cutterBounds } from './boolean/CutterVolume'
 import type {
   BooleanSubtractModifier,
   TunnelPortal,
@@ -39,6 +40,9 @@ export function normalizeTunnelModifier(
       radius * 0.35,
       legacy.depth ?? legacyDepth(legacy, radius),
     ),
+    noise: finiteAtLeast(modifier.noise, 0, 1),
+    noiseScale: finiteAtLeast(modifier.noiseScale, 0.25, 2.6),
+    carves: Array.isArray(modifier.carves) ? modifier.carves : undefined,
     backend: modifier.backend ?? 'bvh-csg-tunnel-v3',
   }
   normalized.bounds = tunnelBounds(normalized)
@@ -79,10 +83,15 @@ export function tunnelPathPoints(modifier: BooleanSubtractModifier): TunnelPath 
 
 export function tunnelBounds(modifier: BooleanSubtractModifier): AABB {
   const path = tunnelPathPoints(modifier)
-  const halo = modifier.radius * 1.08
+  const noise = Math.min(2.5, Math.max(0, modifier.noise ?? 1))
+  const halo =
+    modifier.radius * (1.2 + noise * 0.3)
   let bounds = boundsFromSphere(path[0], halo)
   for (let index = 1; index < path.length; index += 1) {
     bounds = unionBounds(bounds, boundsFromSphere(path[index], halo))
+  }
+  for (const carve of modifier.carves ?? []) {
+    bounds = unionBounds(bounds, cutterBounds(carve))
   }
   return bounds
 }
@@ -176,4 +185,12 @@ function normalizePlanar(value: { x: number; z: number }): { x: number; z: numbe
 export function normalize3(value: Vec3Like): Vec3Like {
   const length = Math.hypot(value.x, value.y, value.z) || 1
   return { x: value.x / length, y: value.y / length, z: value.z / length }
+}
+
+function finiteAtLeast(
+  value: number | undefined,
+  minimum: number,
+  fallback: number,
+): number {
+  return Number.isFinite(value) ? Math.max(minimum, value!) : fallback
 }

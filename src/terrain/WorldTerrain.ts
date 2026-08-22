@@ -1,4 +1,5 @@
 import {
+  cloneBounds,
   distanceToAabb,
   expandBounds,
   intersects,
@@ -13,6 +14,7 @@ import {
   EMPTY_METRICS,
   type AABB,
   type CompiledSection,
+  type SectionId,
   type SectionKey,
   type TerrainMetrics,
   type Vec3Like,
@@ -51,6 +53,7 @@ import {
 } from './modifiers/factories'
 import type {
   BooleanSubtractModifier,
+  BooleanVolumeModifier,
   BrushStrokeModifier,
   CsgOperation,
   MaterialSettingsModifier,
@@ -58,6 +61,11 @@ import type {
   SculptLayerModifier,
   WeightPaintModifier,
 } from './modifiers/types'
+import {
+  distanceToCutterVolume,
+  type CapsuleCutter,
+} from './modifiers/boolean/CutterVolume'
+import { tunnelCutterVolumes } from './modifiers/boolean/MeshBooleanBackend'
 import { sampleStrokeSegment } from './modifiers/strokeSampling'
 import {
   tunnelPortalDistance,
@@ -66,10 +74,20 @@ import {
 import {
   modifierWorldBounds,
   normalizedTransform,
+  transformedBooleanVolume,
+  transformedTunnel,
 } from './modifiers/transform'
 import { MeshPartition, type TerrainSection } from './partition/MeshPartition'
-import { IndexedDbTerrainStorage, type TerrainStorage } from './persistence/TerrainStorage'
-import { loadShowcaseSectionBake } from './prebake/showcaseSectionBake'
+import { CompiledSectionCacheSignatures } from './persistence/CompiledSectionCache'
+import {
+  IndexedDbTerrainStorage,
+  type CompiledSectionCacheRecord,
+  type TerrainStorage,
+} from './persistence/TerrainStorage'
+import {
+  loadShowcaseSectionBake,
+  SHOWCASE_BAKED_SECTION_IDS,
+} from './prebake/showcaseSectionBake'
 import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
 import { HorizonProxyMask } from './rendering/HorizonProxyMask'
 import {
@@ -141,6 +159,13 @@ function compiledGpuBytes(compiled: CompiledSection | undefined): number {
   ) ?? 0
 }
 
+function finestCompiledLod(compiled: CompiledSection): number {
+  return compiled.lods.reduce(
+    (finest, lod) => Math.min(finest, lod.level),
+    Infinity,
+  )
+}
+
 /**
  * Height measuring for planting always uses one fixed grid so that raising a
  * rock's CSG topology tier never blocks placement on a heavy re-extraction.
@@ -176,6 +201,34 @@ function sameViewSignature(
 
 export type StrokeEndResult = 'committed' | 'cancelled' | 'none'
 type ActiveStrokeModifier = BrushStrokeModifier | WeightPaintModifier
+type DigTargetModifier = BooleanSubtractModifier | BooleanVolumeModifier
+
+export interface CameraDigRay {
+  direction: Vec3Like
+}
+
+interface ActiveDig {
+  modifier: DigTargetModifier
+  capsule: CapsuleCutter
+  entry: Vec3Like
+  direction: Vec3Like
+  radius: number
+  speed: number
+  length: number
+  originalBounds: AABB
+  paused: boolean
+  previewElapsed: number
+  noise: number
+  noiseScale: number
+}
+
+interface PendingCompiledCacheWrite {
+  section: TerrainSection
+  compiled: CompiledSection
+  revision: number
+  generation: number
+  finestLod: number
+}
 
 export class WorldTerrain {
   readonly config: TerrainConfig
@@ -192,6 +245,7 @@ export class WorldTerrain {
   private renderer?: TerrainRenderBackend
   private activeStroke?: ActiveStrokeModifier
   private activeTunnel?: BooleanSubtractModifier
+  private activeDig?: ActiveDig
   private lastStrokePoint?: Vec3Like
   private lastStrokeNormal?: Vec3Like
   private liveStrokePoint?: Vec3Like
@@ -217,6 +271,27 @@ export class WorldTerrain {
   private processedTerrainStateRevision = -1
   private hasPendingTerrainWork = true
   private lastIdleMaintenanceAt = 0
+  private readonly compiledCacheSignatures = new CompiledSectionCacheSignatures()
+  private persistedCompiledSectionIds = new Set<SectionId>()
+  private cacheLookupEligibleIds = new Set<SectionId>()
+  private pendingCacheLookups = new Set<SectionId>()
+  private cacheLookupsInFlight = new Set<SectionId>()
+  private cacheLookupScheduled = false
+  private compiledCacheLookupBatches = 0
+  private pendingCompiledCacheWrites = new Map<
+    SectionId,
+    PendingCompiledCacheWrite
+  >()
+  private bestCompiledCacheWrites = new Map<
+    SectionId,
+    { revision: number; finestLod: number }
+  >()
+  private compiledCacheWriteTimer?: ReturnType<typeof setTimeout>
+  private compiledCacheWritePromise?: Promise<void>
+  private compiledCacheWritesDisabled = false
+  private compiledCacheGeneration = 0
+  private warnedAboutCompiledCache = false
+  private warmCacheStartup = false
 
   constructor(
     config: Partial<TerrainConfig> = {},
@@ -250,6 +325,7 @@ export class WorldTerrain {
       if (result.compiled) {
         if (this.partition.acceptCompiled(section, result.compiled)) {
           this.benchmarkHistory.record('compile', result.compiled.metadata.compileMs)
+          this.queueCompiledCacheWrite(section, result.compiled)
         } else if (section.buildingRevision === result.revision) {
           section.buildState = 'queued'
           section.buildJobId = undefined
@@ -316,7 +392,7 @@ export class WorldTerrain {
     this.latestCamera.x = input.camera.x
     this.latestCamera.y = input.camera.y
     this.latestCamera.z = input.camera.z
-    this.scheduler.beginFrame(input.frameMs)
+    this.scheduler.beginFrame(input.frameMs, this.warmCacheStartup ? 6 : 1)
     const scheduleStart = performance.now()
     this.updateBenchmark(now)
 
@@ -330,6 +406,7 @@ export class WorldTerrain {
       this.processedTerrainStateRevision === this.terrainStateRevision &&
       this.activeStroke?.type !== 'brush-stroke' &&
       !this.activeTunnel &&
+      !this.activeDig &&
       !this.activeBenchmark
 
     if (canReuseTerrainState) {
@@ -436,6 +513,14 @@ export class WorldTerrain {
     )
     this.processedTerrainStateRevision = this.terrainStateRevision
     this.hasPendingTerrainWork = this.detectPendingTerrainWork()
+    if (
+      this.warmCacheStartup &&
+      !this.hasPendingTerrainWork &&
+      this.pendingCacheLookups.size === 0 &&
+      this.cacheLookupsInFlight.size === 0
+    ) {
+      this.warmCacheStartup = false
+    }
     this.updateMetrics(input.frameMs, now, candidateMap)
   }
 
@@ -443,11 +528,13 @@ export class WorldTerrain {
     point: Vec3Like,
     normal: Vec3Like,
     editor: EditorSnapshot,
+    ray?: CameraDigRay,
   ): string | undefined {
     // A physical press owns exactly one brush-stroke modifier. Treat duplicate
     // pointer-down delivery as re-entry into the existing authoring session.
     if (this.activeStroke) return this.activeStroke.id
     if (this.activeTunnel) return this.activeTunnel.id
+    if (this.activeDig) return this.activeDig.modifier.id
     this.editFocus = { ...point }
     if (editor.tool === 'select') return
     if (editor.tool === 'tunnel') {
@@ -457,10 +544,15 @@ export class WorldTerrain {
         end: portal,
         radius: editor.tunnelRadius,
         depth: editor.tunnelDepth,
+        noise: editor.tunnelNoise,
+        noiseScale: editor.tunnelNoiseScale,
       })
       this.modifiers.add(modifier)
       this.activeTunnel = modifier
       return modifier.id
+    }
+    if (editor.tool === 'dig') {
+      return this.beginDigStroke(point, normal, editor, ray)
     }
     if (editor.tool === 'remesh') {
       const modifier = createRemeshModifier({
@@ -524,11 +616,19 @@ export class WorldTerrain {
     return stroke.id
   }
 
-  continueStroke(point: Vec3Like, normal: Vec3Like): void {
+  continueStroke(
+    point: Vec3Like,
+    normal: Vec3Like,
+    ray?: CameraDigRay,
+  ): void {
     if (this.activeTunnel) {
       updateTunnelPortal(this.activeTunnel, 1, point, normal)
       this.editFocus = { ...point }
       this.modifiers.touch()
+      return
+    }
+    if (this.activeDig) {
+      this.continueDigStroke(point, normal, ray)
       return
     }
     const stroke = this.activeStroke
@@ -567,6 +667,15 @@ export class WorldTerrain {
   }
 
   endStroke(): StrokeEndResult {
+    if (this.activeDig) {
+      const dig = this.activeDig
+      this.activeDig = undefined
+      dig.modifier.bounds = modifierWorldBounds(dig.modifier)
+      this.modifiers.touch()
+      this.invalidate(unionBounds(dig.originalBounds, dig.modifier.bounds))
+      this.markPersistenceDirty()
+      return 'committed'
+    }
     if (this.activeTunnel) {
       const tunnel = this.activeTunnel
       this.activeTunnel = undefined
@@ -597,11 +706,16 @@ export class WorldTerrain {
   }
 
   pauseActiveStroke(): void {
+    if (this.activeDig) this.activeDig.paused = true
     this.liveStrokePoint = undefined
     this.liveStrokeNormal = undefined
   }
 
   advanceActiveStroke(deltaSeconds: number): void {
+    if (this.activeDig) {
+      this.advanceDigStroke(deltaSeconds)
+      return
+    }
     const stroke = this.activeStroke
     const point = this.liveStrokePoint
     const normal = this.liveStrokeNormal
@@ -637,6 +751,169 @@ export class WorldTerrain {
         weight: flowWeight,
       },
     ])
+  }
+
+  private beginDigStroke(
+    point: Vec3Like,
+    normal: Vec3Like,
+    editor: EditorSnapshot,
+    ray?: CameraDigRay,
+  ): string {
+    const radius = Math.max(0.5, editor.digRadius)
+    const direction = digDirection(ray, normal)
+    const length = Math.max(0.75, radius * 0.7)
+    const initialCapsule = createDigCapsule(
+      point,
+      direction,
+      radius,
+      length,
+      editor.digNoise,
+      editor.digNoiseScale,
+    )
+    const existing = this.findDigTarget(point, radius)
+    let modifier: DigTargetModifier
+    let capsule: CapsuleCutter
+    let originalBounds: AABB
+
+    if (existing) {
+      originalBounds = cloneBounds(existing.bounds)
+      this.materializeDigTarget(existing)
+      capsule = initialCapsule
+      appendDigCapsule(existing, capsule)
+      existing.bounds = modifierWorldBounds(existing)
+      modifier = existing
+      this.modifiers.touch()
+    } else {
+      const created = createBooleanVolumeModifier({
+        operation: 'subtract',
+        volumes: [initialCapsule],
+      })
+      created.backend = 'bvh-csg-cave-dig-v1'
+      modifier = this.modifiers.add(created)
+      capsule = modifier.volumes[0] as CapsuleCutter
+      originalBounds = cloneBounds(modifier.bounds)
+    }
+
+    this.activeDig = {
+      modifier,
+      capsule,
+      entry: { ...point },
+      direction,
+      radius,
+      speed: Math.max(0.5, editor.digSpeed),
+      length,
+      originalBounds,
+      paused: false,
+      previewElapsed: 0,
+      noise: Math.max(0, editor.digNoise),
+      noiseScale: Math.max(0.25, editor.digNoiseScale),
+    }
+    this.editFocus = { ...point }
+    this.forceEditingLod(point, radius)
+    return modifier.id
+  }
+
+  private continueDigStroke(
+    point: Vec3Like,
+    normal: Vec3Like,
+    ray?: CameraDigRay,
+  ): void {
+    const dig = this.activeDig
+    if (!dig) return
+    const direction = digDirection(ray, normal)
+    const moved = distance3(point, dig.entry)
+    const aimDot = dot3(direction, dig.direction)
+    if (moved >= Math.max(0.5, dig.radius * 0.4) || aimDot < 0.94) {
+      dig.entry = { ...point }
+      dig.direction = direction
+      dig.length = Math.max(0.75, dig.radius * 0.7)
+      dig.capsule = createDigCapsule(
+        dig.entry,
+        dig.direction,
+        dig.radius,
+        dig.length,
+        dig.noise,
+        dig.noiseScale,
+      )
+      appendDigCapsule(dig.modifier, dig.capsule)
+      dig.modifier.bounds = modifierWorldBounds(dig.modifier)
+      this.modifiers.touch()
+    }
+    dig.paused = false
+    this.editFocus = { ...point }
+    this.forceEditingLod(point, dig.radius)
+  }
+
+  private advanceDigStroke(deltaSeconds: number): void {
+    const dig = this.activeDig
+    if (!dig || dig.paused) return
+    const elapsed = Math.min(0.05, Math.max(0, deltaSeconds))
+    if (elapsed <= 0) return
+    dig.length += dig.speed * elapsed
+    dig.capsule.end = addScaled(dig.entry, dig.direction, dig.length)
+    dig.modifier.bounds = modifierWorldBounds(dig.modifier)
+    this.editFocus = { ...dig.capsule.end }
+    this.forceEditingLod(dig.capsule.end, dig.radius)
+
+    // Refresh the lightweight wireframe often enough to make held drilling
+    // legible without rebuilding preview geometry on every animation frame.
+    dig.previewElapsed += elapsed
+    if (dig.previewElapsed >= 0.15) {
+      dig.previewElapsed = 0
+      this.modifiers.touch()
+    }
+  }
+
+  private findDigTarget(
+    point: Vec3Like,
+    radius: number,
+  ): DigTargetModifier | undefined {
+    let nearest: { id: string; distance: number } | undefined
+    for (const modifier of this.modifiers.snapshot()) {
+      if (!modifier.enabled) continue
+      let cutters
+      if (modifier.type === 'boolean-subtract') {
+        cutters = tunnelCutterVolumes(modifier)
+      } else if (
+        modifier.type === 'boolean-volume' &&
+        modifier.operation === 'subtract'
+      ) {
+        cutters = transformedBooleanVolume(modifier).volumes
+      } else {
+        continue
+      }
+      let distance = Infinity
+      for (const cutter of cutters) {
+        distance = Math.min(distance, distanceToCutterVolume(point, cutter))
+      }
+      if (distance <= radius && (!nearest || distance < nearest.distance)) {
+        nearest = { id: modifier.id, distance }
+      }
+    }
+    const target = nearest ? this.modifiers.get(nearest.id) : undefined
+    return target?.type === 'boolean-subtract' ||
+      (target?.type === 'boolean-volume' && target.operation === 'subtract')
+      ? target
+      : undefined
+  }
+
+  private materializeDigTarget(modifier: DigTargetModifier): void {
+    if (modifier.type === 'boolean-subtract') {
+      const materialized = transformedTunnel(modifier)
+      modifier.portals = materialized.portals
+      modifier.radius = materialized.radius
+      modifier.depth = materialized.depth
+      modifier.noise = materialized.noise
+      modifier.noiseScale = materialized.noiseScale
+      modifier.carves = materialized.carves ?? []
+      modifier.transform = normalizedTransform()
+      modifier.bounds = materialized.bounds
+      return
+    }
+    const materialized = transformedBooleanVolume(modifier)
+    modifier.volumes = materialized.volumes
+    modifier.transform = normalizedTransform()
+    modifier.bounds = materialized.bounds
   }
 
   setOverlay(overlay: TerrainOverlay): void {
@@ -997,13 +1274,19 @@ export class WorldTerrain {
 
   updateTunnelShape(
     id: string,
-    values: Partial<Pick<BooleanSubtractModifier, 'radius' | 'depth'>>,
+    values: Partial<
+      Pick<BooleanSubtractModifier, 'radius' | 'depth' | 'noise' | 'noiseScale'>
+    >,
   ): boolean {
     const modifier = this.modifiers.get(id)
     if (!modifier || modifier.type !== 'boolean-subtract') return false
     const previousBounds = modifier.bounds
     if (values.radius !== undefined) modifier.radius = Math.max(0.25, values.radius)
     if (values.depth !== undefined) modifier.depth = Math.max(0.25, values.depth)
+    if (values.noise !== undefined) modifier.noise = Math.max(0, values.noise)
+    if (values.noiseScale !== undefined) {
+      modifier.noiseScale = Math.max(0.25, values.noiseScale)
+    }
     modifier.bounds = modifierWorldBounds(modifier)
     this.modifiers.touch()
     this.invalidate(unionBounds(previousBounds, modifier.bounds))
@@ -1052,6 +1335,7 @@ export class WorldTerrain {
       this.modifiers.snapshot(),
       this.rocks.snapshot(),
     )
+    await this.flushCompiledCacheWrites()
     this.savedModifierRevision = modifierRevision
     this.savedRockRevision = rockRevision
     if (
@@ -1063,6 +1347,7 @@ export class WorldTerrain {
   }
 
   async resetEdits(): Promise<void> {
+    this.resetCompiledCacheState()
     await this.storage.clear('default')
     this.modifiers.clear()
     this.rocks.clear()
@@ -1133,6 +1418,11 @@ export class WorldTerrain {
 
   dispose(): void {
     if (this.disposed) return
+    if (this.compiledCacheWriteTimer !== undefined) {
+      clearTimeout(this.compiledCacheWriteTimer)
+      this.compiledCacheWriteTimer = undefined
+    }
+    void this.flushCompiledCacheWrites()
     this.disposed = true
     this.compiler.dispose()
     this.scheduler.clear()
@@ -1140,10 +1430,14 @@ export class WorldTerrain {
 
   private async loadPersistedWorld(): Promise<void> {
     try {
-      const [saved, savedRocks] = await Promise.all([
+      const [saved, savedRocks, cachedSectionIds] = await Promise.all([
         this.storage.load('default'),
         this.storage.loadRocks?.('default') ?? Promise.resolve(undefined),
+        this.loadCompiledCacheIndex(),
       ])
+      this.persistedCompiledSectionIds = new Set(cachedSectionIds)
+      this.cacheLookupEligibleIds = new Set(cachedSectionIds)
+      this.warmCacheStartup = cachedSectionIds.length > 0
       // The legacy migration imports the old mesh-CSG showcase only for an
       // existing document that can actually need it. A fresh scene no longer
       // generates dozens of granite operands merely by importing WorldTerrain.
@@ -1170,10 +1464,26 @@ export class WorldTerrain {
       }
       this.rocks.replace(savedRocks ?? [])
       this.ensureDocumentModifiers()
-      if (installedFreshShowcase) await this.installShowcaseSectionBake()
+      if (
+        installedFreshShowcase &&
+        !SHOWCASE_BAKED_SECTION_IDS.every((id) =>
+          this.persistedCompiledSectionIds.has(id),
+        )
+      ) {
+        await this.installShowcaseSectionBake()
+      }
       this.renderer?.setMaterialSettings(this.getMaterialSettings())
-      this.savedModifierRevision = this.modifiers.sourceRevision
+      // A fresh showcase used to remain an ephemeral default forever, forcing
+      // every reload to regenerate its large operand document before terrain
+      // streaming could even start. Persist it once, after the cold launch has
+      // had time to present useful pixels.
+      this.savedModifierRevision = installedFreshShowcase
+        ? -1
+        : this.modifiers.sourceRevision
       this.savedRockRevision = this.rocks.sourceRevision
+      if (installedFreshShowcase) {
+        this.nextSaveAt = performance.now() + 8_000
+      }
     } finally {
       this.initialized = true
     }
@@ -1192,8 +1502,13 @@ export class WorldTerrain {
       // Fresh procedural cells start at revision zero. Keep the guard explicit
       // so an initialization race can never overwrite an authored source.
       if (section.revision !== 0 || !section.source.procedural) continue
+      if (section.compiled || section.pendingCompiled) continue
       compiled.sourceRevision = section.revision
-      this.partition.acceptCompiled(section, compiled)
+      if (this.partition.acceptCompiled(section, compiled)) {
+        // The shipped bake is also useful to saved documents on later boots.
+        // Persist it under the same exact input signature as worker results.
+        this.queueCompiledCacheWrite(section, compiled)
+      }
     }
   }
 
@@ -1205,6 +1520,293 @@ export class WorldTerrain {
     if (!snapshot.some((modifier) => modifier.type === 'material-settings')) {
       this.modifiers.add(createMaterialSettingsModifier())
     }
+  }
+
+  private async loadCompiledCacheIndex(): Promise<SectionId[]> {
+    if (!this.storage.loadCompiledSectionKeys) return []
+    try {
+      return await this.storage.loadCompiledSectionKeys('default')
+    } catch (error) {
+      this.warnCompiledCache('Compiled terrain cache index unavailable', error)
+      return []
+    }
+  }
+
+  private requestCompiledCacheLookup(section: TerrainSection): boolean {
+    if (
+      !this.storage.loadCompiledSections ||
+      !section.source.procedural ||
+      !this.cacheLookupEligibleIds.has(section.id)
+    ) {
+      return false
+    }
+    if (
+      this.pendingCacheLookups.has(section.id) ||
+      this.cacheLookupsInFlight.has(section.id)
+    ) {
+      return true
+    }
+
+    this.pendingCacheLookups.add(section.id)
+    this.scheduleCompiledCacheLookupFlush()
+    return true
+  }
+
+  private scheduleCompiledCacheLookupFlush(): void {
+    if (
+      this.cacheLookupScheduled ||
+      this.pendingCacheLookups.size === 0 ||
+      this.compiledCacheLookupBatches >= 3
+    ) {
+      return
+    }
+    this.cacheLookupScheduled = true
+    queueMicrotask(() => {
+      this.cacheLookupScheduled = false
+      void this.flushCompiledCacheLookups()
+    })
+  }
+
+  private async flushCompiledCacheLookups(): Promise<void> {
+    const load = this.storage.loadCompiledSections
+    if (
+      !load ||
+      this.pendingCacheLookups.size === 0 ||
+      this.disposed ||
+      this.compiledCacheLookupBatches >= 3
+    ) return
+    // Keep each structured-clone batch small enough that the first high-
+    // priority cells can upload while IndexedDB is still reading the horizon.
+    const ids = [...this.pendingCacheLookups].slice(0, 24)
+    const generation = this.compiledCacheGeneration
+    for (const id of ids) this.pendingCacheLookups.delete(id)
+    for (const id of ids) this.cacheLookupsInFlight.add(id)
+    this.compiledCacheLookupBatches += 1
+    // Pipeline several small readonly transactions. This preserves fast first
+    // cells without serializing five full IndexedDB round trips for the view.
+    this.scheduleCompiledCacheLookupFlush()
+
+    try {
+      const records = await load.call(this.storage, 'default', ids)
+      const recordsById = new Map(
+        records.map((record) => [record.sectionId, record]),
+      )
+      await Promise.all(
+        ids.map((id) =>
+          this.hydrateCompiledCacheRecord(
+            id,
+            recordsById.get(id),
+            generation,
+          ),
+        ),
+      )
+    } catch (error) {
+      for (const id of ids) {
+        this.cacheLookupEligibleIds.delete(id)
+        this.persistedCompiledSectionIds.delete(id)
+      }
+      this.warnCompiledCache('Compiled terrain cache read failed', error)
+    } finally {
+      for (const id of ids) this.cacheLookupsInFlight.delete(id)
+      this.compiledCacheLookupBatches -= 1
+      this.terrainStateRevision += 1
+      this.hasPendingTerrainWork = true
+      this.scheduleCompiledCacheLookupFlush()
+    }
+  }
+
+  private async hydrateCompiledCacheRecord(
+    id: SectionId,
+    record: CompiledSectionCacheRecord | undefined,
+    generation: number,
+  ): Promise<void> {
+    if (generation !== this.compiledCacheGeneration || this.disposed) return
+    const section = this.partition.get(parseSectionId(id))
+    // Camera travel can retire a request while IndexedDB is reading it. Leave
+    // that entry eligible so a later visit can still hydrate it.
+    if (!section || !this.streamer.isDesired(section.key)) return
+
+    if (!record) {
+      this.cacheLookupEligibleIds.delete(id)
+      this.persistedCompiledSectionIds.delete(id)
+      return
+    }
+
+    const revision = section.revision
+    const signature = await this.compiledCacheSignature(section)
+    if (
+      generation !== this.compiledCacheGeneration ||
+      this.disposed ||
+      this.partition.get(section.key) !== section ||
+      section.revision !== revision
+    ) {
+      return
+    }
+
+    this.cacheLookupEligibleIds.delete(id)
+    if (record.signature !== signature) {
+      // The record remains harmless in IndexedDB, and the next accepted worker
+      // result overwrites it. Removing it from the in-memory index prevents a
+      // stale lookup loop in the meantime.
+      this.persistedCompiledSectionIds.delete(id)
+      return
+    }
+
+    record.compiled.sourceRevision = revision
+    if (this.partition.acceptCompiled(section, record.compiled)) {
+      this.bestCompiledCacheWrites.set(id, {
+        revision,
+        finestLod: finestCompiledLod(record.compiled),
+      })
+    }
+  }
+
+  private compiledCacheSignature(section: TerrainSection): Promise<string> {
+    return this.compiledCacheSignatures.create(
+      this.config,
+      section.key,
+      this.modifiers.query(
+        expandBounds(section.bounds, this.config.operationHalo),
+      ),
+      this.modifiers.sourceRevision,
+    )
+  }
+
+  private queueCompiledCacheWrite(
+    section: TerrainSection,
+    compiled: CompiledSection,
+  ): void {
+    if (
+      !this.storage.saveCompiledSections ||
+      this.compiledCacheWritesDisabled ||
+      !section.source.procedural
+    ) {
+      return
+    }
+    const finestLod = finestCompiledLod(compiled)
+    const previous = this.bestCompiledCacheWrites.get(section.id)
+    if (
+      previous &&
+      (previous.revision > section.revision ||
+        (previous.revision === section.revision &&
+          previous.finestLod <= finestLod))
+    ) {
+      return
+    }
+    this.bestCompiledCacheWrites.set(section.id, {
+      revision: section.revision,
+      finestLod,
+    })
+    this.pendingCompiledCacheWrites.set(section.id, {
+      section,
+      compiled,
+      revision: section.revision,
+      generation: this.compiledCacheGeneration,
+      finestLod,
+    })
+    // Debounce the cold compile wave. Fingerprinting giant authored operands
+    // and asking IndexedDB to clone mesh buffers should happen after useful
+    // pixels are already arriving, not in every worker-result callback.
+    if (this.compiledCacheWriteTimer !== undefined) {
+      clearTimeout(this.compiledCacheWriteTimer)
+    }
+    this.compiledCacheWriteTimer = setTimeout(() => {
+      this.compiledCacheWriteTimer = undefined
+      void this.flushCompiledCacheWrites()
+    }, 1_200)
+  }
+
+  private async flushCompiledCacheWrites(): Promise<void> {
+    if (this.compiledCacheWriteTimer !== undefined) {
+      clearTimeout(this.compiledCacheWriteTimer)
+      this.compiledCacheWriteTimer = undefined
+    }
+    if (this.compiledCacheWritePromise) {
+      await this.compiledCacheWritePromise
+      if (this.pendingCompiledCacheWrites.size > 0) {
+        await this.flushCompiledCacheWrites()
+      }
+      return
+    }
+    const save = this.storage.saveCompiledSections
+    if (
+      !save ||
+      this.compiledCacheWritesDisabled ||
+      this.pendingCompiledCacheWrites.size === 0
+    ) {
+      return
+    }
+
+    const pending = [...this.pendingCompiledCacheWrites.values()]
+    this.pendingCompiledCacheWrites.clear()
+    const records = (
+      await Promise.all(
+        pending.map(async (candidate) => {
+          if (
+            candidate.generation !== this.compiledCacheGeneration ||
+            candidate.section.revision !== candidate.revision ||
+            this.partition.get(candidate.section.key) !== candidate.section
+          ) {
+            return undefined
+          }
+          return {
+            sectionId: candidate.section.id,
+            signature: await this.compiledCacheSignature(candidate.section),
+            compiled: candidate.compiled,
+          } satisfies CompiledSectionCacheRecord
+        }),
+      )
+    ).filter(
+      (record): record is CompiledSectionCacheRecord => record !== undefined,
+    )
+    if (records.length === 0) return
+
+    const write = save.call(this.storage, 'default', records)
+    this.compiledCacheWritePromise = write
+    try {
+      await write
+      for (const record of records) {
+        this.persistedCompiledSectionIds.add(record.sectionId)
+      }
+    } catch (error) {
+      // Quota denial and private-mode IndexedDB failures should not affect the
+      // authoritative worker path. Stop retrying for this WorldTerrain instance.
+      this.compiledCacheWritesDisabled = true
+      this.pendingCompiledCacheWrites.clear()
+      this.warnCompiledCache('Compiled terrain cache write failed', error)
+    } finally {
+      this.compiledCacheWritePromise = undefined
+      if (
+        this.pendingCompiledCacheWrites.size > 0 &&
+        this.compiledCacheWriteTimer === undefined
+      ) {
+        this.compiledCacheWriteTimer = setTimeout(() => {
+          this.compiledCacheWriteTimer = undefined
+          void this.flushCompiledCacheWrites()
+        }, 1_200)
+      }
+    }
+  }
+
+  private resetCompiledCacheState(): void {
+    this.compiledCacheGeneration += 1
+    this.persistedCompiledSectionIds.clear()
+    this.cacheLookupEligibleIds.clear()
+    this.pendingCacheLookups.clear()
+    this.cacheLookupsInFlight.clear()
+    this.pendingCompiledCacheWrites.clear()
+    this.bestCompiledCacheWrites.clear()
+    this.warmCacheStartup = false
+    if (this.compiledCacheWriteTimer !== undefined) {
+      clearTimeout(this.compiledCacheWriteTimer)
+      this.compiledCacheWriteTimer = undefined
+    }
+  }
+
+  private warnCompiledCache(message: string, error: unknown): void {
+    if (this.warnedAboutCompiledCache) return
+    this.warnedAboutCompiledCache = true
+    console.warn(`${message}; compiling live instead`, error)
   }
 
   private sculptLayerBounds(id: string): AABB | undefined {
@@ -1262,7 +1864,8 @@ export class WorldTerrain {
   ): void {
     if (
       ((this.activeStroke && intersects(section.bounds, this.activeStroke.bounds)) ||
-        (this.activeTunnel && intersects(section.bounds, this.activeTunnel.bounds)))
+        (this.activeTunnel && intersects(section.bounds, this.activeTunnel.bounds)) ||
+        (this.activeDig && intersects(section.bounds, this.activeDig.modifier.bounds)))
     ) {
       return
     }
@@ -1299,6 +1902,10 @@ export class WorldTerrain {
         section.buildingRevision !== section.revision) ||
       minimumLod < compiledMinimumLod
     if (!needsBuild) return
+    // A warm-start lookup is asynchronous, but it is still dramatically
+    // cheaper than starting the same exact CSG job in a worker. Hold this
+    // section in the queued state until the batched IndexedDB read resolves.
+    if (!section.dirtyRegion && this.requestCompiledCacheLookup(section)) return
     const coalesceDelay = section.compiled ? 95 : 0
     if (now - section.dirtySince < coalesceDelay) return
     if (section.buildState === 'building') {
@@ -1479,10 +2086,13 @@ export class WorldTerrain {
         )
       }
       const activeBrushTouchesSection = Boolean(
-        this.activeStroke &&
-        this.liveStrokePoint &&
-        distanceToAabb(this.liveStrokePoint, section.bounds) <=
-          this.activeStroke.radius,
+        (this.activeStroke &&
+          this.liveStrokePoint &&
+          distanceToAabb(this.liveStrokePoint, section.bounds) <=
+            this.activeStroke.radius) ||
+          (this.activeDig &&
+            distanceToAabb(this.activeDig.capsule.end, section.bounds) <=
+              this.activeDig.radius),
       )
       if (activeBrushTouchesSection || section.dirtyRegion) lod = 0
       section.requestedLod = lod
@@ -1547,6 +2157,9 @@ export class WorldTerrain {
             section.buildingLod = undefined
           } else {
             this.partition.remove(key)
+            if (this.persistedCompiledSectionIds.has(id)) {
+              this.cacheLookupEligibleIds.add(id)
+            }
           }
           this.streamer.evicted(id)
         },
@@ -1731,4 +2344,66 @@ export class WorldTerrain {
     section.buildingRevision = undefined
     section.buildingLod = undefined
   }
+}
+
+function createDigCapsule(
+  entry: Vec3Like,
+  direction: Vec3Like,
+  radius: number,
+  length: number,
+  noise: number,
+  noiseScale: number,
+): CapsuleCutter {
+  return {
+    kind: 'capsule',
+    start: addScaled(entry, direction, -radius * 0.22),
+    end: addScaled(entry, direction, length),
+    radius,
+    surface: 'cave',
+    noise: Math.max(0, noise),
+    noiseScale: Math.max(0.25, noiseScale),
+  }
+}
+
+function appendDigCapsule(
+  modifier: DigTargetModifier,
+  capsule: CapsuleCutter,
+): void {
+  if (modifier.type === 'boolean-subtract') {
+    if (!modifier.carves) modifier.carves = []
+    modifier.carves.push(capsule)
+    return
+  }
+  modifier.volumes.push(capsule)
+}
+
+function digDirection(ray: CameraDigRay | undefined, normal: Vec3Like): Vec3Like {
+  const value = ray?.direction ?? {
+    x: -normal.x,
+    y: -normal.y,
+    z: -normal.z,
+  }
+  const length = Math.hypot(value.x, value.y, value.z)
+  if (length < 1e-8) return { x: 0, y: -1, z: 0 }
+  return { x: value.x / length, y: value.y / length, z: value.z / length }
+}
+
+function addScaled(
+  point: Vec3Like,
+  direction: Vec3Like,
+  scale: number,
+): Vec3Like {
+  return {
+    x: point.x + direction.x * scale,
+    y: point.y + direction.y * scale,
+    z: point.z + direction.z * scale,
+  }
+}
+
+function distance3(a: Vec3Like, b: Vec3Like): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
+}
+
+function dot3(a: Vec3Like, b: Vec3Like): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z
 }

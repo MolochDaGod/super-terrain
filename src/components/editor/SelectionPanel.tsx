@@ -133,8 +133,8 @@ function ModifierEditor({
             label="Portal radius"
             value={modifier.radius}
             min={2}
-            max={24}
-            step={0.5}
+            max={128}
+            step={1}
             unit=" m"
             onChange={(radius) => {
               terrain.updateTunnelShape(modifier.id, { radius })
@@ -145,12 +145,35 @@ function ModifierEditor({
             label="Burial depth"
             value={modifier.depth}
             min={3}
-            max={48}
+            max={256}
             step={1}
             unit=" m"
             onChange={(depth) => {
               terrain.updateTunnelShape(modifier.id, { depth })
               editor.patch({ status: 'Tunnel shape changed · affected sections queued' })
+            }}
+          />
+          <RangeField
+            label="Surface noise"
+            value={modifier.noise}
+            min={0}
+            max={2}
+            step={0.05}
+            onChange={(noise) => {
+              terrain.updateTunnelShape(modifier.id, { noise })
+              editor.patch({ status: 'Tunnel noise changed · affected sections queued' })
+            }}
+          />
+          <RangeField
+            label="Noise scale"
+            value={modifier.noiseScale}
+            min={0.5}
+            max={32}
+            step={0.5}
+            unit=" m"
+            onChange={(noiseScale) => {
+              terrain.updateTunnelShape(modifier.id, { noiseScale })
+              editor.patch({ status: 'Tunnel noise scale changed · affected sections queued' })
             }}
           />
         </>

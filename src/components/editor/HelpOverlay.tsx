@@ -47,7 +47,7 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
             title="Edit"
             rows={[
               ['1—0', 'Select sculpt tools'],
-              ['P / G / T', 'Paint / density / tunnel'],
+              ['P / G / T / C', 'Paint / density / tunnel / cave dig'],
               ['LMB drag', 'Apply active brush'],
               ['[ / ]', 'Change brush radius'],
               ['H', 'Toggle telemetry and stress tests'],

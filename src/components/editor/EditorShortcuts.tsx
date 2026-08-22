@@ -21,9 +21,9 @@ export function EditorShortcuts({ editor }: { editor: EditorStore }) {
       } else if (event.code === 'KeyH') {
         editor.patch({ showHud: !editor.getSnapshot().showHud })
       } else if (event.code === 'BracketLeft') {
-        editor.patch({ brushRadius: Math.max(4, editor.getSnapshot().brushRadius - 2) })
+        patchActiveRadius(editor, -2)
       } else if (event.code === 'BracketRight') {
-        editor.patch({ brushRadius: Math.min(72, editor.getSnapshot().brushRadius + 2) })
+        patchActiveRadius(editor, 2)
       } else if (event.code === 'Escape') {
         editor.patch({
           tool: 'select',
@@ -37,4 +37,17 @@ export function EditorShortcuts({ editor }: { editor: EditorStore }) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [editor])
   return null
+}
+
+function patchActiveRadius(editor: EditorStore, delta: number): void {
+  const snapshot = editor.getSnapshot()
+  if (snapshot.tool === 'tunnel') {
+    editor.patch({ tunnelRadius: Math.max(2, Math.min(128, snapshot.tunnelRadius + delta)) })
+    return
+  }
+  if (snapshot.tool === 'dig') {
+    editor.patch({ digRadius: Math.max(1, Math.min(64, snapshot.digRadius + delta)) })
+    return
+  }
+  editor.patch({ brushRadius: Math.max(4, Math.min(72, snapshot.brushRadius + delta)) })
 }

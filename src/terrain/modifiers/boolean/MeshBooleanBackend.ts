@@ -68,15 +68,25 @@ export function tunnelCutterVolumes(
   return [
     {
       kind: 'sweep',
-      rings: createTunnelSweep(tunnelPathPoints(tunnel), tunnel.radius),
+      rings: createTunnelSweep(
+        tunnelPathPoints(tunnel),
+        tunnel.radius,
+        tunnel.noise,
+        tunnel.noiseScale,
+      ),
       surface: 'cave',
+      noise: tunnel.noise,
+      noiseScale: tunnel.noiseScale,
     },
+    ...(tunnel.carves ?? []),
   ]
 }
 
 function createTunnelSweep(
   controls: ReturnType<typeof tunnelPathPoints>,
   radius: number,
+  noise: number,
+  noiseScale: number,
 ): SweepRing[] {
   const controlLength =
     distance(controls[0], controls[1]) +
@@ -88,14 +98,17 @@ function createTunnelSweep(
     const t = segment / segments
     const point = cubicBezier(controls, t)
     const interior = Math.sin(Math.PI * t)
-    const broadSwell = Math.sin(Math.PI * t * 2.35 + 0.4) * interior
-    const narrowSwell = Math.sin(Math.PI * t * 5.2 + 1.7) * interior
+    const broadPhase =
+      (t * controlLength * Math.PI * 2) / Math.max(1, noiseScale * 6.5)
+    const broadSwell = Math.sin(broadPhase + 0.4) * interior
+    const narrowSwell = Math.sin(broadPhase * 2.2 + 1.7) * interior
+    const shapeNoise = Math.max(0, Math.min(2, noise))
     rings.push({
       ...point,
       horizontalRadius:
-        radius * (0.94 + interior * 0.12 + broadSwell * 0.08),
+        radius * (0.94 + interior * 0.12 + broadSwell * 0.08 * shapeNoise),
       verticalRadius:
-        radius * (0.78 + interior * 0.08 + narrowSwell * 0.055),
+        radius * (0.78 + interior * 0.08 + narrowSwell * 0.055 * shapeNoise),
     })
   }
   return rings

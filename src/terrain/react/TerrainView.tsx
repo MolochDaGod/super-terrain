@@ -104,7 +104,11 @@ export function TerrainView({
         return
       }
       editor.setCursor(hit.point, hit.normal, hit.sectionId)
-      if (dragging.current) terrain.continueStroke(hit.point, hit.normal)
+      if (dragging.current) {
+        terrain.continueStroke(hit.point, hit.normal, {
+          direction: raycaster.ray.direction,
+        })
+      }
     }
 
     const onPointerDown = (event: PointerEvent) => {
@@ -133,7 +137,9 @@ export function TerrainView({
       activePointerId.current = event.pointerId
       editor.patch({ dragging: true })
       canvas.setPointerCapture(event.pointerId)
-      const modifierId = terrain.beginStroke(hit.point, hit.normal, snapshot)
+      const modifierId = terrain.beginStroke(hit.point, hit.normal, snapshot, {
+        direction: raycaster.ray.direction,
+      })
       if (modifierId) {
         editor.patch({
           selectedModifierId: modifierId,
@@ -153,12 +159,15 @@ export function TerrainView({
       dragging.current = false
       activePointerId.current = null
       const result = terrain.endStroke()
+      const tool = editor.getSnapshot().tool
       editor.patch({
         dragging: false,
         status:
           result === 'cancelled'
             ? 'Tunnel cancelled · drag between two distinct surface portals'
-            : 'Edit queued for background compile',
+            : tool === 'dig'
+              ? 'Cave carve joined and queued for background compile'
+              : 'Edit queued for background compile',
       })
       if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId)
     }

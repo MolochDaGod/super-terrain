@@ -11,6 +11,7 @@ import {
   MousePointer2,
   Paintbrush,
   Pickaxe,
+  Drill,
   Sparkles,
   Waves,
 } from 'lucide-react'
@@ -47,6 +48,7 @@ export const TOOLS: ToolDefinition[] = [
   { id: 'paint', label: 'Paint', shortcut: 'P', code: 'KeyP', icon: Paintbrush, kind: 'paint', group: 'paint', description: 'Paint or erase one of four material weight channels.' },
   { id: 'remesh', label: 'Density', shortcut: 'G', code: 'KeyG', icon: Grid3X3, kind: 'topology', group: 'topology', description: 'Inject local coordinate bands at the requested edge length.' },
   { id: 'tunnel', label: 'Tunnel', shortcut: 'T', code: 'KeyT', icon: Pickaxe, kind: 'topology', group: 'topology', description: 'Press one portal, drag to the second, then release. The swept Boolean stays editable in the modifier stack.' },
+  { id: 'dig', label: 'Cave dig', shortcut: 'C', code: 'KeyC', icon: Drill, kind: 'topology', group: 'topology', description: 'Hold on the terrain to drill along the camera ray. Touching an existing subtractive CSG hole extends that modifier.' },
 ]
 
 export const TOOL_BY_ID = Object.fromEntries(

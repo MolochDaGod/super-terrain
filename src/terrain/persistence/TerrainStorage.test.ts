@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto'
 import { describe, expect, it } from 'vitest'
+import type { CompiledSection } from '../core/types'
 import { createRemeshModifier } from '../modifiers/factories'
 import { IndexedDbTerrainStorage } from './TerrainStorage'
 import { deserializeWorld, serializeWorld } from './serialization'
@@ -58,4 +59,62 @@ describe('terrain persistence', () => {
     expect(await storage.load('alpha')).toBeUndefined()
     expect(await storage.loadRocks('alpha')).toBeUndefined()
   })
+
+  it('stores typed compiled meshes separately and clears them with the world', async () => {
+    const storage = new IndexedDbTerrainStorage(`terrain-cache-${crypto.randomUUID()}`)
+    const compiled = compiledFixture()
+    await storage.saveCompiledSections('alpha', [{
+      sectionId: '2:-1',
+      signature: 'exact-input-signature',
+      compiled,
+    }])
+
+    expect(await storage.loadCompiledSectionKeys('alpha')).toEqual(['2:-1'])
+    const [restored] = await storage.loadCompiledSections('alpha', ['2:-1'])
+    expect(restored?.signature).toBe('exact-input-signature')
+    expect(restored?.compiled.lods[0]?.positions).toBeInstanceOf(Float32Array)
+    expect([...restored!.compiled.lods[0]!.positions]).toEqual([0, 1, 2])
+
+    await storage.clear('alpha')
+    expect(await storage.loadCompiledSectionKeys('alpha')).toEqual([])
+  })
 })
+
+function compiledFixture(): CompiledSection {
+  const emptyFields = Array.from(
+    { length: 5 },
+    () => new Uint16Array(),
+  ) as unknown as NonNullable<
+    CompiledSection['lods'][number]['surfaceFields']
+  >
+  return {
+    key: { x: 2, z: -1 },
+    sourceRevision: 0,
+    bounds: {
+      min: { x: 256, y: 0, z: -128 },
+      max: { x: 384, y: 2, z: 0 },
+    },
+    lods: [{
+      level: 2,
+      geometricError: 4,
+      positions: new Float32Array([0, 1, 2]),
+      normals: new Float32Array([0, 1, 0]),
+      colors: new Float32Array([0.2, 0.4, 0.3]),
+      surfaceFields: emptyFields,
+      paintWeights: new Uint16Array(4),
+      indices: new Uint32Array([0, 0, 0]),
+      triangleCount: 1,
+      gpuBytes: 52,
+    }],
+    metadata: {
+      compileMs: 12,
+      vertexCount: 1,
+      triangleCount: 1,
+      density: 1,
+      hasArbitraryTopology: false,
+      validationWarnings: 0,
+    },
+    cpuBytes: 52,
+    gpuBytes: 52,
+  }
+}

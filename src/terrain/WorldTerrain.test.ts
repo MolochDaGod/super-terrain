@@ -174,7 +174,13 @@ describe('world terrain brush sessions', () => {
   it('authors a tunnel by dragging between two surface portals', () => {
     const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
     const editor = new EditorStore()
-    editor.patch({ tool: 'tunnel', tunnelRadius: 6, tunnelDepth: 11 })
+    editor.patch({
+      tool: 'tunnel',
+      tunnelRadius: 6,
+      tunnelDepth: 11,
+      tunnelNoise: 1.4,
+      tunnelNoiseScale: 9,
+    })
     const id = terrain.beginStroke(
       { x: 8, y: 20, z: 12 },
       { x: 0, y: 1, z: 0 },
@@ -197,6 +203,8 @@ describe('world terrain brush sessions', () => {
       expect(tunnel.portals[1]).toMatchObject({ x: 42, y: 24, z: 35 })
       expect(tunnel.radius).toBe(6)
       expect(tunnel.depth).toBe(11)
+      expect(tunnel.noise).toBe(1.4)
+      expect(tunnel.noiseScale).toBe(9)
     }
     terrain.dispose()
   })
@@ -213,6 +221,92 @@ describe('world terrain brush sessions', () => {
 
     expect(terrain.endStroke()).toBe('cancelled')
     expect(terrain.modifiers.count).toBe(0)
+    terrain.dispose()
+  })
+
+  it('drills deeper while held and reuses an intersecting cave modifier', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    const editor = new EditorStore()
+    editor.patch({
+      tool: 'dig',
+      digRadius: 5,
+      digSpeed: 20,
+      digNoise: 1.2,
+      digNoiseScale: 7,
+    })
+    const snapshot = editor.getSnapshot()
+    const firstId = terrain.beginStroke(
+      { x: 0, y: 10, z: 0 },
+      { x: -1, y: 0, z: 0 },
+      snapshot,
+      { direction: { x: 1, y: 0, z: 0 } },
+    )
+    const initial = terrain.modifiers.snapshot()[0]
+    expect(initial.type).toBe('boolean-volume')
+    const initialEnd = initial.type === 'boolean-volume' && initial.volumes[0].kind === 'capsule'
+      ? initial.volumes[0].end.x
+      : 0
+
+    terrain.advanceActiveStroke(0.05)
+    terrain.advanceActiveStroke(0.05)
+    const drilled = terrain.modifiers.snapshot()[0]
+    expect(drilled.type).toBe('boolean-volume')
+    if (drilled.type === 'boolean-volume' && drilled.volumes[0].kind === 'capsule') {
+      expect(drilled.volumes[0].end.x).toBeGreaterThan(initialEnd)
+      expect(drilled.volumes[0].noise).toBe(1.2)
+      expect(drilled.volumes[0].noiseScale).toBe(7)
+    }
+    terrain.endStroke()
+
+    const reusedId = terrain.beginStroke(
+      { x: 4, y: 10, z: 0 },
+      { x: 0, y: 0, z: -1 },
+      snapshot,
+      { direction: { x: 0, y: 0, z: 1 } },
+    )
+    terrain.endStroke()
+
+    expect(reusedId).toBe(firstId)
+    expect(terrain.modifiers.count).toBe(1)
+    const cave = terrain.modifiers.snapshot()[0]
+    expect(cave.type).toBe('boolean-volume')
+    if (cave.type === 'boolean-volume') expect(cave.volumes).toHaveLength(2)
+    terrain.dispose()
+  })
+
+  it('extends a tunnel modifier when the dig radius touches its CSG hole', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    const editor = new EditorStore()
+    editor.patch({ tool: 'tunnel', tunnelRadius: 6, tunnelDepth: 10 })
+    const tunnelId = terrain.beginStroke(
+      { x: 0, y: 20, z: 0 },
+      { x: 0, y: 1, z: 0 },
+      editor.getSnapshot(),
+    )
+    terrain.continueStroke(
+      { x: 30, y: 20, z: 0 },
+      { x: 0, y: 1, z: 0 },
+    )
+    terrain.endStroke()
+
+    editor.patch({ tool: 'dig', digRadius: 4 })
+    const reusedId = terrain.beginStroke(
+      { x: 0, y: 20, z: 0 },
+      { x: 0, y: 1, z: 0 },
+      editor.getSnapshot(),
+      { direction: { x: 1, y: -0.2, z: 0 } },
+    )
+    terrain.advanceActiveStroke(0.05)
+    terrain.endStroke()
+
+    expect(reusedId).toBe(tunnelId)
+    expect(terrain.modifiers.count).toBe(1)
+    const tunnel = terrain.modifiers.snapshot()[0]
+    expect(tunnel.type).toBe('boolean-subtract')
+    if (tunnel.type === 'boolean-subtract') {
+      expect(tunnel.carves).toHaveLength(1)
+      expect(tunnel.carves?.[0].kind).toBe('capsule')
+    }
     terrain.dispose()
   })
 

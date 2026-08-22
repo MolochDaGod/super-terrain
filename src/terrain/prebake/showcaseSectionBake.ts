@@ -5,6 +5,15 @@ import showcaseBakeUrl from '../react/assets/showcase-sections-v22.bin.gz?url'
 
 const SHOWCASE_BAKE_URL = showcaseBakeUrl
 
+export const SHOWCASE_BAKED_SECTION_IDS = [
+  '1:0',
+  '2:0',
+  '3:0',
+  '1:1',
+  '2:1',
+  '3:1',
+] as const
+
 /** Loads the exact CSG result for the six expensive landmark cells. */
 export async function loadShowcaseSectionBake(
   config: TerrainConfig,

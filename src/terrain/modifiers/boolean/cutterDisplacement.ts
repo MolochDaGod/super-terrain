@@ -75,8 +75,12 @@ export function displaceCutterGeometry(
 ): void {
   const position = geometry.getAttribute('position') as BufferAttribute
   const array = position.array as Float32Array
-  const budget = cutterRadius(cutter) * MAX_DISPLACEMENT_FRACTION
+  const noise = cutterNoise(cutter)
+  const budget = cutterRadius(cutter) * MAX_DISPLACEMENT_FRACTION * noise
   if (budget < 0.05) return
+
+  const closeScale = Math.max(0.25, cutter.noiseScale ?? profile.cellSize)
+  const scaleRatio = closeScale / profile.cellSize
 
   const cellularShare = budget * profile.cellular
   const swellShare = budget * (1 - profile.cellular)
@@ -95,16 +99,16 @@ export function displaceCutterGeometry(
     // them. Plain F1 gives cones pointing at every cell centre, which reads as
     // studded rather than scalloped.
     const cell = worley3(
-      x / profile.cellSize,
-      y / profile.cellSize,
-      z / profile.cellSize,
+      x / closeScale,
+      y / closeScale,
+      z / closeScale,
       seed,
     )
     const pocket = 1 - Math.min(1, (cell.second - cell.nearest) * 1.6)
     const swell = fbm3(
-      x / profile.swellSize,
-      y / profile.swellSize,
-      z / profile.swellSize,
+      x / (profile.swellSize * scaleRatio),
+      y / (profile.swellSize * scaleRatio),
+      z / (profile.swellSize * scaleRatio),
       seed + 977,
       3,
     )
@@ -132,7 +136,11 @@ export function displaceCutterGeometry(
  */
 export function cutterDisplacementBudget(cutter: CutterVolume): number {
   if (cutter.surface === 'none' || cutter.kind === 'mesh') return 0
-  return cutterRadius(cutter) * MAX_DISPLACEMENT_FRACTION
+  return cutterRadius(cutter) * MAX_DISPLACEMENT_FRACTION * cutterNoise(cutter)
+}
+
+function cutterNoise(cutter: CutterVolume): number {
+  return Math.max(0, Math.min(2.5, cutter.noise ?? 1))
 }
 
 /** Smallest radius of the cutter; the displacement budget scales from it. */

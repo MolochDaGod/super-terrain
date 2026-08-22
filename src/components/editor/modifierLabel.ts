@@ -14,9 +14,13 @@ export function modifierLabel(modifier: TerrainModifier): string {
     case 'material-settings':
       return 'Terrain materials'
     case 'boolean-subtract':
-      return 'Mesh · tunnel subtract'
+      return modifier.carves?.length
+        ? 'Mesh · tunnel + cave carve'
+        : 'Mesh · tunnel subtract'
     case 'boolean-volume':
-      return `Mesh · volume ${modifier.operation}`
+      return modifier.backend === 'bvh-csg-cave-dig-v1'
+        ? 'Mesh · cave carve'
+        : `Mesh · volume ${modifier.operation}`
     case 'remesh':
       return 'Mesh · density'
     case 'tessellate':
@@ -35,7 +39,7 @@ export function modifierMeta(modifier: TerrainModifier): string | undefined {
     case 'weight-paint':
       return `${modifier.points.length} samples · ${modifier.channel}`
     case 'boolean-subtract':
-      return `${tunnelPortalDistance(modifier).toFixed(0)} m · r ${modifier.radius.toFixed(1)} m`
+      return `${tunnelPortalDistance(modifier).toFixed(0)} m · r ${modifier.radius.toFixed(1)} m${modifier.carves?.length ? ` · ${modifier.carves.length} carves` : ''}`
     case 'boolean-volume':
       return `${modifier.volumes.length} ${modifier.volumes.length === 1 ? 'volume' : 'volumes'}`
     default:

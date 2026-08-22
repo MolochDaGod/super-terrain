@@ -3,7 +3,10 @@ import { Mesh, MeshBasicNodeMaterial } from 'three/webgpu'
 import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
 import { cutterGeometry } from '../modifiers/boolean/CutterVolume'
-import { transformedBooleanVolume } from '../modifiers/transform'
+import {
+  transformedBooleanVolume,
+  transformedTunnel,
+} from '../modifiers/transform'
 import {
   useEditorSnapshot,
   useModifierRevision,
@@ -24,7 +27,12 @@ export function BooleanVolumePreview({
     : undefined
   const volume = selected?.type === 'boolean-volume'
     ? transformedBooleanVolume(selected)
-    : undefined
+    : selected?.type === 'boolean-subtract'
+      ? {
+          operation: 'subtract' as const,
+          volumes: transformedTunnel(selected).carves ?? [],
+        }
+      : undefined
   const geometries = useMemo(
     () =>
       volume?.volumes.map((cutter) =>

@@ -46,17 +46,16 @@ export function BrushCursor({ editor }: BrushCursorProps) {
       snapshot.uiViewMode === 'editor' &&
       snapshot.cursorVisible &&
       snapshot.tool !== 'select'
+    const followsSurface =
+      snapshot.brushDomain === 'mesh' ||
+      snapshot.tool === 'paint' ||
+      snapshot.tool === 'tunnel' ||
+      snapshot.tool === 'dig'
     cursorNormal
       .set(
-        snapshot.brushDomain === 'mesh' || snapshot.tool === 'paint'
-          ? snapshot.cursorNormal.x
-          : 0,
-        snapshot.brushDomain === 'mesh' || snapshot.tool === 'paint'
-          ? snapshot.cursorNormal.y
-          : 1,
-        snapshot.brushDomain === 'mesh' || snapshot.tool === 'paint'
-          ? snapshot.cursorNormal.z
-          : 0,
+        followsSurface ? snapshot.cursorNormal.x : 0,
+        followsSurface ? snapshot.cursorNormal.y : 1,
+        followsSurface ? snapshot.cursorNormal.z : 0,
       )
       .normalize()
     cursor.position
@@ -67,9 +66,12 @@ export function BrushCursor({ editor }: BrushCursorProps) {
       )
       .addScaledVector(cursorNormal, 0.16)
     cursor.quaternion.setFromUnitVectors(cursorAxis, cursorNormal)
-    cursor.scale.setScalar(
-      snapshot.tool === 'tunnel' ? snapshot.tunnelRadius : snapshot.brushRadius,
-    )
+    const radius = snapshot.tool === 'tunnel'
+      ? snapshot.tunnelRadius
+      : snapshot.tool === 'dig'
+        ? snapshot.digRadius
+        : snapshot.brushRadius
+    cursor.scale.setScalar(radius)
     material.color.set(snapshot.dragging ? 0x65e8ff : 0xb7f6df)
   })
 

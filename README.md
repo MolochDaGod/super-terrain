@@ -54,7 +54,7 @@ alpine climate, high relief, a valley floor in front — without rendering.
 - Inspect mode: left-drag orbits, right-drag pans, wheel/middle dollies.
 - Editing mode: left-drag applies the brush; Alt+left-drag orbits.
 - `W A S D` flies laterally, `Q / E` changes elevation, and Shift accelerates.
-- `1`–`0` selects inspect and the sculpt tools; `P`, `G`, and `T` select paint, density, and tunnel.
+- `1`–`0` selects inspect and the sculpt tools; `P`, `G`, `T`, and `C` select paint, density, tunnel, and camera-directed cave digging.
 - `[` / `]` changes brush radius; `H` toggles telemetry.
 
 The inspector exposes two authoring domains. **Heightfield · Y** keeps brush displacement vertical for traditional landscape work. **Mesh · XYZ** follows the picked surface normal, so strokes can push into X/Z and form lateral deformation or overhangs. Raise/lower, smooth, flatten, clay, pinch, scrape, terrace, and seeded noise strokes remain grouped into editable sculpt layers. Four paint channels have configurable names, colors, and roughness.

@@ -159,6 +159,13 @@ export function transformedTunnel(
     })) as BooleanSubtractModifier['portals'],
     radius: normalized.radius * transform.scale,
     depth: normalized.depth * transform.scale,
+    noise: normalized.noise,
+    // Noise is sampled in world space so transformed tunnels still agree at
+    // streamed section seams; scaling the shape does not stretch that field.
+    noiseScale: normalized.noiseScale,
+    carves: normalized.carves?.map((cutter) =>
+      transformCutterVolume(cutter, pivot, transform),
+    ),
     transform: normalizedTransform(),
   }
   next.bounds = tunnelBounds(next)

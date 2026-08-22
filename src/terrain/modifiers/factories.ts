@@ -209,6 +209,8 @@ export function createTunnelModifier(options: {
   depth?: number
   length?: number
   direction?: { x: number; z: number }
+  noise?: number
+  noiseScale?: number
 }): BooleanSubtractModifier {
   const radius = options.radius ?? 8
   const modifier: BooleanSubtractModifier = {
@@ -220,6 +222,8 @@ export function createTunnelModifier(options: {
     portals: createTunnelPortals(options),
     radius,
     depth: options.depth ?? radius * 1.75,
+    noise: Math.max(0, options.noise ?? 1),
+    noiseScale: Math.max(0.25, options.noiseScale ?? 2.6),
     backend: 'bvh-csg-tunnel-v3',
     transform: identityTransform(),
     bounds: boundsFromSphere(options.start ?? options.center ?? { x: 0, y: 0, z: 0 }, radius),

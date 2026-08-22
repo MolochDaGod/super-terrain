@@ -111,4 +111,29 @@ describe('frame budget scheduler', () => {
     scheduler.runFrame()
     expect(following).toHaveBeenCalledOnce()
   })
+
+  it('temporarily widens upload budgets while a warm cache is hydrating', () => {
+    const scheduler = new FrameBudgetScheduler({
+      cpuTerrainMs: 1.5,
+      gpuUploadBytes: 1_000,
+      sectionSwaps: 1,
+    })
+    const swaps = [vi.fn(), vi.fn(), vi.fn()]
+    scheduler.beginFrame(16, 3)
+    for (let index = 0; index < swaps.length; index += 1) {
+      scheduler.enqueue({
+        id: `cached-${index}`,
+        kind: 'swap',
+        priority: 10 - index,
+        estimatedCpuMs: 0.1,
+        uploadBytes: 300,
+        swaps: 1,
+        run: swaps[index],
+      })
+    }
+
+    scheduler.runFrame()
+
+    expect(swaps.every((swap) => swap.mock.calls.length === 1)).toBe(true)
+  })
 })
