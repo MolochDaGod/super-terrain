@@ -11,7 +11,7 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
         role="dialog"
         aria-modal="true"
         aria-label="Editor help"
-        className="w-full max-w-lg overflow-hidden rounded-2xl border border-white/[0.1] bg-[#0b1412] shadow-2xl"
+        className="max-h-[86svh] w-full max-w-2xl overflow-y-auto overflow-hidden rounded-2xl border border-white/[0.1] bg-[#0b1412] shadow-2xl"
       >
         <header className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
           <div>
@@ -31,7 +31,7 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
           <HelpGroup
             title="Navigate"
             rows={[
-              ['Orbit / Fly', 'Switch camera mode in top bar'],
+              ['Orbit / Fly', 'Switch camera mode in the View menu'],
               ['LMB drag', 'Orbit in Inspect mode'],
               ['Alt + LMB', 'Orbit while editing'],
               ['RMB drag', 'Pan camera'],
@@ -50,13 +50,32 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
               ['P / G / T / C', 'Paint / density / tunnel / cave dig'],
               ['LMB drag', 'Apply active brush'],
               ['[ / ]', 'Change brush radius'],
-              ['H', 'Toggle telemetry and stress tests'],
-              ['Esc', 'Select / close dialog'],
+              ['H', 'Toggle frame telemetry'],
+            ]}
+          />
+          <HelpGroup
+            title="Objects"
+            rows={[
+              ['W / E / R', 'Move / rotate / scale the selection'],
+              ['F', 'Frame the selection'],
+              ['⌘ / Ctrl + D', 'Duplicate rock or light'],
+              ['Alt + H', 'Hide or show the selection'],
+              ['Del', 'Delete the selection'],
+              ['Esc', 'Close dialog, then deselect, then Inspect'],
+            ]}
+          />
+          <HelpGroup
+            title="Where things live"
+            rows={[
+              ['Menu bar', 'File, Edit, Selection, Add, View, Run, Help'],
+              ['Object toolbar', 'Select, transform, add, duplicate, delete'],
+              ['Tool rail', 'Sculpt, paint and topology brushes'],
+              ['Right panel', 'Parameters for the tool and the selection'],
             ]}
           />
         </div>
         <div className="border-t border-white/[0.08] bg-white/[0.02] px-5 py-4 text-[11px] leading-relaxed text-white/38">
-          The inspector shows the active tool's parameters, then whatever is selected, then one scene section — switching tools opens the section that tool works with. Every edit stays non-destructive: strokes belong to layers, rocks and CSG volumes stay editable in the modifier stack, and workers rebuild only dirty sections while the previous mesh stays visible.
+Verbs live on the menu bar and the toolbars; the right panel is only parameters — the active tool's, then whatever is selected, then one scene collection. Every edit stays non-destructive: strokes belong to layers, rocks and CSG volumes stay editable in the modifier stack, and workers rebuild only dirty sections while the previous mesh stays visible.
         </div>
       </section>
     </div>
@@ -70,7 +89,7 @@ function HelpGroup({ title, rows }: { title: string; rows: [string, string][] })
       <div className="space-y-2.5">
         {rows.map(([key, description]) => (
           <div key={key} className="flex items-center justify-between gap-3">
-            <kbd className="rounded border border-white/[0.09] bg-white/[0.04] px-1.5 py-1 font-mono text-[11px] text-white/60">{key}</kbd>
+            <kbd className="shrink-0 whitespace-nowrap rounded border border-white/[0.09] bg-white/[0.04] px-1.5 py-1 font-mono text-[11px] text-white/60">{key}</kbd>
             <span className="text-right text-[11px] text-white/34">{description}</span>
           </div>
         ))}

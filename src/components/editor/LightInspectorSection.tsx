@@ -1,25 +1,17 @@
-import { Flashlight, Lightbulb, Move3D, RotateCw, Trash2 } from 'lucide-react'
-import type {
-  EditorStore,
-  TransformMode,
-} from '../../terrain/editor/EditorStore'
+import { Flashlight, Lightbulb } from 'lucide-react'
+import type { EditorStore } from '../../terrain/editor/EditorStore'
 import type { EditorLight, EditorLightPatch } from '../../terrain/editor/lights'
 import type { Vec3Like } from '../../terrain/core/types'
 import { RangeField } from './RangeField'
-import { Segmented, type SegmentedOption } from './ui/Segmented'
 import { Section } from './ui/Section'
 
 const RAD_TO_DEG = 180 / Math.PI
 
-const MOVE_MODE: SegmentedOption<TransformMode>[] = [
-  { value: 'translate', label: 'Move', icon: Move3D },
-]
-
-const MOVE_ROTATE_MODES: SegmentedOption<TransformMode>[] = [
-  ...MOVE_MODE,
-  { value: 'rotate', label: 'Rotate', icon: RotateCw },
-]
-
+/**
+ * Light parameters only. Selecting, moving, hiding and deleting a light are
+ * object verbs and live on the object toolbar, so this panel never repeats
+ * them with a second, differently-shaped button.
+ */
 export function LightInspectorSection({
   light,
   editor,
@@ -59,29 +51,7 @@ export function LightInspectorSection({
             {light.color}
           </div>
         </div>
-        <button
-          type="button"
-          className="panel-button px-2.5"
-          data-accent={light.visible ? 'mint' : undefined}
-          aria-pressed={light.visible}
-          onClick={() => update({ visible: !light.visible })}
-        >
-          {light.visible ? 'On' : 'Off'}
-        </button>
       </div>
-
-      <Segmented
-        ariaLabel="Light transform mode"
-        options={light.type === 'spot' ? MOVE_ROTATE_MODES : MOVE_MODE}
-        value={
-          light.type === 'spot' && editor.getSnapshot().transformMode === 'rotate'
-            ? 'rotate'
-            : 'translate'
-        }
-        onChange={(transformMode) =>
-          editor.patch({ tool: 'select', transformMode })
-        }
-      />
 
       <RangeField label="Intensity" value={light.intensity} min={0} max={100} step={0.1} onChange={(intensity) => update({ intensity })} />
       <RangeField label="Range" value={light.distance} min={1} max={1000} step={1} unit=" m" onChange={(distance) => update({ distance })} />
@@ -112,15 +82,6 @@ export function LightInspectorSection({
           />
         </>
       )}
-
-      <button
-        type="button"
-        className="panel-button w-full"
-        data-accent="coral"
-        onClick={() => editor.removeLight(light.id)}
-      >
-        <Trash2 size={12} /> Remove light
-      </button>
     </Section>
   )
 }

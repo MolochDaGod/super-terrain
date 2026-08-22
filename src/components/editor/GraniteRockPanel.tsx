@@ -2,7 +2,6 @@ import {
   Box,
   Circle,
   Combine,
-  Copy,
   Dices,
   Mountain,
   RectangleHorizontal,
@@ -23,6 +22,7 @@ import {
   useEditorSnapshot,
   useGraniteRockRevision,
 } from '../../terrain/react/hooks'
+import { randomSeed } from './editorActions'
 import { RangeField } from './RangeField'
 import { CollapsibleSection } from './ui/Section'
 import { Segmented, type SegmentedOption } from './ui/Segmented'
@@ -88,29 +88,6 @@ export function GraniteRockPanel({
     key: Key,
     value: GraniteRockParameters[Key],
   ) => patchParameters({ ...parameters, [key]: value })
-
-  const placementPoint = snapshot.cursorVisible
-    ? snapshot.cursorPosition
-    : {
-        x: snapshot.cursorPosition.x,
-        y: terrain.sampleHeight(
-          snapshot.cursorPosition.x,
-          snapshot.cursorPosition.z,
-        ),
-        z: snapshot.cursorPosition.z,
-      }
-  const addRock = (recipe: GraniteRockParameters, status: string) => {
-    const id = terrain.addGraniteRock(recipe, placementPoint)
-    editor.patch({
-      rockParameters: { ...recipe },
-      selectedRockId: id,
-      selectedModifierId: undefined,
-      selectedLightId: undefined,
-      tool: 'select',
-      transformMode: 'translate',
-      status,
-    })
-  }
 
   return (
     <CollapsibleSection
@@ -194,37 +171,6 @@ export function GraniteRockPanel({
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-1.5">
-        <button
-          type="button"
-          className="panel-button"
-          data-accent="mint"
-          onClick={() =>
-            addRock(
-              randomGraniteRockParameters(randomSeed()),
-              'Random granite rock placed · translate gizmo active',
-            )
-          }
-        >
-          <Dices size={12} /> Random
-        </button>
-        <button
-          type="button"
-          className="panel-button"
-          onClick={() =>
-            addRock(
-              parameters,
-              selected
-                ? `${selected.name} duplicated at cursor`
-                : 'Granite rock placed · translate gizmo active',
-            )
-          }
-        >
-          {selected ? <Copy size={12} /> : <Mountain size={12} />}
-          {selected ? 'Duplicate' : 'Add current'}
-        </button>
-      </div>
-
       {rocks.length === 0 ? (
         <EmptyHint>No rocks placed yet.</EmptyHint>
       ) : (
@@ -260,12 +206,4 @@ export function GraniteRockPanel({
       )}
     </CollapsibleSection>
   )
-}
-
-function randomSeed(): number {
-  if (typeof crypto !== 'undefined' && 'getRandomValues' in crypto) {
-    const value = crypto.getRandomValues(new Uint32Array(1))[0]!
-    return Math.max(1, value & 0x7fff_ffff)
-  }
-  return Math.max(1, Date.now() & 0x7fff_ffff)
 }

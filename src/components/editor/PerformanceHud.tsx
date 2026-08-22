@@ -5,20 +5,13 @@ import {
   Cpu,
   Gauge,
   HardDrive,
-  Play,
   RefreshCw,
   Triangle,
   Upload,
 } from 'lucide-react'
-import type { BenchmarkScenario, WorldTerrain } from '../../terrain/WorldTerrain'
+import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
 import { useEditorSnapshot, useTerrainMetrics } from '../../terrain/react/hooks'
-
-const BENCHMARKS: { id: BenchmarkScenario; label: string; hint: string }[] = [
-  { id: 'sculpt-torture', label: 'Sculpt', hint: 'Rapid edits across neighbouring sections' },
-  { id: 'rebuild-torture', label: 'Rebuild', hint: 'Coalescing, cancellation, atomic swaps' },
-  { id: 'streaming-torture', label: 'Stream', hint: 'Extreme fly-through and LRU pressure' },
-]
 
 interface PerformanceHudProps {
   terrain: WorldTerrain
@@ -48,11 +41,19 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
   const targetFrameMs = 1000 / terrain.config.targetFps
   const violated = metrics.averageFrameMs > targetFrameMs * 1.08
   return (
-    <section className="pointer-events-none absolute bottom-10 left-[68px] z-20 hidden w-[286px] overflow-hidden rounded-xl border border-white/[0.09] bg-[#08110f]/88 shadow-2xl shadow-black/25 backdrop-blur-xl lg:block">
-      <div className="flex items-center justify-between border-b border-white/[0.07] px-3.5 py-2.5">
-        <div className="flex items-center gap-2 text-[9px] font-semibold uppercase tracking-[0.14em] text-white/42">
+    <section
+      aria-label="Frame telemetry"
+      className="pointer-events-none absolute bottom-9 left-[68px] z-20 hidden w-[286px] overflow-hidden rounded-lg border border-white/[0.09] bg-[#08110f]/90 shadow-2xl shadow-black/25 backdrop-blur-xl lg:block"
+    >
+      <div className="flex items-center justify-between border-b border-white/[0.07] px-3.5 py-2">
+        <div className="flex items-center gap-2 text-[11px] text-white/58">
           <Gauge size={12} />
           Frame telemetry
+          {metrics.activeBenchmark && (
+            <span className="rounded bg-[#77e8be]/12 px-1.5 py-0.5 font-mono text-[9px] text-[#a6f2d5]">
+              {metrics.activeBenchmark.replace('-torture', '')}
+            </span>
+          )}
         </div>
         <div className={`flex items-center gap-1.5 font-mono text-[9px] ${violated ? 'text-[#ff886f]' : 'text-[#77e8be]'}`}>
           {violated && <AlertTriangle size={10} />}
@@ -130,25 +131,6 @@ export function PerformanceHud({ terrain, editor }: PerformanceHudProps) {
         />
       </div>
 
-      <div className="pointer-events-auto grid grid-cols-3 gap-1 border-t border-white/[0.07] px-3.5 py-2.5">
-        {BENCHMARKS.map(({ id, label, hint }) => (
-          <button
-            key={id}
-            type="button"
-            title={hint}
-            data-active={metrics.activeBenchmark === id}
-            className="panel-button justify-center"
-            onClick={() => {
-              terrain.startBenchmark(id)
-              editor.patch({ status: `${label} stress running for seven seconds` })
-            }}
-          >
-            <Play size={10} fill="currentColor" />
-            {metrics.activeBenchmark === id ? 'Running' : label}
-          </button>
-        ))}
-      </div>
-
       <div className="flex items-center justify-between border-t border-white/[0.07] px-3.5 py-2 font-mono text-[10px] text-white/28">
         <span>LOD {metrics.trianglesByLod.map(compactNumber).join(' · ')}</span>
         <span>Q {Math.round(metrics.qualityScale * 100)}%</span>
@@ -170,7 +152,7 @@ function HudStat({
 }) {
   return (
     <div className="min-w-0">
-      <div className="flex items-center gap-1.5 text-[8px] uppercase tracking-wider text-white/28">
+      <div className="flex items-center gap-1.5 text-[10px] text-white/32">
         <Icon size={9} />
         {label}
       </div>

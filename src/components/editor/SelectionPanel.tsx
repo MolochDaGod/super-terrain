@@ -1,4 +1,4 @@
-import { Combine, Move3D, Mountain, RotateCw, Scaling } from 'lucide-react'
+import { Move3D, Mountain } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type {
   EditorStore,
@@ -14,15 +14,10 @@ import {
   useModifierRevision,
 } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
+import { LightInspectorSection } from './LightInspectorSection'
 import { Section } from './ui/Section'
 import { Segmented, type SegmentedOption } from './ui/Segmented'
 import { modifierLabel } from './modifierLabel'
-
-const TRANSFORM_MODES: SegmentedOption<TransformMode>[] = [
-  { value: 'translate', label: 'Move', icon: Move3D },
-  { value: 'rotate', label: 'Rotate', icon: RotateCw },
-  { value: 'scale', label: 'Scale', icon: Scaling },
-]
 
 const CSG_OPERATIONS: SegmentedOption<CsgOperation>[] = [
   { value: 'subtract', label: 'Subtract' },
@@ -33,8 +28,8 @@ const DEG = 180 / Math.PI
 
 /**
  * The one panel that reacts to selection. Nothing renders when nothing is
- * selected, and the transform mode decides which axes are shown, so the mode
- * buttons and the fields below them can never disagree.
+ * selected, and the transform mode — set on the object toolbar — decides which
+ * axes are shown, so the toolbar and the fields below can never disagree.
  */
 export function SelectionPanel({
   terrain,
@@ -50,16 +45,20 @@ export function SelectionPanel({
   const rock = snapshot.selectedRockId
     ? terrain.rocks.get(snapshot.selectedRockId)
     : undefined
+  const light = snapshot.selectedLightId
+    ? snapshot.lights.find((entry) => entry.id === snapshot.selectedLightId)
+    : undefined
   const modifier = snapshot.selectedModifierId
     ? terrain.modifiers
         .snapshot()
         .find((entry) => entry.id === snapshot.selectedModifierId)
     : undefined
 
+  if (light) return <LightInspectorSection light={light} editor={editor} />
   if (rock) {
     return (
       <Section icon={Mountain} title={rock.name}>
-        <RockEditor terrain={terrain} editor={editor} rock={rock} mode={snapshot.transformMode} />
+        <RockEditor terrain={terrain} rock={rock} mode={snapshot.transformMode} />
       </Section>
     )
   }
@@ -76,23 +75,6 @@ export function SelectionPanel({
     )
   }
   return null
-}
-
-function TransformModeSwitch({
-  editor,
-  mode,
-}: {
-  editor: EditorStore
-  mode: TransformMode
-}) {
-  return (
-    <Segmented
-      ariaLabel="Transform mode"
-      options={TRANSFORM_MODES}
-      value={mode}
-      onChange={(transformMode) => editor.patch({ transformMode, tool: 'select' })}
-    />
-  )
 }
 
 function ModifierEditor({
@@ -179,8 +161,6 @@ function ModifierEditor({
         </>
       )}
 
-      <TransformModeSwitch editor={editor} mode={mode} />
-
       {mode === 'translate' && (
         <>
           <RangeField label="X" value={transform.offset.x} min={-128} max={128} step={1} unit=" m" onChange={(value) => patchOffset('x', value)} />
@@ -204,41 +184,19 @@ function ModifierEditor({
 
 function RockEditor({
   terrain,
-  editor,
   rock,
   mode,
 }: {
   terrain: WorldTerrain
-  editor: EditorStore
   rock: GraniteRock
   mode: TransformMode
 }) {
   const transform = rock.transform
   const apply = (next: GraniteRock['transform']) =>
     terrain.updateGraniteRockTransform(rock.id, next)
-  const applyCsg = async (operation: CsgOperation) => {
-    editor.patch({
-      status: `Extracting ${rock.name} topology at ${rock.parameters.topologyDetail}³…`,
-    })
-    try {
-      const modifierId = await terrain.applyGraniteRockAsCsg(rock.id, operation)
-      editor.patch({
-        selectedRockId: undefined,
-        selectedModifierId: modifierId,
-        selectedLightId: undefined,
-        tool: 'select',
-        status: `${rock.name} hidden · topology snapshotted as CSG ${operation}`,
-      })
-    } catch (error) {
-      editor.patch({
-        status: error instanceof Error ? error.message : 'CSG snapshot failed',
-      })
-    }
-  }
 
   return (
     <>
-      <TransformModeSwitch editor={editor} mode={mode} />
       {mode === 'translate' && (
         <RangeField
           label="Elevation"
@@ -303,26 +261,6 @@ function RockEditor({
           </button>
         </>
       )}
-      <div className="grid grid-cols-2 gap-1.5">
-        <button
-          type="button"
-          className="panel-button"
-          data-accent="coral"
-          title="Snapshot this rock's triangles as a CSG subtract; the rock is hidden, not deleted"
-          onClick={() => void applyCsg('subtract')}
-        >
-          <Combine size={12} /> Subtract
-        </button>
-        <button
-          type="button"
-          className="panel-button"
-          data-accent="mint"
-          title="Snapshot this rock's triangles as a CSG union; the rock is hidden, not deleted"
-          onClick={() => void applyCsg('add')}
-        >
-          <Combine size={12} /> Union
-        </button>
-      </div>
     </>
   )
 }

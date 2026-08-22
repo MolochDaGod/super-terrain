@@ -305,3 +305,202 @@ button[data-active="true"] {
 .panel-button[data-accent="coral"]:hover {
   background: rgba(255, 157, 120, 0.1);
 }
+
+/* --- Menu bar -------------------------------------------------------------
+   A desktop menu, not a row of buttons: titles are quiet until they are open
+   or hovered, and the popup is the only surface with a border. */
+
+.menu-title {
+  padding: 4px 9px;
+  border-radius: 0.3rem;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.menu-title:hover {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.menu-title[data-open="true"] {
+  color: #b7f6df;
+  background: rgba(119, 232, 190, 0.11);
+}
+
+.menu-popup {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 50;
+  min-width: 230px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.55rem;
+  background: rgba(11, 19, 18, 0.97);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(18px);
+}
+
+.menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 0.35rem;
+  font-size: 12px;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.72);
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.menu-item:hover:not(:disabled) {
+  color: #ffffff;
+  background: rgba(119, 232, 190, 0.12);
+}
+
+.menu-item:disabled {
+  color: rgba(255, 255, 255, 0.24);
+  cursor: default;
+}
+
+.menu-item[aria-checked="true"] {
+  color: #b7f6df;
+}
+
+.menu-item-mark {
+  display: grid;
+  width: 14px;
+  flex-shrink: 0;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.menu-item[aria-checked="true"] .menu-item-mark {
+  color: #77e8be;
+}
+
+.menu-item-key {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.28);
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.menu-group-label {
+  padding: 6px 8px 3px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.menu-icon-button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 0.35rem;
+  color: rgba(255, 255, 255, 0.42);
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.menu-icon-button:hover {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* --- Telemetry chips ------------------------------------------------------
+   An icon and a number. No caption: the tooltip carries the wording, so the
+   bar stays readable at a glance instead of shouting in small capitals. */
+
+.telemetry-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border-radius: 0.35rem;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.telemetry-chip[data-tone="ok"] {
+  color: rgba(183, 246, 223, 0.85);
+}
+
+.telemetry-chip[data-tone="warn"] {
+  color: #ff9d84;
+  background: rgba(255, 130, 111, 0.09);
+}
+
+.telemetry-chip[data-tone="busy"] {
+  color: #8fdcf2;
+}
+
+.telemetry-chip[data-tone="muted"] {
+  color: rgba(255, 255, 255, 0.3);
+}
+
+/* --- Object toolbar ------------------------------------------------------- */
+
+.bar-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 0.35rem;
+  color: rgba(255, 255, 255, 0.5);
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.bar-button:hover:not(:disabled) {
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.bar-button[data-active="true"] {
+  color: #b7f6df;
+  border-color: rgba(119, 232, 190, 0.22);
+  background: rgba(119, 232, 190, 0.1);
+}
+
+.bar-button[data-danger="true"]:hover:not(:disabled) {
+  color: #ff826f;
+  background: rgba(255, 130, 111, 0.1);
+}
+
+.bar-button:disabled {
+  color: rgba(255, 255, 255, 0.16);
+  cursor: default;
+}
+
+/* Tool rail hover card: the label, its key and what the tool does. */
+.tool-tip {
+  position: absolute;
+  left: 46px;
+  top: 0;
+  z-index: 30;
+  padding: 6px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.45rem;
+  background: rgba(11, 19, 18, 0.97);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.5);
+  font-size: 11px;
+  text-align: left;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.tool-button:hover .tool-tip,
+.tool-button:focus-visible .tool-tip {
+  opacity: 1;
+}

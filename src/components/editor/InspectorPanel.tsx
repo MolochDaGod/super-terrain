@@ -1,10 +1,9 @@
 import { useEffect, useRef } from 'react'
-import { Eye, Info } from 'lucide-react'
+import { Info } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type {
   EditorStore,
   InspectorSection,
-  TerrainOverlay,
 } from '../../terrain/editor/EditorStore'
 import { inspectorSectionForTool } from '../../terrain/editor/EditorStore'
 import type { BrushDomain, PaintMode } from '../../terrain/modifiers/types'
@@ -16,18 +15,10 @@ import { MaterialChannelsPanel } from './MaterialChannelsPanel'
 import { CsgObjectsPanel } from './CsgObjectsPanel'
 import { GraniteRockPanel } from './GraniteRockPanel'
 import { SelectionPanel } from './SelectionPanel'
-import { Section, CollapsibleSection } from './ui/Section'
+import { LightsSection } from './LightsSection'
+import { Section } from './ui/Section'
 import { Segmented, type SegmentedOption } from './ui/Segmented'
 import { TOOL_BY_ID } from './tools'
-import { LightInspectorSection } from './LightInspectorSection'
-
-const OVERLAYS: SegmentedOption<TerrainOverlay>[] = [
-  { value: 'none', label: 'Clean' },
-  { value: 'sections', label: 'Sections' },
-  { value: 'lod', label: 'LOD' },
-  { value: 'density', label: 'Density' },
-  { value: 'streaming', label: 'Stream' },
-]
 
 const BRUSH_DOMAINS: SegmentedOption<BrushDomain>[] = [
   { value: 'heightfield', label: 'Heightfield', hint: 'Deform along world Y' },
@@ -48,9 +39,6 @@ export function InspectorPanel({
 }) {
   const snapshot = useEditorSnapshot(editor)
   const tool = TOOL_BY_ID[snapshot.tool]
-  const selectedLight = snapshot.selectedLightId
-    ? snapshot.lights.find((light) => light.id === snapshot.selectedLightId)
-    : undefined
 
   // Switching tools reveals the section that tool works with, so the panel
   // under the parameters is always the relevant one without any scrolling.
@@ -75,10 +63,10 @@ export function InspectorPanel({
   const hasBrush = isSculpt || isPaint
 
   return (
-    <aside className="pointer-events-auto absolute bottom-9 right-3 top-[68px] z-20 hidden w-[268px] overflow-y-auto rounded-xl border border-white/[0.09] bg-[#0b1312]/92 shadow-2xl shadow-black/30 backdrop-blur-xl md:block">
-      {selectedLight ? (
-        <LightInspectorSection light={selectedLight} editor={editor} />
-      ) : (
+    <aside
+      aria-label="Parameters"
+      className="pointer-events-auto absolute bottom-7 right-3 top-[46px] z-20 hidden w-[272px] overflow-y-auto rounded-lg border border-white/[0.09] bg-[#0b1312]/92 shadow-2xl shadow-black/30 backdrop-blur-xl md:block"
+    >
       <Section icon={tool.icon} title={tool.label} badge={tool.shortcut}>
         <div className="flex items-start gap-2 text-[11px] leading-relaxed text-white/34">
           <Info size={12} className="mt-0.5 shrink-0 text-white/22" />
@@ -253,33 +241,15 @@ export function InspectorPanel({
           </>
         )}
       </Section>
-      )}
 
       <SelectionPanel terrain={terrain} editor={editor} />
 
       <SculptLayersPanel terrain={terrain} editor={editor} {...sectionProps('layers')} />
       <MaterialChannelsPanel terrain={terrain} editor={editor} {...sectionProps('materials')} />
       <GraniteRockPanel terrain={terrain} editor={editor} {...sectionProps('rocks')} />
-      <CsgObjectsPanel terrain={terrain} editor={editor} {...sectionProps('csg')} />
+      <CsgObjectsPanel editor={editor} {...sectionProps('csg')} />
+      <LightsSection editor={editor} {...sectionProps('lights')} />
       <ModifierStackPanel terrain={terrain} editor={editor} {...sectionProps('modifiers')} />
-
-      <CollapsibleSection
-        icon={Eye}
-        title="Display"
-        badge={OVERLAYS.find((entry) => entry.value === snapshot.overlay)?.label}
-        {...sectionProps('display')}
-      >
-        <Segmented
-          ariaLabel="Terrain overlay"
-          columns={3}
-          options={OVERLAYS}
-          value={snapshot.overlay}
-          onChange={(overlay) => {
-            editor.patch({ overlay })
-            terrain.setOverlay(overlay)
-          }}
-        />
-      </CollapsibleSection>
     </aside>
   )
 }

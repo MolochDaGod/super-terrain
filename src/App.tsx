@@ -1,13 +1,13 @@
 import { useEffect, useMemo } from 'react'
-import { AlertTriangle, Cpu } from 'lucide-react'
+import { AlertTriangle, Cpu, Wrench } from 'lucide-react'
 import { EditorShortcuts } from './components/editor/EditorShortcuts'
 import { HelpOverlay } from './components/editor/HelpOverlay'
 import { InspectorPanel } from './components/editor/InspectorPanel'
-import { LightsPanel } from './components/editor/LightsPanel'
+import { EditorMenuBar } from './components/editor/MenuBar'
+import { ObjectToolbar } from './components/editor/ObjectToolbar'
 import { PerformanceHud } from './components/editor/PerformanceHud'
 import { StatusBar } from './components/editor/StatusBar'
 import { ToolRail } from './components/editor/ToolRail'
-import { TopBar } from './components/editor/TopBar'
 import { WorldTerrain } from './terrain/WorldTerrain'
 import { EditorStore } from './terrain/editor/EditorStore'
 import { TerrainScene } from './terrain/react/TerrainScene'
@@ -82,19 +82,41 @@ function App() {
       {editorUiVisible && (
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,transparent_35%,rgba(2,8,7,0.34)_100%)]" />
       )}
-      {!view.hideUi && <TopBar terrain={terrain} editor={editor} />}
+      {editorUiVisible && <EditorMenuBar terrain={terrain} editor={editor} />}
       {editorUiVisible && (
         <>
+          <ObjectToolbar terrain={terrain} editor={editor} />
           <ToolRail editor={editor} />
-          <LightsPanel editor={editor} />
           <InspectorPanel terrain={terrain} editor={editor} />
           <PerformanceHud terrain={terrain} editor={editor} />
           <HelpOverlay editor={editor} />
-          <EditorShortcuts editor={editor} />
+          <StatusBar terrain={terrain} editor={editor} />
         </>
       )}
-      {!view.hideUi && <StatusBar terrain={terrain} editor={editor} />}
+      {/* Shortcuts stay bound in clean mode: Esc and the eye button are how
+          the editor comes back once every panel is hidden. */}
+      {!view.hideUi && <EditorShortcuts terrain={terrain} editor={editor} />}
+      {!view.hideUi && editorSnapshot.uiViewMode === 'clean' && (
+        <RestoreUiButton editor={editor} />
+      )}
     </main>
+  )
+}
+
+/** The single control that survives "hide all editor UI". */
+function RestoreUiButton({ editor }: { editor: EditorStore }) {
+  return (
+    <button
+      type="button"
+      title="Show editor UI"
+      aria-label="Show editor UI"
+      className="pointer-events-auto absolute right-3 top-3 z-30 grid size-8 place-items-center rounded-lg border border-white/[0.09] bg-[#0b1312]/80 text-white/45 backdrop-blur-xl transition hover:text-white/85"
+      onClick={() =>
+        editor.patch({ uiViewMode: 'editor', status: 'Editor UI restored' })
+      }
+    >
+      <Wrench size={14} />
+    </button>
   )
 }
 

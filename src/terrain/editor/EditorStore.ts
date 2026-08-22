@@ -55,8 +55,8 @@ export type InspectorSection =
   | 'materials'
   | 'rocks'
   | 'csg'
+  | 'lights'
   | 'modifiers'
-  | 'display'
 
 /**
  * The section a tool needs. Switching tools opens it, so the panel below the
@@ -114,6 +114,11 @@ export interface EditorSnapshot {
   cursorNormal: Vec3Like
   cursorVisible: boolean
   dragging: boolean
+  /**
+   * Set by "frame selection". The camera consumes it once and the nonce is
+   * what makes framing the same object twice in a row still move the camera.
+   */
+  focusRequest?: { position: Vec3Like; nonce: number }
   selectedSection?: SectionId
   selectedModifierId?: string
   selectedRockId?: string
@@ -190,6 +195,14 @@ export class EditorStore extends ExternalStore<EditorSnapshot> {
     this.patch({ cursorVisible: false })
   }
 
+  /** Ask the orbit camera to centre on a world point. */
+  requestFocus(position: Vec3Like): void {
+    const previous = this.getSnapshot().focusRequest
+    this.patch({
+      focusRequest: { position: { ...position }, nonce: (previous?.nonce ?? 0) + 1 },
+    })
+  }
+
   addLight(type: EditorLightType): string {
     const snapshot = this.getSnapshot()
     const position = snapshot.cursorVisible
@@ -213,6 +226,28 @@ export class EditorStore extends ExternalStore<EditorSnapshot> {
       status: `${light.name} added at ${snapshot.cursorVisible ? 'terrain cursor' : 'world origin'}`,
     })
     return id
+  }
+
+  /** Copy a light and select the copy, offset so it is not hidden inside the original. */
+  duplicateLight(id: string): string | undefined {
+    const snapshot = this.getSnapshot()
+    const source = snapshot.lights.find((entry) => entry.id === id)
+    if (!source) return undefined
+    const typeIndex =
+      snapshot.lights.filter((light) => light.type === source.type).length + 1
+    const copyId = `light-${nextLightId++}`
+    const copy: EditorLight = {
+      ...source,
+      id: copyId,
+      name: `${source.type === 'point' ? 'Point' : 'Spot'} Light ${typeIndex}`,
+      position: { ...source.position, x: source.position.x + 12 },
+    }
+    this.patch({
+      lights: [...snapshot.lights, copy],
+      selectedLightId: copyId,
+      status: `${source.name} duplicated`,
+    })
+    return copyId
   }
 
   updateLight(id: string, values: EditorLightPatch): void {

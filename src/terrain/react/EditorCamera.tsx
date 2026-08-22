@@ -11,6 +11,8 @@ import { currentViewUrlState } from './viewUrlState'
 const DISABLED_MOUSE_ACTION = -1 as (typeof MOUSE)[keyof typeof MOUSE]
 const FLY_SPEED = 24
 const FLY_BOOST_SPEED = 480
+/** How far back "frame selection" sits from its target in fly mode. */
+const FOCUS_DISTANCE = 90
 
 interface EditorCameraProps {
   terrain: WorldTerrain
@@ -21,7 +23,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
   const controls = useRef<OrbitControlsImpl>(null)
   const camera = useThree((state) => state.camera)
   const canvas = useThree((state) => state.gl.domElement)
-  const { cameraMode, dragging } = useEditorSnapshot(editor)
+  const { cameraMode, dragging, focusRequest } = useEditorSnapshot(editor)
   const keys = useRef(new Set<string>())
   const forward = useRef(new Vector3())
   const right = useRef(new Vector3())
@@ -32,6 +34,9 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
   const urlView = useRef(currentViewUrlState())
   const hasFlown = useRef(false)
   const pointerLocked = useRef(false)
+  const appliedFocus = useRef(0)
+  const focusTarget = useRef(new Vector3())
+  const focusOffset = useRef(new Vector3())
 
   // TerrainView's frame callback is registered before this component's. Seed
   // the orbit focus during layout so the very first streaming pass cannot
@@ -49,6 +54,39 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
     }
     terrain.setViewTarget(controller.target)
   }, [terrain])
+
+  // "Frame selection". The nonce, not the position, is what marks a request as
+  // unconsumed — framing the same object twice in a row still has to move the
+  // camera back after the user has orbited away from it.
+  useEffect(() => {
+    const controller = controls.current
+    if (!controller || !focusRequest) return
+    if (focusRequest.nonce === appliedFocus.current) return
+    appliedFocus.current = focusRequest.nonce
+
+    const target = focusTarget.current.set(
+      focusRequest.position.x,
+      focusRequest.position.y,
+      focusRequest.position.z,
+    )
+    const offset = focusOffset.current
+    if (cameraMode === 'fly') {
+      // No orbit target to preserve in fly mode, so back off along the
+      // camera's own facing and leave the look direction alone.
+      camera.getWorldDirection(offset)
+      camera.position.copy(target).addScaledVector(offset, -FOCUS_DISTANCE)
+      terrain.setViewTarget(target)
+      return
+    }
+    offset.copy(camera.position).sub(controller.target)
+    const distance = MathUtils.clamp(offset.length(), 24, 400)
+    if (offset.lengthSq() < 1e-6) offset.set(0, 0.4, 1)
+    offset.normalize().multiplyScalar(distance)
+    controller.target.copy(target)
+    camera.position.copy(target).add(offset)
+    controller.update()
+    terrain.setViewTarget(controller.target)
+  }, [camera, cameraMode, focusRequest, terrain])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

@@ -1,4 +1,4 @@
-import { Layers3, Plus } from 'lucide-react'
+import { Layers3 } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
 import {
@@ -55,17 +55,6 @@ export function SculptLayersPanel({
           />
         ))}
       </div>
-
-      <button
-        type="button"
-        className="panel-button w-full"
-        onClick={() => {
-          const id = terrain.addSculptLayer()
-          editor.patch({ activeSculptLayerId: id, status: 'Sculpt layer added' })
-        }}
-      >
-        <Plus size={12} /> Add layer
-      </button>
 
       {active && (
         <div className="space-y-3 rounded-lg border border-white/[0.06] bg-white/[0.018] p-2.5">
