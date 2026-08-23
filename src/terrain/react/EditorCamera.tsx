@@ -4,7 +4,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { Euler, MathUtils, MOUSE, Vector3 } from 'three'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { WorldTerrain } from '../WorldTerrain'
-import type { EditorStore } from '../editor/EditorStore'
+import type { EditorStore, EditorTool } from '../editor/EditorStore'
 import { useEditorSnapshot } from './hooks'
 import { currentViewUrlState } from './viewUrlState'
 
@@ -37,6 +37,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
   const appliedFocus = useRef(0)
   const focusTarget = useRef(new Vector3())
   const focusOffset = useRef(new Vector3())
+  const toolBeforeSpace = useRef<EditorTool | undefined>(undefined)
 
   // TerrainView's frame callback is registered before this component's. Seed
   // the orbit focus during layout so the very first streaming pass cannot
@@ -89,8 +90,28 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
   }, [camera, cameraMode, focusRequest, terrain])
 
   useEffect(() => {
+    const restoreToolAfterSpace = () => {
+      const previousTool = toolBeforeSpace.current
+      if (previousTool === undefined) return
+      toolBeforeSpace.current = undefined
+      if (editor.getSnapshot().tool !== previousTool) {
+        editor.patch({ tool: previousTool })
+      }
+    }
+
     const onKeyDown = (event: KeyboardEvent) => {
       keys.current.add(event.code)
+      if (
+        event.code === 'Space' &&
+        document.activeElement === canvas
+      ) {
+        event.preventDefault()
+        if (toolBeforeSpace.current === undefined) {
+          const currentTool = editor.getSnapshot().tool
+          toolBeforeSpace.current = currentTool
+          if (currentTool !== 'camera') editor.patch({ tool: 'camera' })
+        }
+      }
       if (
         editor.getSnapshot().cameraMode === 'fly' &&
         document.pointerLockElement === canvas &&
@@ -99,15 +120,42 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
         event.preventDefault()
       }
     }
-    const onKeyUp = (event: KeyboardEvent) => keys.current.delete(event.code)
-    const onBlur = () => keys.current.clear()
+    const onKeyUp = (event: KeyboardEvent) => {
+      keys.current.delete(event.code)
+      if (event.code === 'Space') restoreToolAfterSpace()
+    }
+    const onWindowBlur = () => {
+      keys.current.clear()
+      restoreToolAfterSpace()
+    }
+    const onCanvasBlur = () => restoreToolAfterSpace()
+    const activateCanvas = (event: PointerEvent) => {
+      if (event.composedPath().includes(canvas)) {
+        canvas.focus({ preventScroll: true })
+      } else if (document.activeElement === canvas) {
+        canvas.blur()
+      }
+    }
+
+    // A canvas is not keyboard-focusable by default. Making the viewport an
+    // explicit focus target scopes Space to the last surface the user clicked,
+    // so it cannot steal typing or activate while an editor panel is in use.
+    const previousTabIndex = canvas.getAttribute('tabindex')
+    canvas.tabIndex = 0
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
-    window.addEventListener('blur', onBlur)
+    window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('pointerdown', activateCanvas, true)
+    canvas.addEventListener('blur', onCanvasBlur)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
-      window.removeEventListener('blur', onBlur)
+      window.removeEventListener('blur', onWindowBlur)
+      window.removeEventListener('pointerdown', activateCanvas, true)
+      canvas.removeEventListener('blur', onCanvasBlur)
+      restoreToolAfterSpace()
+      if (previousTabIndex === null) canvas.removeAttribute('tabindex')
+      else canvas.setAttribute('tabindex', previousTabIndex)
     }
   }, [canvas, editor])
 
@@ -256,7 +304,8 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
       controller.mouseButtons.RIGHT = DISABLED_MOUSE_ACTION
       return
     }
-    const editing = editor.getSnapshot().tool !== 'select'
+    const tool = editor.getSnapshot().tool
+    const editing = tool !== 'camera' && tool !== 'select'
     const alternateOrbit = active.has('AltLeft') || active.has('AltRight')
     controller.mouseButtons.LEFT =
       !editing || alternateOrbit ? MOUSE.ROTATE : DISABLED_MOUSE_ACTION
@@ -295,6 +344,7 @@ export function EditorCamera({ terrain, editor }: EditorCameraProps) {
     <OrbitControls
       ref={controls}
       makeDefault
+      domElement={canvas}
       enabled={cameraMode === 'orbit' && !dragging}
       target={urlView.current.target ?? [340, 105, 245]}
       enableDamping
