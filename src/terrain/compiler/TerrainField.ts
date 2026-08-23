@@ -6,6 +6,10 @@ import type {
   BrushStrokeModifier,
   TerrainModifier,
 } from '../modifiers/types'
+import {
+  nearbyBrushSampleIndices,
+  supportsIndexedBrushEvaluation,
+} from './BrushSampleIndex'
 
 export function evaluateHeight(
   worldX: number,
@@ -204,7 +208,12 @@ function applyBrushToPoint(
   base: Vec3Like,
   modifier: BrushStrokeModifier,
 ): void {
-  for (const sample of modifier.points) {
+  const sampleIndices = supportsIndexedBrushEvaluation(modifier)
+    ? nearbyBrushSampleIndices(modifier, point)
+    : undefined
+  const count = sampleIndices?.length ?? modifier.points.length
+  for (let orderedIndex = 0; orderedIndex < count; orderedIndex += 1) {
+    const sample = modifier.points[sampleIndices?.[orderedIndex] ?? orderedIndex]
     const dx = point.x - sample.x
     const dy = point.y - sample.y
     const dz = point.z - sample.z

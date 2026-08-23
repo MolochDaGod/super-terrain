@@ -27,10 +27,14 @@ export type ResidencyState =
 
 export interface CompiledLOD {
   level: number
+  /** Finest source level this artifact was simplified from. */
+  sourceLevel?: number
   geometricError: number
   positions: Float32Array
   /** Two u32 words per vertex; compiler-stable and renderer-neutral. */
   stableVertexIds?: Uint32Array
+  /** Authoritative source vertex retained for every compacted vertex. */
+  sourceVertexIndices?: Uint32Array
   normals: Float32Array
   colors: Float32Array
   /** Five normalized u16 vec4 streams containing packed material fields and layer weights. */

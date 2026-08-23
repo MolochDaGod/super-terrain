@@ -6,12 +6,22 @@ import type { TerrainRenderBackend } from './rendering/TerrainRenderBackend'
 import { WorldTerrain } from './WorldTerrain'
 import { graniteMassingPreset } from './rocks/types'
 import { THRUST_MODIFIER_IDS } from './demo/createThrustFormation'
+import { compileTerrainSection, evaluateHeight } from './compiler/compileSection'
+import type { TerrainCompiler } from './compiler/TerrainCompiler'
+import { encodeModifiers } from './workers/protocol'
 
 class FakeWorker {
+  static instances: FakeWorker[] = []
   onmessage: ((event: MessageEvent) => void) | null = null
   onerror: ((event: ErrorEvent) => void) | null = null
+  terminated = false
+  constructor() {
+    FakeWorker.instances.push(this)
+  }
   postMessage(): void {}
-  terminate(): void {}
+  terminate(): void {
+    this.terminated = true
+  }
 }
 
 const memoryStorage: TerrainStorage = {
@@ -26,6 +36,7 @@ describe('world terrain brush sessions', () => {
   const OriginalWorker = globalThis.Worker
 
   beforeEach(() => {
+    FakeWorker.instances = []
     globalThis.Worker = FakeWorker as unknown as typeof Worker
   })
 
@@ -168,6 +179,43 @@ describe('world terrain brush sessions', () => {
     for (const section of terrain.partition.values()) {
       expect(section.revision).toBe(1)
     }
+    terrain.dispose()
+  })
+
+  it('commits weight paint by reusing resident geometry when provenance is current', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    const section = terrain.partition.getOrCreate({ x: 0, z: 0 })
+    const compiled = compileTerrainSection({
+      kind: 'compile-section',
+      jobId: 1,
+      key: section.key,
+      revision: section.revision,
+      priority: 1,
+      config: {
+        sectionSize: 128,
+        lodResolutions: [8, 4],
+        seed: 17,
+        operationHalo: 8,
+      },
+      modifiers: encodeModifiers([]),
+    })
+    section.compiled = compiled
+    section.buildState = 'clean'
+
+    const editor = new EditorStore()
+    editor.patch({ tool: 'paint', brushRadius: 40, brushStrength: 1 })
+    terrain.beginStroke(
+      { x: 64, y: evaluateHeight(64, 64, 17, []), z: 64 },
+      { x: 0, y: 1, z: 0 },
+      editor.getSnapshot(),
+    )
+    terrain.endStroke()
+
+    const repainted = section.pendingCompiled!
+    expect(repainted.sourceRevision).toBe(1)
+    expect(repainted.lods[0].positions).toBe(compiled.lods[0].positions)
+    expect(repainted.lods[0].indices).toBe(compiled.lods[0].indices)
+    expect(Math.max(...repainted.lods[0].paintWeights!)).toBeGreaterThan(0)
     terrain.dispose()
   })
 
@@ -334,6 +382,30 @@ describe('world terrain brush sessions', () => {
       terrain.replaceSectionMesh({ x: 0, z: 0 }, triangleSource('too-large')),
     ).toThrow(/budget exceeded/)
     expect(terrain.partition.get({ x: 0, z: 0 })).toBeUndefined()
+    terrain.dispose()
+  })
+
+  it('does not requeue a compile that is still buffered by its worker', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    const section = terrain.partition.getOrCreate({ x: 0, z: 0 }, 0)
+    const internals = terrain as unknown as {
+      compiler: TerrainCompiler
+      sweepStuckBuilds(now: number): void
+    }
+    const jobId = internals.compiler.queue(
+      section.key,
+      section.revision,
+      1,
+      [],
+      [4],
+    )
+    terrain.partition.markBuilding(section, jobId, 4, 0)
+
+    internals.sweepStuckBuilds(25_000)
+
+    expect(section.buildState).toBe('building')
+    expect(section.buildJobId).toBe(jobId)
+    expect(FakeWorker.instances[0].terminated).toBe(false)
     terrain.dispose()
   })
 

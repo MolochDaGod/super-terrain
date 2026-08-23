@@ -22,7 +22,6 @@ import type {
   RemeshModifier,
   TerrainModifier,
   TessellateModifier,
-  WeightPaintModifier,
 } from '../modifiers/types'
 import { materializeModifierTransforms } from '../modifiers/transform'
 import type { CompileSectionRequest } from '../workers/protocol'
@@ -38,7 +37,12 @@ import {
   evaluateTerrainMaterialFields,
   type TerrainLayerWeights,
 } from './TerrainMaterialFields'
-import { paintChannelIndex } from '../rendering/materialSettings'
+import {
+  hasNearbyBrushSample,
+} from './BrushSampleIndex'
+import { createMeshTopology, type MeshTopology } from './MeshTopology'
+import { calculatePaintWeights } from './PaintWeights'
+import { createErrorBoundedHeightMesh } from './AdaptiveHeightMesh'
 
 export { evaluateHeight } from './TerrainField'
 
@@ -46,6 +50,8 @@ interface GeneratedMesh {
   positions: Float32Array
   /** Two u32 words per vertex. */
   stableVertexIds: Uint32Array
+  /** Vertex in the authoritative source from which this one was retained. */
+  sourceVertexIndices: Uint32Array
   normals: Float32Array
   colors: Float32Array
   surfaceFields: readonly [
@@ -59,6 +65,8 @@ interface GeneratedMesh {
   indices: Uint32Array
   /** Vertices authored by a modifier that must survive every LOD. */
   featureLocks: Uint8Array
+  /** Sampled deviation introduced before QEM simplification. */
+  approximationError: number
   warnings: number
   hasArbitraryTopology: boolean
 }
@@ -129,29 +137,39 @@ export function compileTerrainSection(
     maxZ = Math.max(maxZ, originZ + source.positions[index + 2])
   }
 
-  const sourceGeometricError = sourceLevel === 0
-    ? 0
-    : lodErrorBudget(request.config.sectionSize, sourceResolution)
+  const sourceGeometricError =
+    (sourceLevel === 0
+      ? 0
+      : lodErrorBudget(request.config.sectionSize, sourceResolution)) +
+    source.approximationError
   let previousError = sourceGeometricError
+  let previousMesh = source
   for (const level of requestedLevels) {
     const resolution = request.config.lodResolutions[level]
     const simplified = level === sourceLevel
       ? { mesh: source, geometricError: previousError }
       : simplifyGeneratedMesh(
-          source,
-          sourceResolution,
-          resolution,
+          previousMesh,
+          targetIndexCount(
+            source.indices.length,
+            sourceResolution,
+            resolution,
+          ),
           request.config.sectionSize,
-          sourceGeometricError,
+          resolution,
+          previousError,
         )
     const generated = simplified.mesh
     previousError = Math.max(previousError, simplified.geometricError)
+    previousMesh = generated
     const gpuBytes = generatedMeshBytes(generated)
     lods.push({
       level,
+      sourceLevel,
       geometricError: previousError,
       positions: generated.positions,
       stableVertexIds: generated.stableVertexIds,
+      sourceVertexIndices: generated.sourceVertexIndices,
       normals: generated.normals,
       colors: generated.colors,
       surfaceFields: generated.surfaceFields,
@@ -160,7 +178,10 @@ export function compileTerrainSection(
       triangleCount: generated.indices.length / 3,
       gpuBytes,
     })
-    cpuBytes += gpuBytes + generated.stableVertexIds.byteLength
+    cpuBytes +=
+      gpuBytes +
+      generated.stableVertexIds.byteLength +
+      generated.sourceVertexIndices.byteLength
     gpuBytesTotal += gpuBytes
     if (generated !== source) warnings += generated.warnings
   }
@@ -204,26 +225,18 @@ function normalizedRequestedLevels(request: CompileSectionRequest): number[] {
 
 function simplifyGeneratedMesh(
   source: GeneratedMesh,
-  sourceResolution: number,
-  targetResolution: number,
+  desiredIndexCount: number,
   sectionSize: number,
+  targetResolution: number,
   sourceGeometricError: number,
 ): { mesh: GeneratedMesh; geometricError: number } {
-  if (!meshSimplifierAvailable || targetResolution >= sourceResolution) {
+  if (!meshSimplifierAvailable || desiredIndexCount >= source.indices.length) {
     return {
       mesh: cloneGeneratedMesh(source),
       geometricError: sourceGeometricError,
     }
   }
 
-  const triangleRatio = (targetResolution / sourceResolution) ** 2
-  const targetIndexCount = Math.max(
-    3,
-    Math.min(
-      source.indices.length,
-      Math.floor((source.indices.length * triangleRatio) / 3) * 3,
-    ),
-  )
   const absoluteErrorLimit = Math.max(
     0.01,
     lodErrorBudget(sectionSize, targetResolution) - sourceGeometricError,
@@ -237,7 +250,7 @@ function simplifyGeneratedMesh(
       3,
       [0.5, 0.5, 0.5],
       source.featureLocks,
-      targetIndexCount,
+      desiredIndexCount,
       absoluteErrorLimit,
       ['LockBorder', 'ErrorAbsolute'],
     )
@@ -258,10 +271,26 @@ function simplifyGeneratedMesh(
   }
 }
 
+function targetIndexCount(
+  sourceIndexCount: number,
+  sourceResolution: number,
+  targetResolution: number,
+): number {
+  const triangleRatio = (targetResolution / sourceResolution) ** 2
+  return Math.max(
+    3,
+    Math.min(
+      sourceIndexCount,
+      Math.floor((sourceIndexCount * triangleRatio) / 3) * 3,
+    ),
+  )
+}
+
 function cloneGeneratedMesh(source: GeneratedMesh): GeneratedMesh {
   return {
     positions: new Float32Array(source.positions),
     stableVertexIds: new Uint32Array(source.stableVertexIds),
+    sourceVertexIndices: new Uint32Array(source.sourceVertexIndices),
     normals: new Float32Array(source.normals),
     colors: new Float32Array(source.colors),
     surfaceFields: source.surfaceFields.map((field) =>
@@ -270,6 +299,7 @@ function cloneGeneratedMesh(source: GeneratedMesh): GeneratedMesh {
     paintWeights: new Uint16Array(source.paintWeights),
     indices: new Uint32Array(source.indices),
     featureLocks: new Uint8Array(source.featureLocks),
+    approximationError: source.approximationError,
     warnings: source.warnings,
     hasArbitraryTopology: source.hasArbitraryTopology,
   }
@@ -285,6 +315,12 @@ function compactGeneratedMesh(
   const stableVertexIds = remapUint32Stream(
     source.stableVertexIds,
     2,
+    remap,
+    vertexCount,
+  )
+  const sourceVertexIndices = remapUint32Stream(
+    source.sourceVertexIndices,
+    1,
     remap,
     vertexCount,
   )
@@ -311,12 +347,14 @@ function compactGeneratedMesh(
   return {
     positions,
     stableVertexIds,
+    sourceVertexIndices,
     normals,
     colors,
     surfaceFields,
     paintWeights,
     indices,
     featureLocks,
+    approximationError: source.approximationError,
     warnings: validation.warnings.length,
     hasArbitraryTopology: source.hasArbitraryTopology,
   }
@@ -382,6 +420,14 @@ function remapVertexStream(
   }
 }
 
+function sequentialVertexIndices(vertexCount: number): Uint32Array {
+  const indices = new Uint32Array(vertexCount)
+  for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+    indices[vertex] = vertex
+  }
+  return indices
+}
+
 function lodErrorBudget(sectionSize: number, resolution: number): number {
   return (sectionSize / Math.max(1, resolution)) * POSITION_ERROR_FRACTION
 }
@@ -437,53 +483,72 @@ function generateSectionMesh(
   // Procedural content can still create these modifiers, but the compiler must
   // never inject world-wide booleans behind the stack's back.
   const booleanOperations = collectBooleanOperations(modifiers)
-  const xAxis = createAdaptiveAxis(
-    originX,
-    sectionSize,
-    resolution,
-    densityModifiers,
-    'x',
-  )
-  const zAxis = createAdaptiveAxis(
-    originZ,
-    sectionSize,
-    resolution,
-    densityModifiers,
-    'z',
-  )
-  const positions: number[] = []
-  const parameters: number[] = []
-  const indices: number[] = []
+  const adaptive = supportsAdaptiveSourceMesh(modifiers, densityModifiers)
+    ? createErrorBoundedHeightMesh({
+        originX,
+        originZ,
+        size: sectionSize,
+        resolution,
+        errorTolerance: lodErrorBudget(sectionSize, resolution),
+        evaluate: (worldX, worldZ) =>
+          evaluateTerrainPoint(worldX, worldZ, seed, modifiers),
+      })
+    : undefined
+  let positionArray: Float32Array
+  let indexArray: Uint32Array
+  let parameters: number[]
+  if (adaptive) {
+    positionArray = adaptive.positions
+    indexArray = adaptive.indices
+    parameters = adaptive.parameters
+  } else {
+    const xAxis = createAdaptiveAxis(
+      originX,
+      sectionSize,
+      resolution,
+      densityModifiers,
+      'x',
+    )
+    const zAxis = createAdaptiveAxis(
+      originZ,
+      sectionSize,
+      resolution,
+      densityModifiers,
+      'z',
+    )
+    const positions: number[] = []
+    parameters = []
+    const indices: number[] = []
 
-  for (const worldZ of zAxis) {
-    for (const worldX of xAxis) {
-      const point = evaluateTerrainPoint(worldX, worldZ, seed, modifiers)
-      positions.push(
-        point.x - originX,
-        point.y,
-        point.z - originZ,
-      )
-      parameters.push(worldX, worldZ)
-    }
-  }
-
-  const width = xAxis.length
-  for (let z = 0; z < zAxis.length - 1; z += 1) {
-    for (let x = 0; x < xAxis.length - 1; x += 1) {
-      const a = z * width + x
-      const b = a + 1
-      const c = a + width
-      const d = c + 1
-      if ((x + z) % 2 === 0) {
-        indices.push(a, c, b, b, c, d)
-      } else {
-        indices.push(a, c, d, a, d, b)
+    for (const worldZ of zAxis) {
+      for (const worldX of xAxis) {
+        const point = evaluateTerrainPoint(worldX, worldZ, seed, modifiers)
+        positions.push(
+          point.x - originX,
+          point.y,
+          point.z - originZ,
+        )
+        parameters.push(worldX, worldZ)
       }
     }
-  }
 
-  const positionArray = Float32Array.from(positions)
-  const indexArray = Uint32Array.from(indices)
+    const width = xAxis.length
+    for (let z = 0; z < zAxis.length - 1; z += 1) {
+      for (let x = 0; x < xAxis.length - 1; x += 1) {
+        const a = z * width + x
+        const b = a + 1
+        const c = a + width
+        const d = c + 1
+        if ((x + z) % 2 === 0) {
+          indices.push(a, c, b, b, c, d)
+        } else {
+          indices.push(a, c, d, a, d, b)
+        }
+      }
+    }
+    positionArray = Float32Array.from(positions)
+    indexArray = Uint32Array.from(indices)
+  }
   const surfaceNormals = calculateNormals(positionArray, indexArray)
   stabilizeBoundaryNormals(
     surfaceNormals,
@@ -555,6 +620,7 @@ function generateSectionMesh(
           key,
           sectionSize,
         ),
+    sourceVertexIndices: sequentialVertexIndices(result.positions.length / 3),
     normals: result.normals,
     colors,
     surfaceFields,
@@ -568,6 +634,7 @@ function generateSectionMesh(
       sectionSize / resolution,
       modifiers,
     ),
+    approximationError: adaptive?.sampledError ?? 0,
     warnings: validation.warnings.length,
     hasArbitraryTopology:
       booleanOperations.length > 0 || hasLateralDisplacement(modifiers),
@@ -709,12 +776,14 @@ function generateEditableSectionMesh(
           source.boundaryEdgeMasks,
           source.boundaryWeldKeys,
         ),
+    sourceVertexIndices: sequentialVertexIndices(result.positions.length / 3),
     normals: result.normals,
     colors,
     surfaceFields,
     paintWeights,
     indices: result.indices,
     featureLocks,
+    approximationError: 0,
     warnings: sourceValidation.warnings.length + validation.warnings.length,
     hasArbitraryTopology: true,
   }
@@ -1039,16 +1108,8 @@ function createFeatureLocks(
       // calculated. Include that displacement so edge vertices cannot escape
       // the authored region and then be simplified away.
       const radius = modifier.radius + padding + 2.8
-      for (const sample of modifier.points) {
-        const dx = x - sample.x
-        const dz = z - sample.z
-        const distance = modifier.domain === 'heightfield'
-          ? Math.hypot(dx, dz)
-          : Math.hypot(dx, y - sample.y, dz)
-        if (distance <= radius) {
-          locks[vertex] = 1
-          break
-        }
+      if (hasNearbyBrushSample(modifier, { x, y, z }, radius)) {
+        locks[vertex] = 1
       }
       if (locks[vertex] === 1) break
     }
@@ -1059,56 +1120,6 @@ function createFeatureLocks(
 const PACKED_UNIT_MAX = 65_535
 const BEDDED_OFFSET_RANGE = 16
 const PATCH_MATERIAL_TRANSITION_METRES = 12
-
-function calculatePaintWeights(
-  positions: Float32Array,
-  originX: number,
-  originZ: number,
-  modifiers: readonly TerrainModifier[],
-): Uint16Array {
-  const strokes = modifiers.filter(
-    (modifier): modifier is WeightPaintModifier =>
-      modifier.enabled && modifier.type === 'weight-paint',
-  )
-  const weights = new Float32Array((positions.length / 3) * 4)
-
-  for (const stroke of strokes) {
-    const channel = paintChannelIndex(stroke.channel)
-    const direction = stroke.mode === 'subtract' ? -1 : 1
-    const exponent = 1 + clamp(stroke.falloff, 0, 1) * 4
-    for (let vertex = 0; vertex < positions.length / 3; vertex += 1) {
-      const positionOffset = vertex * 3
-      const worldX = originX + positions[positionOffset]
-      const worldY = positions[positionOffset + 1]
-      const worldZ = originZ + positions[positionOffset + 2]
-      let influence = 0
-      for (const sample of stroke.points) {
-        const distance = Math.hypot(
-          worldX - sample.x,
-          worldY - sample.y,
-          worldZ - sample.z,
-        )
-        if (distance >= stroke.radius) continue
-        const radial = 1 - distance / Math.max(0.001, stroke.radius)
-        influence +=
-          Math.pow(smoothstep(0, 1, radial), exponent) * sample.weight
-      }
-      if (influence <= 0) continue
-      const target = vertex * 4 + channel
-      weights[target] = clamp(
-        weights[target] + direction * influence * stroke.strength,
-        0,
-        1,
-      )
-    }
-  }
-
-  const packed = new Uint16Array(weights.length)
-  for (let index = 0; index < weights.length; index += 1) {
-    packed[index] = Math.round(clamp(weights[index], 0, 1) * PACKED_UNIT_MAX)
-  }
-  return packed
-}
 
 /**
  * Geodesic distance from the fused terrain/patch curve, evaluated only across
@@ -1288,6 +1299,7 @@ function calculateSurfaceFields(
   seed: number,
 ): readonly [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] {
   const vertexCount = positions.length / 3
+  const topology = createMeshTopology(vertexCount, indices)
   const packed: [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] = [
     new Uint16Array(vertexCount * 4),
     new Uint16Array(vertexCount * 4),
@@ -1298,10 +1310,10 @@ function calculateSurfaceFields(
   const occlusion = calculateMeshOcclusion(
     positions,
     normals,
-    indices,
+    topology,
     interiorVertices,
   )
-  const curvature = calculateMeshCurvature(positions, normals, indices)
+  const curvature = calculateMeshCurvature(positions, normals, topology)
   const patchFoundationBlend = calculatePatchFoundationBlend(
     positions,
     indices,
@@ -1399,16 +1411,23 @@ function calculateSurfaceFields(
 function calculateMeshCurvature(
   positions: Float32Array,
   normals: Float32Array,
-  indices: Uint32Array,
+  topology: MeshTopology,
 ): Float32Array {
-  const vertexCount = positions.length / 3
+  const vertexCount = topology.vertexCount
   const sum = new Float32Array(vertexCount)
-  const counts = new Uint32Array(vertexCount)
+  const validCounts = new Uint32Array(vertexCount)
 
-  for (let index = 0; index < indices.length; index += 3) {
-    for (let edge = 0; edge < 3; edge += 1) {
-      const a = indices[index + edge]
-      const b = indices[index + ((edge + 1) % 3)]
+  for (let a = 0; a < vertexCount; a += 1) {
+    for (
+      let neighbor = topology.neighborOffsets[a];
+      neighbor < topology.neighborOffsets[a + 1];
+      neighbor += 1
+    ) {
+      const b = topology.neighbors[neighbor]
+      // Every triangle contributes both directions to the CSR. Visiting the
+      // lower endpoint retains one occurrence per triangle edge without a
+      // second edge buffer.
+      if (a >= b) continue
       const pa = a * 3
       const pb = b * 3
       const dx = positions[pb] - positions[pa]
@@ -1426,15 +1445,15 @@ function calculateMeshCurvature(
       const value = turn / (length * length)
       sum[a] += value
       sum[b] += value
-      counts[a] += 1
-      counts[b] += 1
+      validCounts[a] += 1
+      validCounts[b] += 1
     }
   }
 
   const raw = new Float32Array(vertexCount)
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
-    if (counts[vertex] === 0) continue
-    raw[vertex] = sum[vertex] / counts[vertex]
+    if (validCounts[vertex] === 0) continue
+    raw[vertex] = sum[vertex] / validCounts[vertex]
   }
 
   // Curvature measured over a single edge is dominated by whatever noise the
@@ -1446,20 +1465,21 @@ function calculateMeshCurvature(
   const accumulation = new Float32Array(vertexCount)
   for (let iteration = 0; iteration < 6; iteration += 1) {
     accumulation.fill(0)
-    counts.fill(0)
-    for (let index = 0; index < indices.length; index += 3) {
-      for (let edge = 0; edge < 3; edge += 1) {
-        const a = indices[index + edge]
-        const b = indices[index + ((edge + 1) % 3)]
-        accumulation[a] += smoothed[b]
-        accumulation[b] += smoothed[a]
-        counts[a] += 1
-        counts[b] += 1
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      for (
+        let neighbor = topology.neighborOffsets[vertex];
+        neighbor < topology.neighborOffsets[vertex + 1];
+        neighbor += 1
+      ) {
+        accumulation[vertex] += smoothed[topology.neighbors[neighbor]]
       }
     }
     for (let vertex = 0; vertex < vertexCount; vertex += 1) {
-      if (counts[vertex] === 0) continue
-      smoothed[vertex] = accumulation[vertex] / counts[vertex]
+      const count =
+        topology.neighborOffsets[vertex + 1] -
+        topology.neighborOffsets[vertex]
+      if (count === 0) continue
+      smoothed[vertex] = accumulation[vertex] / count
     }
   }
 
@@ -1482,31 +1502,39 @@ function calculateMeshCurvature(
 function calculateMeshOcclusion(
   positions: Float32Array,
   normals: Float32Array,
-  indices: Uint32Array,
+  topology: MeshTopology,
   interiorVertices: Uint8Array,
 ): Float32Array {
-  const vertexCount = positions.length / 3
+  const vertexCount = topology.vertexCount
   let smoothed = new Float32Array(positions)
+  let next = new Float32Array(smoothed.length)
   const cavity = new Float32Array(vertexCount)
   const accumulation = new Float32Array(positions.length)
-  const counts = new Uint32Array(vertexCount)
 
   for (let iteration = 0; iteration < 8; iteration += 1) {
     accumulation.fill(0)
-    counts.fill(0)
-    for (let offset = 0; offset < indices.length; offset += 3) {
-      const a = indices[offset]
-      const b = indices[offset + 1]
-      const c = indices[offset + 2]
-      accumulateNeighbours(accumulation, counts, smoothed, a, b, c)
-      accumulateNeighbours(accumulation, counts, smoothed, b, c, a)
-      accumulateNeighbours(accumulation, counts, smoothed, c, a, b)
-    }
-
-    const next = new Float32Array(smoothed.length)
     for (let vertex = 0; vertex < vertexCount; vertex += 1) {
       const target = vertex * 3
-      const count = Math.max(1, counts[vertex])
+      for (
+        let neighbor = topology.neighborOffsets[vertex];
+        neighbor < topology.neighborOffsets[vertex + 1];
+        neighbor += 2
+      ) {
+        const first = topology.neighbors[neighbor] * 3
+        const second = topology.neighbors[neighbor + 1] * 3
+        accumulation[target] += smoothed[first] + smoothed[second]
+        accumulation[target + 1] += smoothed[first + 1] + smoothed[second + 1]
+        accumulation[target + 2] += smoothed[first + 2] + smoothed[second + 2]
+      }
+    }
+
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      const target = vertex * 3
+      const count = Math.max(
+        1,
+        topology.neighborOffsets[vertex + 1] -
+          topology.neighborOffsets[vertex],
+      )
       const meanX = accumulation[target] / count
       const meanY = accumulation[target + 1] / count
       const meanZ = accumulation[target + 2] / count
@@ -1525,7 +1553,9 @@ function calculateMeshOcclusion(
         cavity[vertex] = Math.max(cavity[vertex], inward)
       }
     }
+    const previous = smoothed
     smoothed = next
+    next = previous
   }
 
   const occlusion = new Float32Array(vertexCount)
@@ -1535,23 +1565,6 @@ function calculateMeshOcclusion(
     occlusion[vertex] = clamp(broadCavity * interiorVisibility, 0.32, 1)
   }
   return occlusion
-}
-
-function accumulateNeighbours(
-  accumulation: Float32Array,
-  counts: Uint32Array,
-  positions: Float32Array,
-  targetVertex: number,
-  firstNeighbour: number,
-  secondNeighbour: number,
-): void {
-  const target = targetVertex * 3
-  const first = firstNeighbour * 3
-  const second = secondNeighbour * 3
-  accumulation[target] += positions[first] + positions[second]
-  accumulation[target + 1] += positions[first + 1] + positions[second + 1]
-  accumulation[target + 2] += positions[first + 2] + positions[second + 2]
-  counts[targetVertex] += 2
 }
 
 function smoothstepNumber(low: number, high: number, value: number): number {
@@ -1607,6 +1620,24 @@ function createAdaptiveAxis(
     }
   }
   return [...coordinates].sort((a, b) => a - b)
+}
+
+function supportsAdaptiveSourceMesh(
+  modifiers: readonly TerrainModifier[],
+  localDensityModifiers: readonly (RemeshModifier | TessellateModifier)[],
+): boolean {
+  if (localDensityModifiers.length > 0) return false
+  return modifiers.every(
+    (modifier) =>
+      !modifier.enabled ||
+      ((modifier.type !== 'brush-stroke' || modifier.strength <= 0) &&
+        modifier.type !== 'boolean-subtract' &&
+        modifier.type !== 'boolean-volume' &&
+        // Density modifiers inside the operation halo but outside this section
+        // must not change its otherwise identical topology.
+        (modifier.type !== 'remesh' || localDensityModifiers.length === 0) &&
+        (modifier.type !== 'tessellate' || localDensityModifiers.length === 0)),
+  )
 }
 
 function densityModifierOverlapsSection(

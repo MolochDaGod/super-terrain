@@ -89,6 +89,7 @@ export class TerrainStreamer {
     editFocus?: Vec3Like,
     now = performance.now(),
     view?: StreamingView,
+    orderedHeadCount = Number.POSITIVE_INFINITY,
   ): StreamCandidate[] {
     const trackingPoint = view?.focus ?? camera
     const deltaSeconds = Math.max((now - this.previousUpdate) / 1000, 1 / 240)
@@ -218,7 +219,7 @@ export class TerrainStreamer {
 
     this.desired = nextDesired
     this.visible = nextVisible
-    candidates.sort((a, b) => b.priority - a.priority)
+    orderCandidateHead(candidates, orderedHeadCount)
     this.candidateIndex = this.candidateRecords
     this.trimEventHistory(now)
     return candidates
@@ -362,6 +363,60 @@ export class TerrainStreamer {
     this.loadEvents = this.loadEvents.filter((time) => time >= cutoff)
     this.evictionEvents = this.evictionEvents.filter((time) => time >= cutoff)
   }
+}
+
+/**
+ * Orders only the priority head consumed every frame. The rotating cold tail
+ * deliberately needs no order, so sorting a thousand entries to inspect 128
+ * of them was avoidable O(n log n) work.
+ */
+export function orderCandidateHead(
+  candidates: StreamCandidate[],
+  requestedCount: number,
+): void {
+  const count = Math.max(
+    0,
+    Math.min(candidates.length, Math.floor(requestedCount)),
+  )
+  if (count === 0 || candidates.length < 2) return
+  if (count < candidates.length) selectPriorityHead(candidates, count - 1)
+  const ordered = candidates.slice(0, count).sort(compareCandidatePriority)
+  for (let index = 0; index < ordered.length; index += 1) {
+    candidates[index] = ordered[index]
+  }
+}
+
+function selectPriorityHead(
+  candidates: StreamCandidate[],
+  target: number,
+): void {
+  let left = 0
+  let right = candidates.length - 1
+  while (left < right) {
+    const pivot = candidates[(left + right) >> 1].priority
+    let lower = left
+    let upper = right
+    while (lower <= upper) {
+      while (candidates[lower].priority > pivot) lower += 1
+      while (candidates[upper].priority < pivot) upper -= 1
+      if (lower > upper) break
+      const value = candidates[lower]
+      candidates[lower] = candidates[upper]
+      candidates[upper] = value
+      lower += 1
+      upper -= 1
+    }
+    if (target <= upper) right = upper
+    else if (target >= lower) left = lower
+    else return
+  }
+}
+
+function compareCandidatePriority(
+  first: StreamCandidate,
+  second: StreamCandidate,
+): number {
+  return second.priority - first.priority
 }
 
 export function requiredViewRadiusSections(

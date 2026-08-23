@@ -1,8 +1,10 @@
 import type { CompiledLOD, CompiledSection } from '../core/types'
 
 const MAGIC = 0x3142544d // "MTB1" in little endian.
-const FORMAT_VERSION = 1
-const ARRAY_COUNT = 11
+const LEGACY_FORMAT_VERSION = 1
+const FORMAT_VERSION = 2
+const ARRAY_COUNT = 12
+const MISSING_SOURCE_LEVEL = 0xffff_ffff
 
 type NumericArray = Float32Array | Uint32Array | Uint16Array
 type NumericArrayConstructor<T extends NumericArray> = {
@@ -43,7 +45,11 @@ export function decodeSectionBake(bytes: ArrayBuffer | Uint8Array): CompiledSect
   }
   const reader = new BinaryReader(buffer)
   if (reader.u32() !== MAGIC) throw new Error('Invalid terrain section bake signature')
-  if (reader.u32() !== FORMAT_VERSION) {
+  const formatVersion = reader.u32()
+  if (
+    formatVersion !== LEGACY_FORMAT_VERSION &&
+    formatVersion !== FORMAT_VERSION
+  ) {
     throw new Error('Unsupported terrain section bake version')
   }
   const sectionCount = reader.u32()
@@ -63,10 +69,13 @@ export function decodeSectionBake(bytes: ArrayBuffer | Uint8Array): CompiledSect
     let cpuBytes = 0
     let gpuBytes = 0
     for (let lodIndex = 0; lodIndex < lodCount; lodIndex += 1) {
-      const lod = readLod(reader)
+      const lod = readLod(reader, formatVersion)
       lods.push(lod)
       gpuBytes += lod.gpuBytes
-      cpuBytes += lod.gpuBytes + (lod.stableVertexIds?.byteLength ?? 0)
+      cpuBytes +=
+        lod.gpuBytes +
+        (lod.stableVertexIds?.byteLength ?? 0) +
+        (lod.sourceVertexIndices?.byteLength ?? 0)
     }
     const source = lods[0]!
     sections.push({
@@ -92,10 +101,12 @@ export function decodeSectionBake(bytes: ArrayBuffer | Uint8Array): CompiledSect
 
 function writeLod(writer: BinaryWriter, lod: CompiledLOD): void {
   writer.u32(lod.level)
+  writer.u32(lod.sourceLevel ?? MISSING_SOURCE_LEVEL)
   writer.f32(lod.geometricError)
   const arrays: readonly NumericArray[] = [
     lod.positions,
     lod.stableVertexIds ?? new Uint32Array(),
+    lod.sourceVertexIndices ?? new Uint32Array(),
     lod.normals,
     lod.colors,
     ...(lod.surfaceFields ?? emptySurfaceFields()),
@@ -106,11 +117,17 @@ function writeLod(writer: BinaryWriter, lod: CompiledLOD): void {
   for (const array of arrays) writer.typed(array)
 }
 
-function readLod(reader: BinaryReader): CompiledLOD {
+function readLod(reader: BinaryReader, formatVersion: number): CompiledLOD {
   const level = reader.u32()
+  const encodedSourceLevel = formatVersion >= 2
+    ? reader.u32()
+    : MISSING_SOURCE_LEVEL
   const geometricError = reader.f32()
   const positions = reader.typed(Float32Array)
   const stableVertexIds = reader.typed(Uint32Array)
+  const sourceVertexIndices = formatVersion >= 2
+    ? reader.typed(Uint32Array)
+    : new Uint32Array()
   const normals = reader.typed(Float32Array)
   const colors = reader.typed(Float32Array)
   const surfaceFields = [
@@ -131,9 +148,15 @@ function readLod(reader: BinaryReader): CompiledLOD {
     indices.byteLength
   return {
     level,
+    sourceLevel:
+      encodedSourceLevel === MISSING_SOURCE_LEVEL
+        ? undefined
+        : encodedSourceLevel,
     geometricError,
     positions,
     stableVertexIds: stableVertexIds.length > 0 ? stableVertexIds : undefined,
+    sourceVertexIndices:
+      sourceVertexIndices.length > 0 ? sourceVertexIndices : undefined,
     normals,
     colors,
     surfaceFields,

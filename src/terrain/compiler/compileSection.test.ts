@@ -415,6 +415,59 @@ describe('section compiler', () => {
     }
   })
 
+  it('records exact authoritative-vertex provenance for every LOD', () => {
+    const request = requestFor({ x: 0, z: 0 }, [], 16)
+    request.config.lodResolutions = [16, 8, 4]
+    const lods = compileTerrainSection(request).lods
+    const sourceVertexCount = lods[0].positions.length / 3
+
+    for (const lod of lods) {
+      expect(lod.sourceLevel).toBe(0)
+      expect(lod.sourceVertexIndices).toHaveLength(lod.positions.length / 3)
+      expect(
+        lod.sourceVertexIndices!.every(
+          (sourceVertex) => sourceVertex < sourceVertexCount,
+        ),
+      ).toBe(true)
+    }
+    expect(lods[0].sourceVertexIndices).toEqual(
+      Uint32Array.from({ length: sourceVertexCount }, (_, vertex) => vertex),
+    )
+    for (let level = 1; level < lods.length; level += 1) {
+      const finerSources = new Set(lods[level - 1].sourceVertexIndices)
+      expect(
+        lods[level].sourceVertexIndices!.every((sourceVertex) =>
+          finerSources.has(sourceVertex),
+        ),
+      ).toBe(true)
+      expect(lods[level].geometricError).toBeGreaterThanOrEqual(
+        lods[level - 1].geometricError,
+      )
+    }
+  })
+
+  it('reduces a natural authoritative grid only within its sampled error budget', () => {
+    const request = requestFor({ x: 0, z: 0 }, [], 88)
+    const compiled = compileTerrainSection(request)
+    const lod = compiled.lods[0]
+
+    expect(compiled.metadata.vertexCount).toBeLessThan(89 * 89)
+    expect(lod.triangleCount).toBeLessThan(88 * 88 * 2)
+    expect(lod.geometricError).toBeLessThanOrEqual((128 / 88) * 0.075 + 1e-6)
+    expect(boundaryVertices(lod)).toHaveLength(88 * 4)
+  })
+
+  it('takes larger adaptive wins on a smooth flat-profile source', () => {
+    const request = requestFor({ x: 0, z: 0 }, [], 88)
+    request.config.worldProfile = 'flat'
+    const compiled = compileTerrainSection(request)
+
+    expect(compiled.metadata.vertexCount).toBeLessThan(89 * 89 * 0.3)
+    expect(compiled.lods[0].geometricError).toBeLessThanOrEqual(
+      (128 / 88) * 0.075 + 1e-6,
+    )
+  })
+
   it('skips hidden fine topology for a procedural single-LOD request', () => {
     const request = requestFor({ x: 0, z: 0 }, [], 16)
     request.config.lodResolutions = [16, 8, 4]

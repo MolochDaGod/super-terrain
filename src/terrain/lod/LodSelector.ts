@@ -190,29 +190,51 @@ export interface LodNeighborNode {
 
 export function constrainNeighborLods(nodes: LodNeighborNode[]): Map<SectionId, number> {
   const result = new Map<SectionId, number>(nodes.map((node) => [node.id, node.lod]))
-  const coordinates = new Map(nodes.map((node) => [`${node.x}:${node.z}`, node]))
-  let changed = true
-  let pass = 0
-  while (changed && pass < 8) {
-    changed = false
-    pass += 1
-    for (const node of nodes) {
-      const current = result.get(node.id) ?? node.lod
-      for (const [dx, dz] of [
-        [1, 0],
-        [-1, 0],
-        [0, 1],
-        [0, -1],
-      ] as const) {
-        const neighbor = coordinates.get(`${node.x + dx}:${node.z + dz}`)
-        if (!neighbor) continue
-        const neighborLod = result.get(neighbor.id) ?? neighbor.lod
-        if (current > neighborLod + 1) {
-          result.set(node.id, neighborLod + 1)
-          changed = true
-        }
-      }
+  if (nodes.length === 0) return result
+  const rows = new Map<number, Map<number, LodNeighborNode>>()
+  let maximumLevel = 0
+  for (const node of nodes) {
+    let row = rows.get(node.z)
+    if (!row) {
+      row = new Map()
+      rows.set(node.z, row)
+    }
+    row.set(node.x, node)
+    maximumLevel = Math.max(maximumLevel, node.lod)
+  }
+
+  // The fixed point is min(source LOD + Manhattan distance). Unit edges and
+  // the tiny integer LOD range make Dial buckets a linear solve: every useful
+  // relaxation moves a section to a strictly finer bucket.
+  const buckets = Array.from(
+    { length: maximumLevel + 1 },
+    () => [] as LodNeighborNode[],
+  )
+  for (const node of nodes) buckets[node.lod].push(node)
+  for (let level = 0; level <= maximumLevel; level += 1) {
+    const bucket = buckets[level]
+    while (bucket.length > 0) {
+      const node = bucket.pop()!
+      if (result.get(node.id) !== level) continue
+      relaxNeighbor(rows.get(node.z)?.get(node.x + 1), level, result, buckets)
+      relaxNeighbor(rows.get(node.z)?.get(node.x - 1), level, result, buckets)
+      relaxNeighbor(rows.get(node.z + 1)?.get(node.x), level, result, buckets)
+      relaxNeighbor(rows.get(node.z - 1)?.get(node.x), level, result, buckets)
     }
   }
   return result
+}
+
+function relaxNeighbor(
+  neighbor: LodNeighborNode | undefined,
+  sourceLevel: number,
+  result: Map<SectionId, number>,
+  buckets: LodNeighborNode[][],
+): void {
+  if (!neighbor) return
+  const candidate = sourceLevel + 1
+  const current = result.get(neighbor.id) ?? neighbor.lod
+  if (candidate >= current) return
+  result.set(neighbor.id, candidate)
+  buckets[candidate].push(neighbor)
 }

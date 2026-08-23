@@ -69,6 +69,18 @@ export interface CompileSectionSuccess {
   compiled: CompiledSection
 }
 
+/**
+ * The worker has reached this request and is about to enter the synchronous
+ * compiler. Requests posted behind it remain worker-buffered and do not emit
+ * this message until their own compilation really begins.
+ */
+export interface CompileSectionStarted {
+  kind: 'compile-started'
+  jobId: number
+  key: SectionKey
+  revision: number
+}
+
 export interface CompileSectionFailure {
   kind: 'compile-failure'
   jobId: number
@@ -78,7 +90,10 @@ export interface CompileSectionFailure {
 }
 
 export type TerrainWorkerRequest = CompileSectionRequest
-export type TerrainWorkerResponse = CompileSectionSuccess | CompileSectionFailure
+export type TerrainWorkerResponse =
+  | CompileSectionStarted
+  | CompileSectionSuccess
+  | CompileSectionFailure
 
 export function encodeModifiers(modifiers: TerrainModifier[]): ModifierPacket {
   let pointCount = 0
@@ -163,6 +178,7 @@ export function compiledTransferables(compiled: CompiledSection): Transferable[]
     transferables.push(
       lod.positions.buffer,
       ...(lod.stableVertexIds ? [lod.stableVertexIds.buffer] : []),
+      ...(lod.sourceVertexIndices ? [lod.sourceVertexIndices.buffer] : []),
       lod.normals.buffer,
       lod.colors.buffer,
       ...(lod.surfaceFields?.map((field) => field.buffer) ?? []),

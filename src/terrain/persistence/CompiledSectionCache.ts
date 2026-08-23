@@ -10,7 +10,7 @@ import type {
  * Bump this whenever compiler semantics change without a corresponding input
  * change. Config and modifier changes are fingerprinted separately below.
  */
-export const COMPILED_SECTION_CACHE_VERSION = 'meshterrain-section-v3'
+export const COMPILED_SECTION_CACHE_VERSION = 'meshterrain-section-v4'
 
 /**
  * Produces small, deterministic section fingerprints without serializing the
@@ -57,6 +57,7 @@ export class CompiledSectionCacheSignatures {
           lodResolutions: config.lodResolutions,
           operationHalo: config.operationHalo,
           seed: config.seed,
+          worldProfile: config.worldProfile,
         },
         // Order is significant: equal-priority modifiers are evaluated in the
         // stack's stable order, so the digest preserves the queried sequence.

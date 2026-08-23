@@ -1,12 +1,34 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_TERRAIN_CONFIG } from '../config'
 import {
+  orderCandidateHead,
   TerrainStreamer,
   requiredViewRadiusSections,
   streamingPriority,
 } from './TerrainStreamer'
 
 describe('terrain streaming', () => {
+  it('selects and orders only the requested priority head', () => {
+    const candidates = Array.from({ length: 40 }, (_, index) => ({
+      id: `${index}:0` as `${number}:${number}`,
+      key: { x: index, z: 0 },
+      priority: (index * 17) % 41,
+      distance: index,
+      visible: true,
+      prefetch: false,
+    }))
+    const expected = [...candidates]
+      .sort((a, b) => b.priority - a.priority)
+      .slice(0, 7)
+      .map((candidate) => candidate.priority)
+
+    orderCandidateHead(candidates, 7)
+
+    expect(candidates.slice(0, 7).map((candidate) => candidate.priority)).toEqual(
+      expected,
+    )
+  })
+
   it('prioritizes edit focus, visibility and forward motion', () => {
     expect(streamingPriority(3, 1, false, true)).toBeGreaterThan(
       streamingPriority(3, -1, false, true),

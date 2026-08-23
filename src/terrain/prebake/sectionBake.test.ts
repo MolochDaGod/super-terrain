@@ -11,6 +11,8 @@ describe('section bake transport', () => {
     expect(decoded?.lods.map((lod) => lod.level)).toEqual([1])
     expect([...decoded!.lods[0]!.positions]).toEqual([...source.lods[0]!.positions])
     expect([...decoded!.lods[0]!.stableVertexIds!]).toEqual([11, 12, 13])
+    expect(decoded!.lods[0]!.sourceLevel).toBe(0)
+    expect([...decoded!.lods[0]!.sourceVertexIndices!]).toEqual([2, 1, 0])
     expect([...decoded!.lods[0]!.surfaceFields![4]]).toEqual([41, 42, 43, 44])
     expect([...decoded!.lods[0]!.indices]).toEqual([0, 1, 2])
     expect(decoded?.gpuBytes).toBeGreaterThan(0)
@@ -37,9 +39,11 @@ function fixture(): CompiledSection {
     },
     lods: [{
       level: 1,
+      sourceLevel: 0,
       geometricError: 2.5,
       positions: new Float32Array([0, 1, 2, 3, 4, 5, 6, 7, 8]),
       stableVertexIds: new Uint32Array([11, 12, 13]),
+      sourceVertexIndices: new Uint32Array([2, 1, 0]),
       normals: new Float32Array(9).fill(0.5),
       colors: new Float32Array(9).fill(0.25),
       surfaceFields,

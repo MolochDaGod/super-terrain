@@ -5,6 +5,7 @@ import type { TerrainModifier } from '../modifiers/types'
 import {
   TerrainWorkerPool,
   type TerrainWorkerCancellation,
+  type TerrainWorkerJobStatus,
   type TerrainWorkerPoolStats,
 } from '../workers/TerrainWorkerPool'
 
@@ -78,6 +79,10 @@ export class TerrainCompiler {
 
   stats(): TerrainWorkerPoolStats {
     return this.pool.stats()
+  }
+
+  jobStatus(jobId: number): TerrainWorkerJobStatus | undefined {
+    return this.pool.jobStatus(jobId)
   }
 
   dispose(): void {

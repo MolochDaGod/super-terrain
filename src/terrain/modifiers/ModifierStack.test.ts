@@ -46,6 +46,63 @@ describe('modifier stack', () => {
     ).toHaveLength(1)
   })
 
+  it('deduplicates modifiers spanning multiple spatial buckets', () => {
+    const stack = new ModifierStack(16)
+    const wide = createRemeshModifier({
+      center: { x: 16, y: 0, z: 16 },
+      radius: 30,
+      targetEdgeLength: 1,
+    })
+    stack.add(wide)
+    expect(
+      stack.query({
+        min: { x: -8, y: -10, z: -8 },
+        max: { x: 40, y: 10, z: 40 },
+      }),
+    ).toEqual([wide])
+  })
+
+  it('keeps world-scale modifiers once instead of copying them into every bucket', () => {
+    const stack = new ModifierStack(16)
+    const global = createRemeshModifier({
+      center: { x: 0, y: 0, z: 0 },
+      radius: 10_000,
+      targetEdgeLength: 4,
+    })
+    stack.add(global)
+
+    expect(stack.query({
+      min: { x: 5_000, y: -10, z: 5_000 },
+      max: { x: 5_010, y: 10, z: 5_010 },
+    })).toEqual([global])
+  })
+
+  it('rebuilds its lazy index after an in-place editor mutation', () => {
+    const stack = new ModifierStack(16)
+    const modifier = createRemeshModifier({
+      center: { x: 0, y: 0, z: 0 },
+      radius: 3,
+      targetEdgeLength: 1,
+    })
+    stack.add(modifier)
+    expect(stack.query({
+      min: { x: -4, y: -4, z: -4 },
+      max: { x: 4, y: 4, z: 4 },
+    })).toEqual([modifier])
+
+    modifier.center.x = 100
+    modifier.bounds = modifierWorldBounds(modifier)
+    stack.touch()
+    expect(stack.query({
+      min: { x: -4, y: -4, z: -4 },
+      max: { x: 4, y: 4, z: 4 },
+    })).toEqual([])
+    expect(stack.query({
+      min: { x: 96, y: -4, z: -4 },
+      max: { x: 104, y: 4, z: 4 },
+    })).toEqual([modifier])
+  })
+
   it('keeps stroke data immutable while materializing move, yaw, and scale', () => {
     const stroke = createBrushStroke({
       point: { x: 10, y: 4, z: 20 },

@@ -100,9 +100,16 @@ describe('compiled section cache signatures', () => {
       [],
       0,
     )
+    const changedProfile = await signatures.create(
+      { ...DEFAULT_TERRAIN_CONFIG, worldProfile: 'flat' },
+      { x: 0, z: 0 },
+      [],
+      0,
+    )
 
     expect(neighbor).not.toBe(origin)
     expect(changedResolution).not.toBe(origin)
+    expect(changedProfile).not.toBe(origin)
   })
 })
 

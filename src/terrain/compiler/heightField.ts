@@ -149,7 +149,7 @@ let worldProfile: WorldProfile = 'natural'
 export function setWorldProfile(profile: WorldProfile): void {
   if (profile === worldProfile) return
   worldProfile = profile
-  sampleCache.clear()
+  clearSampleCache()
 }
 
 export function getWorldProfile(): WorldProfile {
@@ -472,8 +472,19 @@ export function sampleHeightField(
  * and only the material pass moves — by a distance three orders of magnitude
  * below the finest feature any of these fields describes.
  */
-const sampleCache = new Map<number, HeightFieldSample>()
-const SAMPLE_CACHE_LIMIT = 300_000
+// Four-way set associativity keeps lookup and eviction bounded while avoiding
+// the per-entry hash nodes and iterator bookkeeping of a 300k-entry JS Map.
+// Collisions can only cause a recomputation; they can never change a sample.
+const SAMPLE_CACHE_WAYS = 4
+const SAMPLE_CACHE_SET_COUNT = 1 << 16
+const SAMPLE_CACHE_SET_MASK = SAMPLE_CACHE_SET_COUNT - 1
+const SAMPLE_CACHE_CAPACITY = SAMPLE_CACHE_SET_COUNT * SAMPLE_CACHE_WAYS
+const sampleCacheKeys = new Float64Array(SAMPLE_CACHE_CAPACITY)
+const sampleCacheValid = new Uint8Array(SAMPLE_CACHE_CAPACITY)
+const sampleCacheNextWay = new Uint8Array(SAMPLE_CACHE_SET_COUNT)
+const sampleCacheValues: Array<HeightFieldSample | undefined> = new Array(
+  SAMPLE_CACHE_CAPACITY,
+)
 /** Buckets per metre. A power of two keeps the quantisation itself exact. */
 const SAMPLE_CACHE_QUANTUM = 4_096
 /**
@@ -499,7 +510,7 @@ export function sampleHeightFieldCached(
   seed: number,
 ): HeightFieldSample {
   if (seed !== sampleCacheSeed) {
-    sampleCache.clear()
+    clearSampleCache()
     sampleCacheSeed = seed
   }
   const qx = Math.round(x * SAMPLE_CACHE_QUANTUM) + SAMPLE_CACHE_ORIGIN
@@ -511,14 +522,36 @@ export function sampleHeightFieldCached(
     return sampleHeightField(x, z, seed)
   }
   const key = qx * SAMPLE_CACHE_STRIDE + qz
-  const hit = sampleCache.get(key)
-  if (hit) return hit
+  const set = sampleCacheSet(key)
+  const firstSlot = set * SAMPLE_CACHE_WAYS
+  for (let way = 0; way < SAMPLE_CACHE_WAYS; way += 1) {
+    const slot = firstSlot + way
+    if (sampleCacheValid[slot] !== 0 && sampleCacheKeys[slot] === key) {
+      return sampleCacheValues[slot]!
+    }
+  }
   const sample = sampleHeightField(x, z, seed)
-  // Compiles arrive section by section, so the oldest entries are the least
-  // likely to be asked for again. Clearing wholesale beats evicting one by one.
-  if (sampleCache.size >= SAMPLE_CACHE_LIMIT) sampleCache.clear()
-  sampleCache.set(key, sample)
+  const way = sampleCacheNextWay[set]
+  const slot = firstSlot + way
+  sampleCacheNextWay[set] = (way + 1) & (SAMPLE_CACHE_WAYS - 1)
+  sampleCacheKeys[slot] = key
+  sampleCacheValues[slot] = sample
+  sampleCacheValid[slot] = 1
   return sample
+}
+
+function sampleCacheSet(key: number): number {
+  const low = key >>> 0
+  const high = Math.floor(key / 4_294_967_296) >>> 0
+  let hash = Math.imul(low ^ high, 0x9e37_79b1)
+  hash ^= hash >>> 16
+  return hash & SAMPLE_CACHE_SET_MASK
+}
+
+function clearSampleCache(): void {
+  sampleCacheValid.fill(0)
+  sampleCacheNextWay.fill(0)
+  sampleCacheValues.fill(undefined)
 }
 
 /** Convenience wrapper for callers that only need elevation. */

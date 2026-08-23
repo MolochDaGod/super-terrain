@@ -35,6 +35,12 @@ import { createOutcropFieldModifiers } from './demo/createOutcropField'
 import { WaterStore } from './water/WaterStore'
 import { TerrainCompiler } from './compiler/TerrainCompiler'
 import {
+  mergeCompiledLevels,
+  missingCompiledLevels,
+  retainCompiledLevels,
+} from './compiler/CompiledSectionArtifacts'
+import { repaintCompiledSection } from './compiler/PaintWeights'
+import {
   createShowcaseTerrainModifiers,
   upgradeShowcaseTerrainModifiers,
 } from './demo/createShowcaseModifiers'
@@ -82,6 +88,7 @@ import {
 } from './modifiers/tunnel'
 import {
   modifierWorldBounds,
+  materializeModifierTransforms,
   normalizedTransform,
   transformedBooleanVolume,
   transformedTunnel,
@@ -176,14 +183,14 @@ const GRANITE_PLANT_DEPTH_RATIO = 0.06
 const LOD_RECLAIM_SLACK = 1
 
 /**
- * How long a section may sit in `building` before the job is written off.
+ * How long a section may actively compile before the job is written off.
  *
  * A lost job is not a stall the streamer can see: `hasPendingTerrainWork` stays
  * true forever, the static-scene fast path can never re-engage, and the whole
  * per-frame streaming and LOD pass runs for the rest of the session. The
- * threshold is an order of magnitude above the slowest measured compile (225 ms
- * at the finest level, behind at most two pipelined jobs), so nothing that is
- * merely slow is ever cancelled.
+ * Queue time and requests buffered behind another message in a worker do not
+ * count. Exact showcase CSG currently measures about 5.6 seconds at the finest
+ * level, leaving a wide margin before genuine recovery begins.
  */
 const STUCK_BUILD_MS = 20_000
 const STUCK_BUILD_SWEEP_MS = 2_000
@@ -298,7 +305,7 @@ interface PendingCompiledCacheWrite {
 export class WorldTerrain {
   readonly config: TerrainConfig
   readonly partition: MeshPartition
-  readonly modifiers = new ModifierStack()
+  readonly modifiers: ModifierStack
   readonly rocks = new GraniteRockStore()
   readonly water: WaterStore
   readonly metrics = new ExternalStore<TerrainMetrics>(EMPTY_METRICS)
@@ -387,6 +394,7 @@ export class WorldTerrain {
     storage: TerrainStorage = new IndexedDbTerrainStorage(),
   ) {
     this.config = { ...DEFAULT_TERRAIN_CONFIG, ...config }
+    this.modifiers = new ModifierStack(this.config.sectionSize)
     // The main thread samples the same height field the workers do — for rock
     // planting, water and `sampleHeight` — so it needs the profile too.
     setWorldProfile(this.config.worldProfile)
@@ -416,10 +424,23 @@ export class WorldTerrain {
       const section = this.partition.get(result.key)
       if (!section) return
       if (result.compiled) {
-        if (this.partition.acceptCompiled(section, result.compiled)) {
+        const buildingLod = section.buildingRevision === result.revision
+          ? section.buildingLod
+          : undefined
+        const retainedLevels = buildingLod === undefined
+          ? undefined
+          : requestedLevels(buildingLod, this.config.lodResolutions.length)
+        const compiled = mergeCompiledLevels(
+          section.compiled?.sourceRevision === result.revision
+            ? section.compiled
+            : undefined,
+          result.compiled,
+          retainedLevels,
+        )
+        if (this.partition.acceptCompiled(section, compiled)) {
           this.readySwaps.add(section.id)
           this.benchmarkHistory.record('compile', result.compiled.metadata.compileMs)
-          this.queueCompiledCacheWrite(section, result.compiled)
+          this.queueCompiledCacheWrite(section, compiled)
         } else if (section.buildingRevision === result.revision) {
           section.buildState = 'queued'
           section.buildJobId = undefined
@@ -551,6 +572,7 @@ export class WorldTerrain {
             aspect: input.aspect,
           }
         : undefined,
+      HOT_CANDIDATES_PER_FRAME,
     )
     const candidateMap = this.streamer.candidatesById
     this.cancelDepartedBuilds(this.streamer.departed)
@@ -773,14 +795,18 @@ export class WorldTerrain {
       this.markPersistenceDirty()
       return 'committed'
     }
-    const hadStroke = Boolean(this.activeStroke)
-    if (this.activeStroke) {
-      if (this.activeStroke.type === 'weight-paint') {
-        // Painting already mutated the resident GPU attributes directly. Only
-        // now dirty the authoritative sections and launch one worker rebuild.
-        this.invalidate(this.activeStroke.bounds)
-      }
+    const completedStroke = this.activeStroke
+    const hadStroke = Boolean(completedStroke)
+    if (completedStroke) {
       this.modifiers.touch()
+      if (completedStroke.type === 'weight-paint') {
+        // Painting already mutated the resident GPU attributes directly. Only
+        // now advance the authoritative revisions. Provenance lets current
+        // compiled geometry receive the exact final weights immediately; old
+        // caches and mixed hierarchies repaint their retained streams directly.
+        const invalidated = this.invalidate(completedStroke.bounds)
+        this.applyIncrementalPaintArtifacts(invalidated)
+      }
       this.markPersistenceDirty()
     }
     this.activeStroke = undefined
@@ -2007,10 +2033,51 @@ export class WorldTerrain {
     return result
   }
 
-  private invalidate(bounds: AABB): void {
-    this.partition.invalidateBounds(bounds, this.config.operationHalo)
+  private invalidate(bounds: AABB): TerrainSection[] {
+    const invalidated = this.partition.invalidateBounds(
+      bounds,
+      this.config.operationHalo,
+    )
     this.terrainStateRevision += 1
     this.hasPendingTerrainWork = true
+    return invalidated
+  }
+
+  private applyIncrementalPaintArtifacts(sections: readonly TerrainSection[]): void {
+    for (const section of sections) {
+      const previousRevision = section.revision - 1
+      const currentArtifact =
+        section.pendingCompiled?.sourceRevision === previousRevision
+          ? section.pendingCompiled
+          : section.compiled?.sourceRevision === previousRevision
+            ? section.compiled
+            : undefined
+      if (!currentArtifact) continue
+
+      const modifiers = materializeModifierTransforms(
+        this.modifiers.query(
+          expandBounds(section.bounds, this.config.operationHalo),
+        ),
+      )
+      const repainted = repaintCompiledSection(
+        currentArtifact,
+        section.revision,
+        this.config.sectionSize,
+        modifiers,
+      )
+      if (!repainted) continue
+
+      if (section.buildState === 'building') {
+        this.compiler.cancel(
+          section.key,
+          section.buildingRevision ?? previousRevision,
+        )
+      }
+      if (this.partition.acceptCompiled(section, repainted)) {
+        this.readySwaps.add(section.id)
+        this.queueCompiledCacheWrite(section, repainted)
+      }
+    }
   }
 
   private createViewSignature(input: TerrainUpdateInput): TerrainViewSignature {
@@ -2123,6 +2190,25 @@ export class WorldTerrain {
       minimumLod < compiledMinimumLod ||
       overDetailed
     if (!needsBuild) return
+
+    const desiredLevels = requestedLevels(
+      minimumLod,
+      this.config.lodResolutions.length,
+    )
+    if (
+      overDetailed &&
+      section.compiled?.sourceRevision === section.revision
+    ) {
+      const retained = retainCompiledLevels(section.compiled, desiredLevels)
+      if (retained && retained.lods.length === desiredLevels.length) {
+        if (this.partition.acceptCompiled(section, retained)) {
+          this.readySwaps.add(section.id)
+          this.terrainStateRevision += 1
+          this.hasPendingTerrainWork = true
+        }
+        return
+      }
+    }
     // A warm-start lookup is asynchronous, but it is still dramatically
     // cheaper than starting the same exact CSG job in a worker. Hold this
     // section in the queued state until the batched IndexedDB read resolves.
@@ -2138,12 +2224,18 @@ export class WorldTerrain {
     const modifiers = this.modifiers.query(
       expandBounds(section.bounds, this.config.operationHalo),
     )
+    const levels = missingCompiledLevels(
+      section.compiled,
+      desiredLevels,
+      section.revision,
+    )
+    if (levels.length === 0) return
     const jobId = this.compiler.queue(
       section.key,
       section.revision,
       candidate.priority,
       modifiers,
-      requestedLevels(minimumLod, this.config.lodResolutions.length),
+      levels,
       section.source.createCompileSnapshot(
         section.key,
         this.config.sectionSize,
@@ -2251,7 +2343,22 @@ export class WorldTerrain {
     let recovered = 0
     for (const section of this.partition.values()) {
       if (section.buildState !== 'building') continue
-      if (now - (section.buildStartedAt ?? now) < STUCK_BUILD_MS) continue
+      const status = section.buildJobId === undefined
+        ? undefined
+        : this.compiler.jobStatus(section.buildJobId)
+      // A section becomes `building` when it enters the priority queue, not
+      // when a worker starts it. Neither main-queue wait nor a message buffered
+      // behind synchronous CSG is evidence of a lost compile.
+      if (
+        status?.state === 'queued' ||
+        status?.state === 'worker-buffered'
+      ) {
+        continue
+      }
+      const startedAt = status?.state === 'compiling'
+        ? status.startedAt
+        : section.buildStartedAt ?? now
+      if (now - startedAt < STUCK_BUILD_MS) continue
       this.compiler.cancel(section.key, section.buildingRevision)
       section.buildJobId = undefined
       section.buildingRevision = undefined

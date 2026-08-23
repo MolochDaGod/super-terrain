@@ -47,6 +47,10 @@ export interface TerrainWorkerCancellation {
   active: number
 }
 
+export type TerrainWorkerJobStatus =
+  | { readonly state: 'queued' | 'worker-buffered' }
+  | { readonly state: 'compiling'; readonly startedAt: number }
+
 export type WorkerResultHandler = (
   result:
     | { ok: true; jobId: number; compiled: CompiledSection }
@@ -86,6 +90,8 @@ export class TerrainWorkerPool {
   private cancelled = 0
   private stale = 0
   private latestRevision = new Map<string, number>()
+  /** Lifecycle ownership for the streamer's lost-job recovery sweep. */
+  private jobStatuses = new Map<number, TerrainWorkerJobStatus>()
   onResult?: WorkerResultHandler
 
   constructor(
@@ -119,6 +125,7 @@ export class TerrainWorkerPool {
         this.cancelled += 1
         return superseded.request.jobId
       }
+      this.jobStatuses.delete(superseded.request.jobId)
       this.cancelled += 1
     }
 
@@ -143,6 +150,7 @@ export class TerrainWorkerPool {
       },
       submittedAt: performance.now(),
     })
+    this.jobStatuses.set(jobId, { state: 'queued' })
     this.queueDirty = true
     this.dispatch()
     return jobId
@@ -158,6 +166,7 @@ export class TerrainWorkerPool {
     const waiting = this.queued.get(id)
     if (waiting && waiting.request.revision <= beforeRevision) {
       this.queued.delete(id)
+      this.jobStatuses.delete(waiting.request.jobId)
       this.queueDirty = true
       this.cancelled += 1
       queuedCount += 1
@@ -233,6 +242,7 @@ export class TerrainWorkerPool {
     this.slots = []
     this.queued.clear()
     this.queueOrder.length = 0
+    this.jobStatuses.clear()
   }
 
   stats(): TerrainWorkerPoolStats {
@@ -244,16 +254,43 @@ export class TerrainWorkerPool {
     }
   }
 
+  /** Exact lifecycle state used to avoid timing queue wait as compile time. */
+  jobStatus(jobId: number): TerrainWorkerJobStatus | undefined {
+    return this.jobStatuses.get(jobId)
+  }
+
   private dispatch(): void {
     // Breadth first: every slot gets its first job before any gets a second, so
     // a short queue still spreads across the pool instead of piling onto one
     // worker while the others stand idle.
+    let exactSlots = this.slots.reduce(
+      (count, slot) =>
+        count + (slot.inFlight.some(isExactBooleanRequest) ? 1 : 0),
+      0,
+    )
     for (let depth = 0; depth < this.pipelineDepth; depth += 1) {
       for (const slot of this.slots) {
         if (slot.inFlight.length > depth) continue
-        const job = this.nextJob()
-        if (!job) return
+        // Exact mesh CSG takes seconds rather than milliseconds. Posting more
+        // work behind it hides that work from reprioritisation and makes a
+        // cancelled Boolean take unrelated jobs down with its worker. Cheap
+        // jobs retain the short pipeline that keeps workers supplied.
+        if (slot.inFlight.some(isExactBooleanRequest)) continue
+        // Preserve one latency lane while exact CSG is backlogged. Otherwise a
+        // handful of multi-second landmark cells occupy every worker and make
+        // the ordinary millisecond terrain around them appear to stop loading.
+        const reserveOrdinary =
+          this.slots.length > 1 && exactSlots >= this.slots.length - 1
+        const job = reserveOrdinary
+          ? this.nextJob(true) ??
+            // Do not hide another exact job behind ordinary work in the
+            // reserved lane. If no ordinary work exists at all then an empty
+            // worker may still join the CSG backlog.
+            (slot.inFlight.length === 0 ? this.nextJob() : undefined)
+          : this.nextJob()
+        if (!job) continue
         this.send(slot, job)
+        if (isExactBooleanRequest(job)) exactSlots += 1
       }
     }
   }
@@ -266,13 +303,15 @@ export class TerrainWorkerPool {
    * queue prune in `submit` catches the common case, but only for jobs queued
    * at the time; this is the check at the point of use.
    */
-  private nextJob(): CompileSectionRequest | undefined {
+  private nextJob(ordinaryOnly = false): CompileSectionRequest | undefined {
     // Ordered at the point of use. Reprioritising is a per-frame, per-section
     // event while the camera moves, and re-sorting on each of those was a
     // measurable share of the frame on its own.
     if (this.queueDirty) this.sortQueue()
-    while (this.queueOrder.length > 0) {
-      const job = this.queueOrder.pop()!
+    for (let index = this.queueOrder.length - 1; index >= 0; index -= 1) {
+      const job = this.queueOrder[index]
+      if (ordinaryOnly && isExactBooleanRequest(job.request)) continue
+      this.queueOrder.splice(index, 1)
       const id = sectionId(job.request.key)
       // The order is a snapshot: an entry can have been replaced or cancelled
       // since it was taken.
@@ -280,6 +319,7 @@ export class TerrainWorkerPool {
       this.queued.delete(id)
       const latest = this.latestRevision.get(id)
       if (latest !== undefined && job.request.revision < latest) {
+        this.jobStatuses.delete(job.request.jobId)
         this.cancelled += 1
         continue
       }
@@ -290,6 +330,7 @@ export class TerrainWorkerPool {
 
   private send(slot: WorkerSlot, request: CompileSectionRequest): void {
     slot.inFlight.push(request)
+    this.jobStatuses.set(request.jobId, { state: 'worker-buffered' })
     try {
       slot.worker.postMessage(request, [
         request.modifiers.brushPoints.buffer,
@@ -309,6 +350,7 @@ export class TerrainWorkerPool {
 
   /** Reports a job the pool could not run, so its owner can queue it again. */
   private failJob(request: CompileSectionRequest, error: string): void {
+    this.jobStatuses.delete(request.jobId)
     this.onResult?.({
       ok: false,
       jobId: request.jobId,
@@ -325,7 +367,15 @@ export class TerrainWorkerPool {
     )
     // Not ours: a reply from a worker this slot has since replaced.
     if (position === -1) return
+    if (response.kind === 'compile-started') {
+      this.jobStatuses.set(response.jobId, {
+        state: 'compiling',
+        startedAt: performance.now(),
+      })
+      return
+    }
     slot.inFlight.splice(position, 1)
+    this.jobStatuses.delete(response.jobId)
     const id = sectionId(response.key)
     const latest = this.latestRevision.get(id) ?? response.revision
     if (response.revision < latest) {
@@ -352,6 +402,7 @@ export class TerrainWorkerPool {
     const failed = slot.inFlight
     slot.inFlight = []
     for (const request of failed) {
+      this.jobStatuses.delete(request.jobId)
       this.onResult?.({
         ok: false,
         jobId: request.jobId,
@@ -394,6 +445,9 @@ export class TerrainWorkerPool {
    * still has the authoritative mesh and can build a fresh snapshot.
    */
   private restartWorker(slot: WorkerSlot, orphaned: CompileSectionRequest[]): void {
+    for (const request of slot.inFlight) {
+      this.jobStatuses.delete(request.jobId)
+    }
     slot.worker.terminate()
     slot.inFlight = []
     this.installWorker(slot)
@@ -414,4 +468,13 @@ export class TerrainWorkerPool {
       return b.submittedAt - a.submittedAt
     })
   }
+}
+
+function isExactBooleanRequest(request: CompileSectionRequest): boolean {
+  return request.modifiers.descriptors.some(
+    (modifier) =>
+      modifier.enabled &&
+      (modifier.type === 'boolean-subtract' ||
+        modifier.type === 'boolean-volume'),
+  )
 }

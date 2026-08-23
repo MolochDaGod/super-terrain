@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_TERRAIN_CONFIG } from '../config'
+import { createTunnelModifier } from '../modifiers/factories'
 import type { TerrainWorkerRequest, TerrainWorkerResponse } from './protocol'
 import { TerrainWorkerPool } from './TerrainWorkerPool'
 
@@ -131,6 +132,71 @@ describe('terrain worker pool revisions', () => {
     // given a second job, and nothing is left waiting in the queue.
     expect(pool.stats()).toMatchObject({ active: 6, queued: 0 })
     expect(FakeWorker.instances).toHaveLength(2)
+    pool.dispose()
+  })
+
+  it('times only the request that the worker says it is compiling', () => {
+    const pool = new TerrainWorkerPool(1, DEFAULT_TERRAIN_CONFIG, 2)
+    const first = pool.submit({ x: 0, z: 0 }, 1, 10, [])
+    const buffered = pool.submit({ x: 1, z: 0 }, 1, 9, [])
+
+    expect(pool.jobStatus(first)).toEqual({ state: 'worker-buffered' })
+    expect(pool.jobStatus(buffered)).toEqual({ state: 'worker-buffered' })
+
+    FakeWorker.instances[0].respond({
+      kind: 'compile-started',
+      jobId: first,
+      key: { x: 0, z: 0 },
+      revision: 1,
+    })
+    expect(pool.jobStatus(first)).toMatchObject({
+      state: 'compiling',
+      startedAt: expect.any(Number),
+    })
+    expect(pool.jobStatus(buffered)).toEqual({ state: 'worker-buffered' })
+
+    FakeWorker.instances[0].respond(successResponse(first, { x: 0, z: 0 }))
+    expect(pool.jobStatus(first)).toBeUndefined()
+    expect(pool.jobStatus(buffered)).toEqual({ state: 'worker-buffered' })
+    pool.dispose()
+  })
+
+  it('does not buffer unrelated work behind an exact Boolean compile', () => {
+    const pool = new TerrainWorkerPool(1, DEFAULT_TERRAIN_CONFIG, 3)
+    const exact = pool.submit(
+      { x: 0, z: 0 },
+      1,
+      10,
+      [createTunnelModifier({ center: { x: 32, y: 10, z: 32 } })],
+    )
+    const ordinary = pool.submit({ x: 1, z: 0 }, 1, 9, [])
+
+    expect(pool.stats()).toMatchObject({ active: 1, queued: 1 })
+    expect(pool.jobStatus(exact)).toEqual({ state: 'worker-buffered' })
+    expect(pool.jobStatus(ordinary)).toEqual({ state: 'queued' })
+
+    FakeWorker.instances[0].respond(successResponse(exact, { x: 0, z: 0 }))
+    expect(FakeWorker.instances[0].request?.jobId).toBe(ordinary)
+    pool.dispose()
+  })
+
+  it('keeps one worker lane moving ordinary terrain through a CSG backlog', () => {
+    const pool = new TerrainWorkerPool(2, DEFAULT_TERRAIN_CONFIG, 3)
+    const tunnel = createTunnelModifier({
+      center: { x: 32, y: 10, z: 32 },
+    })
+    const first = pool.submit({ x: 0, z: 0 }, 1, 30, [tunnel])
+    pool.submit({ x: 1, z: 0 }, 1, 29, [tunnel])
+    const waitingExact = pool.submit({ x: 2, z: 0 }, 1, 28, [tunnel])
+    const ordinary = pool.submit({ x: 3, z: 0 }, 1, 1, [])
+
+    expect(pool.jobStatus(waitingExact)).toEqual({ state: 'queued' })
+    expect(pool.jobStatus(ordinary)).toEqual({ state: 'queued' })
+
+    FakeWorker.instances[0].respond(successResponse(first, { x: 0, z: 0 }))
+
+    expect(FakeWorker.instances[0].request?.jobId).toBe(ordinary)
+    expect(pool.jobStatus(waitingExact)).toEqual({ state: 'queued' })
     pool.dispose()
   })
 

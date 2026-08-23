@@ -11,6 +11,12 @@ const workerScope = self as unknown as DedicatedWorkerGlobalScope
 
 workerScope.onmessage = (event: MessageEvent<TerrainWorkerRequest>) => {
   const request = event.data
+  workerScope.postMessage({
+    kind: 'compile-started',
+    jobId: request.jobId,
+    key: request.key,
+    revision: request.revision,
+  } satisfies TerrainWorkerResponse)
   try {
     const compiled = compileTerrainSection(request)
     const response: TerrainWorkerResponse = {
