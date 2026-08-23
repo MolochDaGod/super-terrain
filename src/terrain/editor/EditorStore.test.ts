@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { EditorStore } from './EditorStore'
 
 describe('EditorStore lights', () => {
-  it('defaults viewport DPR quality to medium', () => {
+  it('defaults to full rendering at medium viewport DPR quality', () => {
     const editor = new EditorStore()
 
+    expect(editor.getSnapshot().renderMode).toBe('full')
     expect(editor.getSnapshot().dprMode).toBe('medium')
   })
 

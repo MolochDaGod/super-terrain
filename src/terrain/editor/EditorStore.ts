@@ -186,7 +186,7 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   transformMode: 'translate',
   overlay: 'none',
   openSection: 'modifiers',
-  renderMode: 'preview',
+  renderMode: 'full',
   cameraMode: 'orbit',
   uiViewMode: 'editor',
   dprMode: 'medium',
