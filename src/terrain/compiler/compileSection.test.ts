@@ -376,7 +376,10 @@ describe('section compiler', () => {
     const point = { x: 40, y: evaluateHeight(40, 40, 17, []), z: 40 }
     const stroke = createBrushStroke({
       point,
-      normal: { x: 1, y: 0, z: 0 },
+      // A real dab records the surface normal under the pointer. A purely
+      // sideways one would be held back by the tangential limit that keeps
+      // strokes from sliding vertices past their neighbours.
+      normal: { x: 0, y: 1, z: 0 },
       domain: 'mesh',
       mode: 'raise',
       radius: 5,
@@ -397,6 +400,7 @@ describe('section compiler', () => {
           point.x,
           point.z,
           5 * BRUSH_DEPTH_PER_RADIUS,
+          point.y,
         ),
       ).toBe(true)
     }
@@ -411,6 +415,7 @@ describe('section compiler', () => {
         point.x,
         point.z,
         5 * BRUSH_DEPTH_PER_RADIUS,
+        point.y,
       ),
     ).toBe(true)
   })
@@ -708,15 +713,15 @@ function retainsSculptPeak(
   sourceX: number,
   sourceZ: number,
   peak: number,
+  baseHeight: number,
 ): boolean {
+  let tallest = -Infinity
   for (let offset = 0; offset < positions.length; offset += 3) {
-    if (
-      Math.abs(positions[offset + 2] - sourceZ) < 1e-4 &&
-      positions[offset] > sourceX + peak * 0.85 &&
-      positions[offset] < sourceX + peak * 1.15
-    ) {
-      return true
-    }
+    const withinDab = Math.hypot(
+      positions[offset] - sourceX,
+      positions[offset + 2] - sourceZ,
+    ) < 1.5
+    if (withinDab) tallest = Math.max(tallest, positions[offset + 1])
   }
-  return false
+  return tallest > baseHeight + peak * 0.7
 }

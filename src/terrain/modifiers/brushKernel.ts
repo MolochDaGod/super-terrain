@@ -33,16 +33,34 @@ export const BRUSH_DEPTH_PER_RADIUS = 0.4
 export const MAX_STROKE_DISPLACEMENT_PER_RADIUS = 0.9
 
 /**
- * Hard ceiling on sideways travel, as a fraction of radius.
+ * Ceilings on sideways travel, as fractions of radius.
  *
- * Terrain sections are triangulated over their XZ footprint. A vertex that
- * slides far enough sideways passes its own neighbours, which turns its
- * triangles inside out: they get backface-culled and the surface reads as torn
- * open. Tangential motion is a real sculpting effect, so it is bounded rather
- * than removed -- overhangs and undercuts are authored as CSG volumes, which
- * carry their own topology.
+ * Sideways displacement is the point of mesh-domain sculpting -- it is what
+ * pushes a face out into the third dimension instead of only up and down. It is
+ * also what can turn a section's triangles inside out, because a section is
+ * triangulated over its XZ footprint and a vertex that outruns its neighbours
+ * inverts them. The two are not equally risky, and measurement shows why:
+ * displacement along the outward normal spreads vertices apart, which stays
+ * well-conditioned, while displacement inward draws them together and folds at
+ * roughly a third of the travel. So the budget is directional -- generous for
+ * building out, conservative for cutting in -- rather than one flat number that
+ * would have to be set to the tighter of the two.
+ *
+ * Beyond these, a surface that genuinely doubles back over itself needs
+ * topology the XZ grid cannot express; that is what the CSG volumes are for.
  */
-export const MAX_TANGENTIAL_SLIDE_PER_RADIUS = 0.15
+export const MAX_OUTWARD_SLIDE_PER_RADIUS = 0.45
+export const MAX_INWARD_SLIDE_PER_RADIUS = 0.15
+
+/**
+ * How hard one pinch dab exaggerates relief, as a fraction of brush depth.
+ *
+ * Sharpening steepens slopes by construction, and in mesh domain a steeper
+ * slope tilts the sample normal further from vertical, so displacement along it
+ * carries more sideways travel. Keeping the per-dab step modest is what lets
+ * many passes over one spot stay inside the tangential budget.
+ */
+const PINCH_SHARPEN_PER_REACH = 0.3
 
 /** Noise depth as a fraction of its own wavelength. Above ~0.5 it folds. */
 const NOISE_AMPLITUDE_PER_WAVELENGTH = 0.45
@@ -133,6 +151,19 @@ export function applyBrushDab(
   const planeDistance = isHeightfield
     ? point.y - sample.y
     : dx * nx + dy * ny + dz * nz
+  // How far this stroke has already moved the point along the dab normal.
+  //
+  // The building modes converge against this rather than against the dab plane.
+  // The editor raycasts each dab against the previewed geometry, so a held
+  // brush reports planes that climb the mound it is raising; measuring room
+  // from the plane let every pixel of pointer jitter reopen a full allowance,
+  // which is the grow-stop-grow ratchet and, after enough of it, deformation
+  // far past what the footprint can taper back down. The anchor is the point's
+  // own position before the stroke touched it and cannot drift.
+  const travelled =
+    (point.x - anchor.x) * nx +
+    (point.y - anchor.y) * ny +
+    (point.z - anchor.z) * nz
 
   switch (params.mode) {
     case 'raise':
@@ -144,14 +175,14 @@ export function applyBrushDab(
       // stroke now settles at its target; pressing again anchors a new one to
       // the surface it just made, so repeated passes still build without bound.
       const sign = params.mode === 'raise' ? 1 : -1
-      const room = Math.max(0, reach - planeDistance * sign)
+      const room = Math.max(0, reach - travelled * sign)
       displace(point, nx, ny, nz, Math.min(weight * reach, room * clamp(weight, 0, 1)) * sign)
       break
     }
     case 'clay': {
       // Clay strips build mass toward a crest a fixed height above the dab
       // plane, so holding still thickens the slab instead of drilling a spike.
-      const room = Math.max(0, reach - planeDistance)
+      const room = Math.max(0, reach - travelled)
       displace(point, nx, ny, nz, Math.min(weight * reach, room * clamp(weight * 1.8, 0, 1)))
       break
     }
@@ -181,7 +212,7 @@ export function applyBrushDab(
       // vertices straddling the crossing in opposite directions along a tilted
       // normal, which is a fold in miniature repeated all along the contour.
       const relief = clamp(planeDistance / reach, -1, 1)
-      displace(point, nx, ny, nz, relief * weight * reach * 0.5)
+      displace(point, nx, ny, nz, relief * weight * reach * PINCH_SHARPEN_PER_REACH)
       break
     }
     case 'scrape': {
@@ -216,7 +247,7 @@ export function applyBrushDab(
     }
   }
 
-  limitDisplacement(point, anchor, params.radius)
+  limitDisplacement(point, anchor, params.radius, nx, ny, nz)
 }
 
 /**
@@ -230,12 +261,18 @@ function limitDisplacement(
   point: MutablePoint,
   anchor: Readonly<MutablePoint>,
   radius: number,
+  nx: number,
+  ny: number,
+  nz: number,
 ): void {
   let dx = point.x - anchor.x
   let dy = point.y - anchor.y
   let dz = point.z - anchor.z
 
-  const tangentialLimit = radius * MAX_TANGENTIAL_SLIDE_PER_RADIUS
+  const outward = dx * nx + dy * ny + dz * nz >= 0
+  const tangentialLimit =
+    radius *
+    (outward ? MAX_OUTWARD_SLIDE_PER_RADIUS : MAX_INWARD_SLIDE_PER_RADIUS)
   const tangential = Math.hypot(dx, dz)
   if (tangential > tangentialLimit) {
     const scale = tangentialLimit / tangential
