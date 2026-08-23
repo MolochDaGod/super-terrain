@@ -86,6 +86,8 @@ export function inspectorSectionForTool(tool: EditorTool): InspectorSection {
 export interface EditorSnapshot {
   tool: EditorTool
   brushDomain: BrushDomain
+  /** Whether one stroke keeps building while held, or settles on a depth. */
+  brushAccumulate: boolean
   brushRadius: number
   brushStrength: number
   brushFalloff: number
@@ -157,6 +159,7 @@ const CURSOR_READOUT_INTERVAL_MS = 100
 const INITIAL_EDITOR_STATE: EditorSnapshot = {
   tool: 'camera',
   brushDomain: 'mesh',
+  brushAccumulate: false,
   brushRadius: 22,
   brushStrength: 0.38,
   brushFalloff: 0.55,

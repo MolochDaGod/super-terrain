@@ -50,7 +50,7 @@ export const MAX_STROKE_DISPLACEMENT_PER_RADIUS = 0.9
  * topology the XZ grid cannot express; that is what the CSG volumes are for.
  */
 export const MAX_OUTWARD_SLIDE_PER_RADIUS = 0.45
-export const MAX_INWARD_SLIDE_PER_RADIUS = 0.15
+export const MAX_INWARD_SLIDE_PER_RADIUS = 0.45
 
 /**
  * How hard one pinch dab exaggerates relief, as a fraction of brush depth.
@@ -75,6 +75,16 @@ export interface BrushKernelParams {
   terraceStep?: number
   noiseScale?: number
   noiseSeed?: number
+  /**
+   * Whether one stroke may keep building for as long as it is held.
+   *
+   * Off, a stroke converges on a depth set by the brush profile and stops, so
+   * releasing and pressing again is how you build further. That keeps a held
+   * brush from driving the surface past what its footprint can taper back down.
+   * On, dabs simply add up, which is the freer feel but will eventually deform
+   * the surface further than its triangulation can follow.
+   */
+  accumulate?: boolean
 }
 
 /** A dab with its normal pre-normalized, so the hot loop never renormalizes. */
@@ -139,9 +149,14 @@ export function applyBrushDab(
 
   const radial = brushProfile(distance, params.radius, params.falloff)
   if (radial <= 0) return
-  const weight =
-    radial * clamp(params.strength, 0, 1) * Math.max(0, sample.weight)
-  if (weight <= 0) return
+  // Two separate things. `flow` is how fast this dab moves a point toward what
+  // the stroke is shaping; `radial` is how deep that shape goes here. Folding
+  // them into one number made the profile govern only the rate, so every point
+  // in the footprint eventually converged on the same depth and the surface
+  // saturated into a flat slab with a hard shoulder at the rim.
+  const flow = clamp(params.strength, 0, 1) * Math.max(0, sample.weight)
+  if (flow <= 0) return
+  const weight = radial * flow
 
   const nx = sample.normalX
   const ny = sample.normalY
@@ -175,15 +190,27 @@ export function applyBrushDab(
       // stroke now settles at its target; pressing again anchors a new one to
       // the surface it just made, so repeated passes still build without bound.
       const sign = params.mode === 'raise' ? 1 : -1
-      const room = Math.max(0, reach - travelled * sign)
-      displace(point, nx, ny, nz, Math.min(weight * reach, room * clamp(weight, 0, 1)) * sign)
+      if (params.accumulate) {
+        displace(point, nx, ny, nz, weight * reach * sign)
+        break
+      }
+      const room = Math.max(0, reach * radial - travelled * sign)
+      displace(point, nx, ny, nz, room * clamp(flow, 0, 1) * sign)
       break
     }
     case 'clay': {
       // Clay strips build mass toward a crest a fixed height above the dab
       // plane, so holding still thickens the slab instead of drilling a spike.
-      const room = Math.max(0, reach - travelled)
-      displace(point, nx, ny, nz, Math.min(weight * reach, room * clamp(weight * 1.8, 0, 1)))
+      // Clay keeps a broad flat crest by design -- that is what separates it
+      // from raise -- but the shoulder still has to come down to meet the
+      // surface, so the target is a widened profile rather than a constant.
+      const crest = Math.min(1, radial * 1.7)
+      if (params.accumulate) {
+        displace(point, nx, ny, nz, weight * reach * crest)
+        break
+      }
+      const room = Math.max(0, reach * crest - travelled)
+      displace(point, nx, ny, nz, room * clamp(flow * 1.8, 0, 1))
       break
     }
     case 'flatten': {
@@ -212,7 +239,9 @@ export function applyBrushDab(
       // vertices straddling the crossing in opposite directions along a tilted
       // normal, which is a fold in miniature repeated all along the contour.
       const relief = clamp(planeDistance / reach, -1, 1)
-      displace(point, nx, ny, nz, relief * weight * reach * PINCH_SHARPEN_PER_REACH)
+      const room =
+        relief * reach * PINCH_SHARPEN_PER_REACH * radial - travelled
+      displace(point, nx, ny, nz, room * clamp(flow, 0, 1))
       break
     }
     case 'scrape': {
@@ -242,12 +271,21 @@ export function applyBrushDab(
       // surface between two neighbouring vertices turning over, and the old
       // per-cell hash made that worse by stepping rather than blending.
       const amplitude = Math.min(reach, scale * NOISE_AMPLITUDE_PER_WAVELENGTH)
-      displace(point, nx, ny, nz, noise * weight * amplitude)
+      const room = noise * amplitude * radial - travelled
+      displace(point, nx, ny, nz, room * clamp(flow, 0, 1))
       break
     }
   }
 
-  limitDisplacement(point, anchor, params.radius, nx, ny, nz)
+  limitDisplacement(
+    point,
+    anchor,
+    params.radius,
+    nx,
+    ny,
+    nz,
+    params.accumulate === true,
+  )
 }
 
 /**
@@ -264,6 +302,7 @@ function limitDisplacement(
   nx: number,
   ny: number,
   nz: number,
+  accumulate: boolean,
 ): void {
   let dx = point.x - anchor.x
   let dy = point.y - anchor.y
@@ -278,6 +317,17 @@ function limitDisplacement(
     const scale = tangentialLimit / tangential
     dx *= scale
     dz *= scale
+  }
+
+  // Sideways travel is bounded even when accumulating: it is what inverts
+  // triangles, and no amount of opting in makes a torn section useful. Growth
+  // along the normal is the part that is set free -- pushing a heightfield
+  // straight up cannot fold its own triangulation however far it goes.
+  if (accumulate) {
+    point.x = anchor.x + dx
+    point.y = anchor.y + dy
+    point.z = anchor.z + dz
+    return
   }
 
   const totalLimit = radius * MAX_STROKE_DISPLACEMENT_PER_RADIUS

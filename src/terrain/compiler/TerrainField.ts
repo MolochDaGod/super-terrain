@@ -277,6 +277,7 @@ function brushParams(modifier: BrushStrokeModifier): BrushKernelParams {
     terraceStep: modifier.terraceStep,
     noiseScale: modifier.noiseScale,
     noiseSeed: modifier.noiseSeed,
+    accumulate: modifier.accumulate,
   }
 }
 

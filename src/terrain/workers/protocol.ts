@@ -1,30 +1,20 @@
-import type { AABB, CompiledSection, SectionKey } from '../core/types'
+import type { CompiledSection, SectionKey } from '../core/types'
 import type { TerrainConfig } from '../config'
 import type { TerrainSectionSourceSnapshot } from '../mesh/EditableMesh'
 import type {
-  BrushDomain,
-  BrushMode,
-  ModifierTransform,
+  BrushStrokeModifier,
   TerrainModifier,
 } from '../modifiers/types'
 
-export interface BrushModifierDescriptor {
-  id: string
-  type: 'brush-stroke'
-  enabled: boolean
-  priority: number
-  bounds: AABB
-  mode: BrushMode
-  domain: BrushDomain
-  transform: ModifierTransform
-  radius: number
-  strength: number
-  falloff: number
-  targetY?: number
-  terraceStep?: number
-  noiseScale?: number
-  noiseSeed?: number
-  sculptLayerId?: string
+/**
+ * A brush stroke on the wire, with its dabs moved into a shared Float32Array.
+ *
+ * Derived from the modifier rather than restated field by field. The explicit
+ * list this replaces was an allowlist that silently dropped anything not named
+ * in it, so adding a property to `BrushStrokeModifier` compiled clean, worked
+ * in the viewport preview, and then quietly did nothing in the worker.
+ */
+export type BrushModifierDescriptor = Omit<BrushStrokeModifier, 'points'> & {
   pointOffset: number
   pointCount: number
 }
@@ -122,23 +112,9 @@ export function encodeModifiers(modifiers: TerrainModifier[]): ModifierPacket {
       brushPoints[offset + 6] = point.weight ?? 1
       pointCursor += 1
     }
+    const { points: _points, ...rest } = modifier
     descriptors.push({
-      id: modifier.id,
-      type: modifier.type,
-      enabled: modifier.enabled,
-      priority: modifier.priority,
-      bounds: modifier.bounds,
-      mode: modifier.mode,
-      domain: modifier.domain,
-      transform: modifier.transform,
-      radius: modifier.radius,
-      strength: modifier.strength,
-      falloff: modifier.falloff,
-      targetY: modifier.targetY,
-      terraceStep: modifier.terraceStep,
-      noiseScale: modifier.noiseScale,
-      noiseSeed: modifier.noiseSeed,
-      sculptLayerId: modifier.sculptLayerId,
+      ...rest,
       pointOffset,
       pointCount: modifier.points.length,
     })

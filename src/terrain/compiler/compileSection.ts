@@ -8,7 +8,10 @@ import type {
 } from '../core/types'
 import type { EditableSectionSourceSnapshot } from '../mesh/EditableMesh'
 import { boundaryWeldKey } from '../partition/boundary'
-import { validateMeshData } from '../mesh/MeshValidation'
+import {
+  dropDegenerateTriangles,
+  validateMeshData,
+} from '../mesh/MeshValidation'
 import {
   BvhCsgTunnelBooleanBackend,
   PATCH_SURFACE_TRIANGLE,
@@ -340,7 +343,8 @@ function compactGeneratedMesh(
     remap,
     vertexCount,
   )
-  const validation = validateMeshData(positions, indices, {
+  const repaired = dropDegenerateTriangles(positions, indices)
+  const validation = validateMeshData(positions, repaired.indices, {
     rejectDegenerateTriangles: true,
   })
   if (!validation.valid) throw new Error(validation.errors.join('; '))
@@ -352,10 +356,10 @@ function compactGeneratedMesh(
     colors,
     surfaceFields,
     paintWeights,
-    indices,
+    indices: repaired.indices,
     featureLocks,
     approximationError: source.approximationError,
-    warnings: validation.warnings.length,
+    warnings: validation.warnings.length + repaired.dropped,
     hasArbitraryTopology: source.hasArbitraryTopology,
   }
 }
@@ -599,6 +603,12 @@ function generateSectionMesh(
     originZ,
     modifiers,
   )
+  // Sculpting can pull two grid vertices onto each other and leave a triangle
+  // with no area. Dropping it costs nothing -- it drew nothing -- whereas
+  // rejecting the compile deletes the section outright, and a section that
+  // fails to compile cannot be restored by anything the user can do.
+  const repaired = dropDegenerateTriangles(result.positions, result.indices)
+  result.indices = repaired.indices
   const validation = validateMeshData(result.positions, result.indices, {
     rejectDegenerateTriangles: true,
   })
@@ -635,7 +645,7 @@ function generateSectionMesh(
       modifiers,
     ),
     approximationError: adaptive?.sampledError ?? 0,
-    warnings: validation.warnings.length,
+    warnings: validation.warnings.length + repaired.dropped,
     hasArbitraryTopology:
       booleanOperations.length > 0 || hasLateralDisplacement(modifiers),
   }
@@ -740,6 +750,8 @@ function generateEditableSectionMesh(
     originZ,
     modifiers,
   )
+  const repaired = dropDegenerateTriangles(result.positions, result.indices)
+  result.indices = repaired.indices
   const validation = validateMeshData(result.positions, result.indices, {
     boundaryMode: topologyChanged ? 'allow' : source.boundaryMode,
     sectionSize,

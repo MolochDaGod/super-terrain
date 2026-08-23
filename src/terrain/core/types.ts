@@ -115,6 +115,9 @@ export interface TerrainMetrics {
   activeBenchmark: string | null
   compileP50Ms: number
   compileP95Ms: number
+  /** Sections whose latest compile threw, and one representative message. */
+  failedSections: number
+  lastCompileError: string | null
 }
 
 export const EMPTY_METRICS: TerrainMetrics = {
@@ -145,4 +148,6 @@ export const EMPTY_METRICS: TerrainMetrics = {
   activeBenchmark: null,
   compileP50Ms: 0,
   compileP95Ms: 0,
+  failedSections: 0,
+  lastCompileError: null,
 }

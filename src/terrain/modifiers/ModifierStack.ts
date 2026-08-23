@@ -17,6 +17,7 @@ export class ModifierStack {
   private indexDirty = true
   private queryEpoch = 0
   private seenAt = new WeakMap<TerrainModifier, number>()
+  private nextSequence = 1
   private revision = 0
   private listeners = new Set<() => void>()
   private emitHandle?: number
@@ -33,6 +34,8 @@ export class ModifierStack {
   }
 
   add<T extends TerrainModifier>(modifier: T): T {
+    modifier.sequence = this.nextSequence
+    this.nextSequence += 1
     modifier.transform = normalizedTransform(modifier.transform)
     modifier.bounds = modifierWorldBounds(modifier)
     this.modifiers.push(modifier)
@@ -74,7 +77,15 @@ export class ModifierStack {
   }
 
   replace(modifiers: TerrainModifier[]): void {
-    this.modifiers = modifiers.map(cloneModifier).sort(compareModifiers)
+    // The incoming array is already in evaluation order, so it is the record of
+    // how the edits were authored -- including for worlds saved before the
+    // order was tracked explicitly.
+    const restored = modifiers.map(cloneModifier)
+    for (const modifier of restored) {
+      modifier.sequence = this.nextSequence
+      this.nextSequence += 1
+    }
+    this.modifiers = restored.sort(compareModifiers)
     this.indexDirty = true
     this.revision += 1
     this.emit()
@@ -191,6 +202,9 @@ export class ModifierStack {
 
 function compareModifiers(a: TerrainModifier, b: TerrainModifier): number {
   if (a.priority !== b.priority) return a.priority - b.priority
+  const sequenceA = a.sequence ?? Number.MAX_SAFE_INTEGER
+  const sequenceB = b.sequence ?? Number.MAX_SAFE_INTEGER
+  if (sequenceA !== sequenceB) return sequenceA - sequenceB
   return a.id.localeCompare(b.id)
 }
 

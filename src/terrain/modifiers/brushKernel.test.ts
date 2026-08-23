@@ -130,6 +130,54 @@ describe('brush dabs', () => {
     expect(point.y).toBeCloseTo(10 * BRUSH_DEPTH_PER_RADIUS, 4)
   })
 
+  it('keeps building while held when build-up is continuous', () => {
+    const held = (accumulate: boolean) => {
+      const point = { x: 0, y: 0, z: 0 }
+      const anchor = { ...point }
+      for (let dab = 0; dab < 60; dab += 1) {
+        applyBrushDab(
+          point,
+          params({ mode: 'raise', accumulate }),
+          { ...upward, weight: 0.25 },
+          anchor,
+        )
+      }
+      return point.y
+    }
+    // Per stroke settles on the depth the profile sets; continuous does not,
+    // which is the freer feel and the one that can outrun the triangulation.
+    expect(held(false)).toBeCloseTo(10 * BRUSH_DEPTH_PER_RADIUS, 4)
+    expect(held(true)).toBeGreaterThan(held(false) * 3)
+  })
+
+  it('bounds sideways travel even when build-up is continuous', () => {
+    const oblique: BrushKernelSample = {
+      ...upward,
+      normalX: 0.8,
+      normalY: 0.6,
+      normalZ: 0,
+      weight: 0.5,
+    }
+    const point = { x: 0, y: 0, z: 0 }
+    const anchor = { ...point }
+    for (let dab = 0; dab < 500; dab += 1) {
+      applyBrushDab(
+        point,
+        params({ mode: 'raise', domain: 'mesh', accumulate: true }),
+        oblique,
+        anchor,
+      )
+    }
+    // Opting into continuous build-up frees growth along the normal, never the
+    // sideways travel that turns a section's triangles inside out.
+    expect(Math.hypot(point.x, point.z)).toBeLessThanOrEqual(
+      10 * MAX_OUTWARD_SLIDE_PER_RADIUS + 1e-6,
+    )
+    // Growth along the normal is free until the point simply leaves the
+    // footprint, which is a bound the brush geometry imposes on its own.
+    expect(point.y).toBeGreaterThan(10 * BRUSH_DEPTH_PER_RADIUS * 2)
+  })
+
   it('bounds what one stroke can do, however many dabs it is given', () => {
     // A dab whose normal is mostly sideways, repeated far past any sane stroke.
     const oblique: BrushKernelSample = {

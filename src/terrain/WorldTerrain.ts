@@ -331,6 +331,7 @@ export class WorldTerrain {
   readonly rocks = new GraniteRockStore()
   readonly water: WaterStore
   readonly metrics = new ExternalStore<TerrainMetrics>(EMPTY_METRICS)
+  private lastCompileError: string | null = null
   readonly coordinates: WorldCoordinates
   private readonly compiler: TerrainCompiler
   private readonly scheduler: FrameBudgetScheduler
@@ -483,6 +484,11 @@ export class WorldTerrain {
         }
         section.buildState = 'failed'
         section.error = result.error ?? 'Terrain compilation failed'
+        // A section that cannot compile keeps whatever geometry it last had
+        // until an LOD change or an eviction takes it, and then there is
+        // nothing to put back -- the ground simply vanishes. That has to be
+        // visible in the editor rather than only in the console.
+        this.lastCompileError = `${section.id}: ${section.error}`
         console.error(
           `Terrain section ${section.id} failed to compile: ${section.error}`,
         )
@@ -731,6 +737,7 @@ export class WorldTerrain {
               : undefined,
           terraceStep: editor.terraceStep,
           noiseScale: editor.noiseScale,
+          accumulate: editor.brushAccumulate,
           sculptLayerId,
           sampleWeight: spatialDabWeight(editor.brushRadius),
         })
@@ -2799,6 +2806,7 @@ export class WorldTerrain {
         terraceStep: stroke.terraceStep,
         noiseScale: stroke.noiseScale,
         noiseSeed: stroke.noiseSeed,
+        accumulate: stroke.accumulate,
       })
     }
   }
@@ -2902,7 +2910,9 @@ export class WorldTerrain {
     }
     const workers = this.compiler.stats()
     let rebuilding = 0
+    let failed = 0
     for (const section of this.partition.values()) {
+      if (section.buildState === 'failed') failed += 1
       if (
         this.streamer.isDesired(section.key) &&
         (section.buildState === 'building' || section.buildState === 'queued')
@@ -2938,6 +2948,8 @@ export class WorldTerrain {
       activeBenchmark: this.activeBenchmark?.name ?? null,
       compileP50Ms: this.benchmarkHistory.percentile('compile', 0.5),
       compileP95Ms: this.benchmarkHistory.percentile('compile', 0.95),
+      failedSections: failed,
+      lastCompileError: failed > 0 ? this.lastCompileError : null,
     })
     void candidates
     void this.initialized

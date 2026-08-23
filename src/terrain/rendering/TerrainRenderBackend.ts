@@ -41,6 +41,7 @@ export interface PreviewBrush {
   terraceStep?: number
   noiseScale?: number
   noiseSeed?: number
+  accumulate?: boolean
 }
 
 export interface PreviewWeightPaint {

@@ -50,6 +50,7 @@ export function createBrushStroke(options: {
   targetY?: number
   terraceStep?: number
   noiseScale?: number
+  accumulate?: boolean
   sculptLayerId?: string
   sampleWeight?: number
 }): BrushStrokeModifier {
@@ -68,6 +69,7 @@ export function createBrushStroke(options: {
     terraceStep: options.terraceStep,
     noiseScale: options.noiseScale,
     noiseSeed: Math.floor(Math.random() * 0x7fff_ffff),
+    accumulate: options.accumulate,
     sculptLayerId: options.sculptLayerId,
     points: [
       {

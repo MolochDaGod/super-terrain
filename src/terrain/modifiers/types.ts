@@ -39,6 +39,16 @@ interface ModifierBase {
   priority: number
   bounds: AABB
   transform: ModifierTransform
+  /**
+   * Position in the authored order, assigned by the stack.
+   *
+   * Order is part of the meaning of a stroke, not a detail: a brush records its
+   * dabs against the surface as it stood when it was drawn, so replaying it
+   * against a different surface is not the same edit. Ties used to fall back to
+   * comparing ids, which are random UUIDs, so equal-priority strokes evaluated
+   * in an arbitrary order and later passes could miss the surface entirely.
+   */
+  sequence?: number
 }
 
 export interface BrushStrokeModifier extends ModifierBase {
@@ -52,6 +62,8 @@ export interface BrushStrokeModifier extends ModifierBase {
   terraceStep?: number
   noiseScale?: number
   noiseSeed?: number
+  /** Lets one stroke keep building while held instead of settling on a depth. */
+  accumulate?: boolean
   sculptLayerId?: string
   points: BrushSample[]
 }

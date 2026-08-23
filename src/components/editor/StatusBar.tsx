@@ -1,7 +1,7 @@
-import { Circle, Crosshair, Grid2X2, Orbit, Plane } from 'lucide-react'
+import { AlertTriangle, Circle, Crosshair, Grid2X2, Orbit, Plane } from 'lucide-react'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
-import { useEditorSnapshot } from '../../terrain/react/hooks'
+import { useEditorSnapshot, useTerrainMetrics } from '../../terrain/react/hooks'
 import { activeRadius, currentSelection } from './editorActions'
 import { TOOL_BY_ID } from './tools'
 
@@ -17,6 +17,7 @@ interface StatusBarProps {
  */
 export function StatusBar({ terrain, editor }: StatusBarProps) {
   const snapshot = useEditorSnapshot(editor)
+  const metrics = useTerrainMetrics(terrain)
   const tool = TOOL_BY_ID[snapshot.tool]
   const selection = currentSelection(terrain, snapshot)
   const showsRadius =
@@ -41,6 +42,22 @@ export function StatusBar({ terrain, editor }: StatusBarProps) {
       <Divider />
 
       <span className="min-w-0 flex-1 truncate">{snapshot.status}</span>
+
+      {metrics.failedSections > 0 && (
+        <>
+          <span
+            className="flex shrink-0 items-center gap-1.5 text-[#ff9a6f]"
+            // A section that fails to compile keeps its last geometry until an
+            // LOD change or eviction takes it, and then the ground is simply
+            // gone with nothing able to restore it. Never let that be silent.
+            title={metrics.lastCompileError ?? 'Terrain compilation failed'}
+          >
+            <AlertTriangle size={10} strokeWidth={2.2} />
+            {metrics.failedSections} section{metrics.failedSections === 1 ? '' : 's'} failed to compile
+          </span>
+          <Divider />
+        </>
+      )}
 
       {selection && (
         <>

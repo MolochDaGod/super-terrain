@@ -1264,6 +1264,7 @@ function previewKernelParams(preview: PreviewBrush): BrushKernelParams {
     terraceStep: preview.terraceStep,
     noiseScale: preview.noiseScale,
     noiseSeed: preview.noiseSeed,
+    accumulate: preview.accumulate,
   }
 }
 

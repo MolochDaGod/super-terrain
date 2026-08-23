@@ -22,6 +22,13 @@ const BRUSH_DOMAINS: SegmentedOption<BrushDomain>[] = [
   { value: 'mesh', label: 'Mesh', hint: 'Deform along the surface normal in XYZ' },
 ]
 
+type BrushBuildUp = 'stroke' | 'continuous'
+
+const BRUSH_BUILDUP: SegmentedOption<BrushBuildUp>[] = [
+  { value: 'stroke', label: 'Per stroke', hint: 'Settles on a depth; press again to build further' },
+  { value: 'continuous', label: 'Continuous', hint: 'Keeps building while held; can outrun the topology' },
+]
+
 const PAINT_MODES: SegmentedOption<PaintMode>[] = [
   { value: 'add', label: 'Add' },
   { value: 'subtract', label: 'Erase' },
@@ -122,6 +129,19 @@ export function InspectorPanel({
               max={1}
               step={0.01}
               onChange={(brushStrength) => editor.patch({ brushStrength })}
+            />
+            <Segmented
+              ariaLabel="Brush build-up"
+              options={BRUSH_BUILDUP}
+              value={snapshot.brushAccumulate ? 'continuous' : 'stroke'}
+              onChange={(buildUp) =>
+                editor.patch({
+                  brushAccumulate: buildUp === 'continuous',
+                  status: buildUp === 'continuous'
+                    ? 'Continuous build-up · one stroke keeps growing while held'
+                    : 'Per-stroke build-up · each press settles on a depth',
+                })
+              }
             />
             <RangeField
               label="Softness"

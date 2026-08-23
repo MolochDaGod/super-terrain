@@ -104,6 +104,47 @@ describe('sculpt integrity', () => {
     }
   })
 
+  it('shapes a held stroke into a dome instead of a slab with a hard rim', () => {
+    // Convergence targets are shaped by the brush profile, not flat. When they
+    // were flat, every point inside the footprint saturated at the same depth
+    // and the surface inflated into a box: a plateau with a crease around it.
+    const radius = 22
+    const centre = { x: 64, z: 64 }
+    const stroke = createBrushStroke({
+      point: { x: centre.x, y: evaluateHeight(centre.x, centre.z, SEED, []), z: centre.z },
+      normal: { x: 0, y: 1, z: 0 },
+      domain: 'mesh',
+      mode: 'raise',
+      radius,
+      strength: 1,
+      falloff: 0.55,
+      sampleWeight: 0.25,
+    })
+    for (let dab = 0; dab < 150; dab += 1) {
+      appendBrushPoint(
+        stroke,
+        { x: centre.x, y: evaluateHeight(centre.x, centre.z, SEED, []), z: centre.z },
+        { x: 0, y: 1, z: 0 },
+        0.25,
+      )
+    }
+    const modifiers = materializeModifierTransforms([stroke])
+    const liftAt = (offset: number) =>
+      evaluateTerrainPoint(centre.x + offset, centre.z, SEED, modifiers).y -
+      evaluateHeight(centre.x + offset, centre.z, SEED, [])
+
+    // Strictly decreasing from the middle out: a dome, with no flat shelf and
+    // no step at the rim.
+    let previous = Infinity
+    for (let offset = 0; offset <= radius; offset += 2) {
+      const lift = liftAt(offset)
+      if (offset > radius * 0.25) expect(lift).toBeLessThan(previous)
+      previous = lift
+    }
+    expect(liftAt(0)).toBeGreaterThan(radius * 0.3)
+    expect(liftAt(radius)).toBeCloseTo(0, 5)
+  })
+
   it('keeps a held brush inside the depth its footprint can taper', () => {
     // advanceActiveStroke appends a dab per frame while the pointer is held, so
     // hesitating mid-edit used to drive a single point out by a full brush

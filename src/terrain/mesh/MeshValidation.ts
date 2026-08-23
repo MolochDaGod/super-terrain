@@ -32,6 +32,52 @@ interface EdgeUse {
 
 const MAX_DETAILS = 32
 
+/**
+ * Drops triangles with no area, returning the surviving index buffer.
+ *
+ * Compiled terrain is derived data: it is regenerated from the modifier stack
+ * whenever anything changes, and a triangle with no area draws nothing anyway.
+ * Rejecting a whole section over one of them deletes ground the user is
+ * standing on and can never restore it, which is a far worse outcome than
+ * quietly dropping the triangle. Authored source meshes are held to the
+ * stricter standard, because there a degenerate face means a real defect
+ * upstream that should surface rather than be papered over.
+ */
+export function dropDegenerateTriangles(
+  positions: Float32Array,
+  indices: Uint32Array,
+  minimumDoubleAreaSquared = 1e-12,
+): { indices: Uint32Array; dropped: number } {
+  const kept: number[] = []
+  let dropped = 0
+  for (let offset = 0; offset < indices.length; offset += 3) {
+    const a = indices[offset] * 3
+    const b = indices[offset + 1] * 3
+    const c = indices[offset + 2] * 3
+    const abx = positions[b] - positions[a]
+    const aby = positions[b + 1] - positions[a + 1]
+    const abz = positions[b + 2] - positions[a + 2]
+    const acx = positions[c] - positions[a]
+    const acy = positions[c + 1] - positions[a + 1]
+    const acz = positions[c + 2] - positions[a + 2]
+    const crossX = aby * acz - abz * acy
+    const crossY = abz * acx - abx * acz
+    const crossZ = abx * acy - aby * acx
+    const doubleAreaSquared =
+      crossX * crossX + crossY * crossY + crossZ * crossZ
+    if (
+      !Number.isFinite(doubleAreaSquared) ||
+      doubleAreaSquared <= minimumDoubleAreaSquared
+    ) {
+      dropped += 1
+      continue
+    }
+    kept.push(indices[offset], indices[offset + 1], indices[offset + 2])
+  }
+  if (dropped === 0) return { indices, dropped: 0 }
+  return { indices: Uint32Array.from(kept), dropped }
+}
+
 export function validateMeshData(
   positions: Float32Array,
   indices: Uint32Array,
