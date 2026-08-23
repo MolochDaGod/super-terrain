@@ -36,7 +36,6 @@ import {
 import {
   evaluateTerrainLayerWeights,
   evaluateTerrainMaterialFields,
-  type TerrainMaterialFields,
   type TerrainLayerWeights,
 } from './TerrainMaterialFields'
 import { paintChannelIndex } from '../rendering/materialSettings'
@@ -107,7 +106,6 @@ export function compileTerrainSection(
     sourceResolution,
     request.config.seed,
     modifiers,
-    new Map<string, TerrainMaterialFields>(),
     request.source,
   )
   const lods: CompiledLOD[] = []
@@ -408,7 +406,6 @@ function generateSectionMesh(
   resolution: number,
   seed: number,
   modifiers: TerrainModifier[],
-  materialFieldCache: Map<string, TerrainMaterialFields>,
   source?: CompileSectionRequest['source'],
 ): GeneratedMesh {
   if (source?.kind === 'editable-mesh') {
@@ -418,7 +415,6 @@ function generateSectionMesh(
       resolution,
       seed,
       modifiers,
-      materialFieldCache,
       source,
     )
   }
@@ -531,7 +527,6 @@ function generateSectionMesh(
     originX,
     originZ,
     seed,
-    materialFieldCache,
   )
   const paintWeights = calculatePaintWeights(
     result.positions,
@@ -585,7 +580,6 @@ function generateEditableSectionMesh(
   resolution: number,
   seed: number,
   modifiers: TerrainModifier[],
-  materialFieldCache: Map<string, TerrainMaterialFields>,
   source: EditableSectionSourceSnapshot,
 ): GeneratedMesh {
   validateEditableSourceSnapshot(source)
@@ -672,7 +666,6 @@ function generateEditableSectionMesh(
     originX,
     originZ,
     seed,
-    materialFieldCache,
   )
   const paintWeights = calculatePaintWeights(
     result.positions,
@@ -1293,7 +1286,6 @@ function calculateSurfaceFields(
   originX: number,
   originZ: number,
   seed: number,
-  cache: Map<string, TerrainMaterialFields>,
 ): readonly [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] {
   const vertexCount = positions.length / 3
   const packed: [Uint16Array, Uint16Array, Uint16Array, Uint16Array, Uint16Array] = [
@@ -1322,12 +1314,10 @@ function calculateSurfaceFields(
     const x = originX + positions[source]
     const y = positions[source + 1]
     const z = originZ + positions[source + 2]
-    const key = `${x}:${y}:${z}`
-    let fields = cache.get(key)
-    if (!fields) {
-      fields = evaluateTerrainMaterialFields(x, y, z, seed)
-      cache.set(key, fields)
-    }
+    // No memo here. Every vertex of a section is at a distinct position, so the
+    // map this used to consult could not hit even once; it only ever built a
+    // key string per vertex and grew.
+    const fields = evaluateTerrainMaterialFields(x, y, z, seed)
 
     const weights = evaluateTerrainLayerWeights(
       x,

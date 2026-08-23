@@ -131,17 +131,20 @@ export class TerrainStreamer {
     const nextVisible = new Set<SectionId>()
     const candidates: StreamCandidate[] = []
 
-    for (let dz = -searchRadius; dz <= searchRadius; dz += 1) {
-      for (let dx = -searchRadius; dx <= searchRadius; dx += 1) {
-        const key = { x: center.x + dx, z: center.z + dz }
-        if (
-          key.x < minSection ||
-          key.x > maxSection ||
-          key.z < minSection ||
-          key.z > maxSection
-        ) {
-          continue
-        }
+    // Clamped to the world rather than swept as a full square around the
+    // camera. The residency radius now reaches the far corner of the map, so an
+    // unclamped sweep would spend most of its iterations rejecting cells that
+    // are outside the world entirely -- roughly eight times as many as the
+    // world contains, every frame the camera moves.
+    const firstX = Math.max(minSection, center.x - searchRadius)
+    const lastX = Math.min(maxSection, center.x + searchRadius)
+    const firstZ = Math.max(minSection, center.z - searchRadius)
+    const lastZ = Math.min(maxSection, center.z + searchRadius)
+    for (let z = firstZ; z <= lastZ; z += 1) {
+      const dz = z - center.z
+      for (let x = firstX; x <= lastX; x += 1) {
+        const dx = x - center.x
+        const key = { x, z }
         const distance = Math.hypot(dx, dz)
         if (distance > searchRadius + 0.25) continue
         const alignment = distance > 0 ? (dx * forwardX + dz * forwardZ) / distance : 1

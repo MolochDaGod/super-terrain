@@ -457,18 +457,60 @@ export function sampleHeightField(
  * Meshing evaluates the height at every vertex and the material pass then needs
  * the terrain-derived fields at the same points. The stack behind these is nine
  * octaves of ridged multifractal plus a drainage network, so recomputing it
- * would roughly double compile time; a bounded map keyed on the exact
- * coordinates the mesher used turns the second pass into a lookup.
+ * would roughly double compile time; a bounded map turns the second pass into
+ * a lookup.
+ *
+ * The key is quantised rather than exact. The mesher asks at the full-precision
+ * grid coordinate, but it then stores the vertex as a Float32 section-local
+ * offset, so the material pass reconstructs `originX + position` and arrives at
+ * a coordinate that differs in the last few bits — 4e-5 m at the far edge of a
+ * section. Keyed exactly, 80 of every 89 grid columns therefore missed and paid
+ * for the whole stack twice, which is what this cache exists to prevent.
+ * Quantising to a quarter of a millimetre puts both spellings of the same
+ * vertex in one bucket. Whichever caller arrives first decides the sample, and
+ * that is the mesher at its exact coordinate, so the mesh itself is unchanged
+ * and only the material pass moves — by a distance three orders of magnitude
+ * below the finest feature any of these fields describes.
  */
-const sampleCache = new Map<string, HeightFieldSample>()
+const sampleCache = new Map<number, HeightFieldSample>()
 const SAMPLE_CACHE_LIMIT = 300_000
+/** Buckets per metre. A power of two keeps the quantisation itself exact. */
+const SAMPLE_CACHE_QUANTUM = 4_096
+/**
+ * Half the addressable span either side of the origin. Keys are packed as
+ * `qx * 2^25 + qz`, which stays inside the 53 bits a double represents exactly
+ * as long as each axis fits in 25 bits. That covers +/- 4 km at the quantum
+ * above; anything further out is a caller with no reuse to gain anyway.
+ */
+const SAMPLE_CACHE_ORIGIN = 1 << 24
+const SAMPLE_CACHE_STRIDE = 1 << 25
+/**
+ * The seed used to be part of the key. Carrying it there made every entry pay
+ * for it on every lookup even though a worker compiles one request at a time
+ * and a whole request shares one seed; holding it beside the map and dropping
+ * the map when it changes is the same invalidation for none of the per-sample
+ * cost. `setWorldProfile` already clears on the other axis.
+ */
+let sampleCacheSeed: number | undefined
 
 export function sampleHeightFieldCached(
   x: number,
   z: number,
   seed: number,
 ): HeightFieldSample {
-  const key = `${worldProfile}:${x}:${z}:${seed}`
+  if (seed !== sampleCacheSeed) {
+    sampleCache.clear()
+    sampleCacheSeed = seed
+  }
+  const qx = Math.round(x * SAMPLE_CACHE_QUANTUM) + SAMPLE_CACHE_ORIGIN
+  const qz = Math.round(z * SAMPLE_CACHE_QUANTUM) + SAMPLE_CACHE_ORIGIN
+  if (
+    qx < 0 || qx >= SAMPLE_CACHE_STRIDE ||
+    qz < 0 || qz >= SAMPLE_CACHE_STRIDE
+  ) {
+    return sampleHeightField(x, z, seed)
+  }
+  const key = qx * SAMPLE_CACHE_STRIDE + qz
   const hit = sampleCache.get(key)
   if (hit) return hit
   const sample = sampleHeightField(x, z, seed)

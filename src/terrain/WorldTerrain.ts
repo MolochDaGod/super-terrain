@@ -159,6 +159,19 @@ const BRUSH_FLOW_PER_SECOND = 2.4
 const SPATIAL_DAB_WEIGHT = 0.08
 const MAX_AUTHORED_DAB_WEIGHT = 0.2
 const GRANITE_PLANT_DEPTH_RATIO = 0.06
+/**
+ * How far a section's compiled detail may exceed what its distance now asks
+ * for before the detail is given back.
+ *
+ * One level, because there are only five. At two, a section holding the middle
+ * level while its distance asked for the coarsest failed the test exactly --
+ * `4 > 2 + 2` is false -- so the levels in the middle of the range, which are
+ * most of them, were never reclaimed at all: a ground-level traverse of the map
+ * left 120 MB resident against 70 MB at rest. This is still strictly more
+ * cautious than the refining direction, which rebuilds on any improvement at
+ * all, so a camera sitting on a level boundary cannot oscillate through it.
+ */
+const LOD_RECLAIM_SLACK = 1
 
 function compiledGpuBytes(compiled: CompiledSection | undefined): number {
   return compiled?.gpuBytes ?? compiled?.lods.reduce(
@@ -2011,12 +2024,29 @@ export class WorldTerrain {
       section.compiled?.sourceRevision === section.revision
         ? (section.compiled.lods[0]?.level ?? Infinity)
         : Infinity
+    // Detail is now reclaimed by level rather than by eviction.
+    //
+    // While terrain existed only near the camera, a section that fell out of
+    // range stopped being desired, went untouched and was evicted whole; that
+    // was what released the megabyte a finest-level section occupies. Residency
+    // now reaches the world edge and nothing ever stops being desired, so
+    // without this a section keeps whatever detail it was ever built with for
+    // the rest of the session, and flying across the map would accumulate every
+    // section at the level it had when the camera passed it.
+    //
+    // Rebuilding coarse costs at most a few milliseconds -- 3.3 ms at the
+    // second-coarsest level against 225 ms at the finest -- so the reclaim is
+    // far cheaper than the memory it returns. The slack is what keeps a camera
+    // drifting along a level boundary from rebuilding on every frame; a
+    // one-level disagreement is left alone.
+    const overDetailed = minimumLod > compiledMinimumLod + LOD_RECLAIM_SLACK
     const needsBuild =
       section.buildState === 'queued' ||
       section.buildState === 'failed' ||
       (section.buildState === 'building' &&
         section.buildingRevision !== section.revision) ||
-      minimumLod < compiledMinimumLod
+      minimumLod < compiledMinimumLod ||
+      overDetailed
     if (!needsBuild) return
     // A warm-start lookup is asynchronous, but it is still dramatically
     // cheaper than starting the same exact CSG job in a worker. Hold this
@@ -2132,7 +2162,11 @@ export class WorldTerrain {
       id: `swap:${section.id}:${section.revision}`,
       kind: 'swap',
       priority: candidate.priority + 3_000,
-      estimatedCpuMs: 0.42,
+      // A first guess only: the scheduler replaces this with what swaps are
+      // measured to cost as soon as it has run one. It used to say 0.42 while
+      // really costing tens of milliseconds, because `upload` built geometry
+      // for all five levels; it now builds the one being displayed.
+      estimatedCpuMs: 2.5,
       uploadBytes: compiledGpuBytes(pending),
       swaps: 1,
       run: () => {

@@ -53,12 +53,6 @@ export interface TerrainLayerWeights {
   lichen: number
 }
 
-interface Point3 {
-  x: number
-  y: number
-  z: number
-}
-
 /** Metres of bed thickness the packed unit value spans. */
 export const BED_THICKNESS_MIN = 9
 export const BED_THICKNESS_MAX = 26
@@ -88,10 +82,15 @@ export function evaluateTerrainMaterialFields(
   z: number,
   seed: number,
 ): TerrainMaterialFields {
-  const position = { x, y, z }
-  const firstWarp = warp(position, 9.5, 0.021)
-  const bedded = warp(firstWarp, 1.6, 0.1373)
-  const buttressPosition = warp(position, 11, 0.02)
+  warp(x, y, z, 9.5, 0.021)
+  warp(warped.x, warped.y, warped.z, 1.6, 0.1373)
+  const beddedX = warped.x
+  const beddedY = warped.y
+  const beddedZ = warped.z
+  warp(x, y, z, 11, 0.02)
+  const buttressX = warped.x
+  const buttressY = warped.y
+  const buttressZ = warped.z
 
   const terrain = sampleHeightFieldCached(x, z, seed)
   const { bedding } = terrain
@@ -128,7 +127,7 @@ export function evaluateTerrainMaterialFields(
       // aridity is deliberate: even an erg has damp interdune hollows where
       // the water table is close, and those are where its only vegetation is.
       aridity * 0.55 +
-      (fbm(position, 150, 2) - 0.5) * 0.3,
+      (fbm(x, y, z, 150, 2) - 0.5) * 0.3,
     0,
     1,
   )
@@ -148,7 +147,7 @@ export function evaluateTerrainMaterialFields(
       // basins carry a *larger* budget of mobile regolith than the alpine
       // valleys do, not a smaller one.
       aridity * 0.22 +
-      (fbm(position, 46, 2) - 0.5) * 0.34,
+      (fbm(x, y, z, 46, 2) - 0.5) * 0.34,
     0,
     1,
   )
@@ -159,7 +158,7 @@ export function evaluateTerrainMaterialFields(
     bedrockExposure,
     deposition,
     moisture,
-    macro: fbm(position, 34, 3),
+    macro: fbm(x, y, z, 34, 3),
     beddingX: bedding.normalX,
     beddingY: bedding.normalY,
     beddingZ: bedding.normalZ,
@@ -170,20 +169,16 @@ export function evaluateTerrainMaterialFields(
       1,
     ),
     bedExposure: bedding.expression,
-    jointing: fbm(position, 24, 2),
-    lichen: fbm(position, 9, 3),
-    mottle: fbm(position, 14, 2),
-    beddedOffsetX: bedded.x - x,
-    beddedOffsetY: bedded.y - y,
-    beddedOffsetZ: bedded.z - z,
-    regionalTint: fbm(position, 220, 2),
+    jointing: fbm(x, y, z, 24, 2),
+    lichen: fbm(x, y, z, 9, 3),
+    mottle: fbm(x, y, z, 14, 2),
+    beddedOffsetX: beddedX - x,
+    beddedOffsetY: beddedY - y,
+    beddedOffsetZ: beddedZ - z,
+    regionalTint: fbm(x, y, z, 220, 2),
     aridity,
     erg,
-    buttress: ridged(
-      { x: buttressPosition.x, y: buttressPosition.y * 0.6, z: buttressPosition.z },
-      9,
-      3,
-    ),
+    buttress: ridged(buttressX, buttressY * 0.6, buttressZ, 9, 3),
     flow,
   }
 }
@@ -210,7 +205,7 @@ export function evaluateTerrainLayerWeights(
     raw = fbm2(x + y * 0.37, z + y * 0.21, 3, 4) - 0.5
   }
   if (slope > 0.32) {
-    const volumeFray = fbm({ x, y, z }, 3, 4) - 0.5
+    const volumeFray = fbm(x, y, z, 3, 4) - 0.5
     raw = lerp(raw, volumeFray, smoothstep(0.32, 0.58, slope))
   }
   const fray = raw * 0.22
@@ -320,17 +315,19 @@ export function evaluateTerrainLayerWeights(
   }
 }
 
-function fbm(position: Point3, wavelength: number, octaves: number): number {
+function fbm(
+  x: number,
+  y: number,
+  z: number,
+  wavelength: number,
+  octaves: number,
+): number {
   let sum = 0
   let total = 0.0001
   let amplitude = 1
   let scale = 1 / wavelength
   for (let octave = 0; octave < octaves; octave += 1) {
-    sum += perlin3(
-      position.x * scale,
-      position.y * scale,
-      position.z * scale,
-    ) * amplitude
+    sum += perlin3(x * scale, y * scale, z * scale) * amplitude
     total += amplitude
     amplitude *= 0.52
     scale *= 2.07
@@ -357,18 +354,20 @@ function fbm2(
   return clamp(sum / total * 0.5 + 0.5, 0, 1)
 }
 
-function ridged(position: Point3, wavelength: number, octaves: number): number {
+function ridged(
+  x: number,
+  y: number,
+  z: number,
+  wavelength: number,
+  octaves: number,
+): number {
   let sum = 0
   let total = 0.0001
   let amplitude = 1
   let scale = 1 / wavelength
   let carry = 1
   for (let octave = 0; octave < octaves; octave += 1) {
-    const ridge = 1 - Math.abs(perlin3(
-      position.x * scale,
-      position.y * scale,
-      position.z * scale,
-    ))
+    const ridge = 1 - Math.abs(perlin3(x * scale, y * scale, z * scale))
     const shaped = ridge * ridge * carry
     carry = clamp(shaped * 2.1, 0, 1)
     sum += shaped * amplitude
@@ -379,21 +378,35 @@ function ridged(position: Point3, wavelength: number, octaves: number): number {
   return clamp(sum / total, 0, 1)
 }
 
-function warp(position: Point3, amount: number, frequency: number): Point3 {
-  const sx = position.x * frequency
-  const sy = position.y * frequency
-  const sz = position.z * frequency
+/**
+ * Domain warp, written into `warped` rather than returned.
+ *
+ * This is called three times for every vertex of every section, and the object
+ * it used to return -- along with the `Point3` wrappers the noise stack took --
+ * was allocated and collected purely to carry three numbers a few lines. The
+ * caller reads the result immediately, so one module-level triple serves.
+ */
+const warped = { x: 0, y: 0, z: 0 }
+
+function warp(
+  x: number,
+  y: number,
+  z: number,
+  amount: number,
+  frequency: number,
+): void {
+  const sx = x * frequency
+  const sy = y * frequency
+  const sz = z * frequency
   const a = perlin3(sx, sy, sz)
   const b = perlin3(
     sy * -1.13 + 19.7,
     sz * -1.13 + 19.7,
     sx * -1.13 + 19.7,
   )
-  return {
-    x: position.x + a * amount,
-    y: position.y + b * amount,
-    z: position.z + (a * 0.7 - b * 0.7) * amount,
-  }
+  warped.x = x + a * amount
+  warped.y = y + b * amount
+  warped.z = z + (a * 0.7 - b * 0.7) * amount
 }
 
 function perlin3(x: number, y: number, z: number): number {
@@ -445,11 +458,29 @@ function gradient2(hash: number, x: number, y: number): number {
   return (h & 1 ? -u : u) + (h & 2 ? -v : v)
 }
 
+/**
+ * The sixteen gradient directions Perlin's `grad` selects between, tabulated.
+ *
+ * The classic formulation picks its two axes and their two signs with four
+ * branches, and `perlin3` runs it once per cube corner -- forty unpredictable
+ * branches per tap, against roughly thirty taps per vertex. Each of those cases
+ * is a dot product with a fixed vector, so reading the vector out of a table
+ * computes exactly the same number without any of the branching. The values are
+ * the branching form's own output for the three basis vectors.
+ */
+const GRADIENT_X = /*@__PURE__*/ Float64Array.from(
+  [1, -1, 1, -1, 1, -1, 1, -1, 0, 0, 0, 0, 1, 0, -1, 0],
+)
+const GRADIENT_Y = /*@__PURE__*/ Float64Array.from(
+  [1, 1, -1, -1, 0, 0, 0, 0, 1, -1, 1, -1, 1, -1, 1, -1],
+)
+const GRADIENT_Z = /*@__PURE__*/ Float64Array.from(
+  [0, 0, 0, 0, 1, 1, -1, -1, 1, 1, -1, -1, 0, 1, 0, -1],
+)
+
 function gradient(hash: number, x: number, y: number, z: number): number {
   const h = hash & 15
-  const u = h < 8 ? x : y
-  const v = h < 4 ? y : h === 12 || h === 14 ? x : z
-  return (h & 1 ? -u : u) + (h & 2 ? -v : v)
+  return GRADIENT_X[h] * x + GRADIENT_Y[h] * y + GRADIENT_Z[h] * z
 }
 
 function hash3(x: number, y: number, z: number): number {

@@ -151,6 +151,9 @@ export interface EditorSnapshot {
   status: string
 }
 
+/** How often the status-bar cursor readout is allowed to re-render. */
+const CURSOR_READOUT_INTERVAL_MS = 100
+
 const INITIAL_EDITOR_STATE: EditorSnapshot = {
   tool: 'camera',
   brushDomain: 'mesh',
@@ -205,25 +208,64 @@ export class EditorStore extends ExternalStore<EditorSnapshot> {
     super(INITIAL_EDITOR_STATE)
   }
 
+  private cursorNotifyHandle?: ReturnType<typeof setTimeout>
+
   patch(values: Partial<EditorSnapshot>): void {
+    // Any real patch wakes subscribers, which is also the cursor readout's
+    // pending update delivered early.
+    this.cancelCursorNotify()
     this.update((current) => ({ ...current, ...values }))
   }
 
+  /**
+   * Where the pointer is on the terrain.
+   *
+   * Written on every hover frame, and read back two very different ways. The
+   * brush ring and the editor verbs pull it straight off `getSnapshot` when
+   * they need it, so the snapshot is replaced immediately and they always see
+   * the live position. React only ever *displays* it -- a coordinate readout
+   * and a section label in the status bar -- so subscribers are woken on a
+   * timer instead.
+   *
+   * Waking them per move meant a full re-render of the editor on every pointer
+   * event, since the root reads this same snapshot: measured at roughly 30 ms a
+   * frame, which was the whole of what remained of the hover cost once the ray
+   * itself was accelerated. Ten updates a second is past what anyone can read
+   * off a moving number.
+   */
   setCursor(
     position: Vec3Like,
     normal: Vec3Like,
     selectedSection?: SectionId,
   ): void {
-    this.patch({
+    this.setWithoutNotifying({
+      ...this.getSnapshot(),
       cursorPosition: { ...position },
       cursorNormal: { ...normal },
       cursorVisible: true,
       selectedSection,
     })
+    this.scheduleCursorNotify()
   }
 
   hideCursor(): void {
+    // An edge, not a stream: the ring has to go out at once.
+    this.cancelCursorNotify()
     this.patch({ cursorVisible: false })
+  }
+
+  private scheduleCursorNotify(): void {
+    if (this.cursorNotifyHandle !== undefined) return
+    this.cursorNotifyHandle = setTimeout(() => {
+      this.cursorNotifyHandle = undefined
+      this.notifyListeners()
+    }, CURSOR_READOUT_INTERVAL_MS)
+  }
+
+  private cancelCursorNotify(): void {
+    if (this.cursorNotifyHandle === undefined) return
+    clearTimeout(this.cursorNotifyHandle)
+    this.cursorNotifyHandle = undefined
   }
 
   /** Ask the orbit camera to centre on a world point. */

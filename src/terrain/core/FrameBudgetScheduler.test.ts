@@ -136,4 +136,75 @@ describe('frame budget scheduler', () => {
 
     expect(swaps.every((swap) => swap.mock.calls.length === 1)).toBe(true)
   })
+
+  it('prefers what a task class was measured to cost over its declared estimate', () => {
+    const scheduler = new FrameBudgetScheduler({
+      cpuTerrainMs: 20,
+      gpuUploadBytes: 1_000_000,
+      sectionSwaps: 8,
+    })
+    const enqueueSwap = (index: number, run: () => void) =>
+      scheduler.enqueue({
+        id: `swap:${index}`,
+        kind: 'swap',
+        priority: 10 - index,
+        // Wildly optimistic, exactly like the constants at the real call sites.
+        estimatedCpuMs: 0.4,
+        uploadBytes: 100,
+        swaps: 1,
+        run,
+      })
+
+    // One frame teaches the scheduler what a swap really costs.
+    scheduler.beginFrame(16)
+    enqueueSwap(0, () => {
+      const until = performance.now() + 12
+      while (performance.now() < until) { /* burn a realistic swap */ }
+    })
+    scheduler.runFrame()
+    expect(scheduler.measuredCosts().get('swap')).toBeGreaterThan(8)
+
+    // The next frame charges the following swaps at the measured rate, so the
+    // 20 ms allowance no longer admits a whole queue of them on the strength of
+    // a 0.4 ms claim.
+    scheduler.beginFrame(16)
+    const later = [vi.fn(), vi.fn(), vi.fn()]
+    later.forEach((run, index) => enqueueSwap(index + 1, run))
+    scheduler.runFrame()
+    expect(later.filter((run) => run.mock.calls.length === 1)).toHaveLength(1)
+    expect(scheduler.pendingTaskCount).toBe(2)
+  })
+
+  it('always runs the head of the queue, however small the allowance has become', () => {
+    const scheduler = new FrameBudgetScheduler({
+      cpuTerrainMs: 4,
+      gpuUploadBytes: 1_000_000,
+      sectionSwaps: 8,
+      targetFrameMs: 16.67,
+    })
+    // Slow frames shrink the per-frame allowance to its floor. Once a measured
+    // cost is larger than that floor, an admission test without a progress
+    // guarantee declines the task on every subsequent frame, which stops the
+    // queue for good rather than merely slowing it.
+    for (let frame = 0; frame < 200; frame += 1) scheduler.beginFrame(90)
+    const runs: number[] = []
+    for (let frame = 0; frame < 6; frame += 1) {
+      scheduler.beginFrame(90)
+      scheduler.enqueue({
+        id: `swap:${frame}`,
+        kind: 'swap',
+        priority: 10,
+        estimatedCpuMs: 3,
+        uploadBytes: 100,
+        swaps: 1,
+        run: () => {
+          runs.push(frame)
+          const until = performance.now() + 3
+          while (performance.now() < until) { /* over the shrunken allowance */ }
+        },
+      })
+      scheduler.runFrame()
+    }
+    expect(runs).toHaveLength(6)
+  })
 })

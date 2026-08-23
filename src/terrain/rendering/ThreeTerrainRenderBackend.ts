@@ -16,7 +16,7 @@ import {
   Vector3,
 } from 'three/webgpu'
 import { smoothstep } from '../core/bounds'
-import type { CompiledSection, SectionId } from '../core/types'
+import type { CompiledLOD, CompiledSection, SectionId } from '../core/types'
 import type { TerrainOverlay } from '../editor/EditorStore'
 import type { TerrainSection } from '../partition/MeshPartition'
 import type {
@@ -41,6 +41,11 @@ import {
 } from './TerrainBricks'
 import { invalidateTerrainShadows } from './environment/terrainShadowInvalidation'
 import {
+  disposeTerrainBoundsTree,
+  ensureTerrainBoundsTree,
+  refitTerrainBoundsTree,
+} from './terrainRaycastAcceleration'
+import {
   cloneTerrainMaterialSettings,
   DEFAULT_TERRAIN_MATERIAL_SETTINGS,
   paintChannelIndex,
@@ -59,6 +64,9 @@ interface RuntimeLod {
 
 interface RuntimeSection {
   section: TerrainSection
+  /** Compiled source for every level, kept so a level can be built on demand. */
+  compiled: Map<number, CompiledLOD>
+  /** Only the levels that have actually been displayed. */
   lods: Map<number, RuntimeLod>
   boundary: LineSegments
   gpuBytes: number
@@ -146,29 +154,27 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       (bytes, lod) => bytes + lod.gpuBytes,
       0,
     )
-    const lods = new Map(
-      compiled.lods.map((lod) => [
-        lod.level,
-        this.createRuntimeLod(
-          section,
-          lod.level,
-          createSectionGeometry(lod, this.sectionSize),
-        ),
-      ]),
-    )
+    // Only the level about to be displayed is turned into geometry here. A
+    // section carries five, of which the renderer draws exactly one, and
+    // building the other four cost skirting, attribute construction and bounds
+    // for meshes that were usually evicted before they were ever selected --
+    // all of it on the main thread, inside the frame that installs the section.
+    // `materializeLod` builds the rest on the swap that first asks for them.
+    const compiledLods = new Map(compiled.lods.map((lod) => [lod.level, lod]))
     let runtime = this.runtime.get(section.id)
     if (runtime) {
       this.detachActiveLod(runtime)
       this.deferRuntimeLods(runtime.lods)
-      runtime.lods = lods
+      runtime.lods = new Map()
+      runtime.compiled = compiledLods
       runtime.gpuBytes = gpuBytes
       runtime.section = section
-      runtime.lod = closestAvailableLod(lods, runtime.lod)
+      runtime.lod = closestAvailableLod(compiledLods, runtime.lod)
       this.attachActiveLod(runtime)
       this.updateBoundary(runtime, compiled)
     } else {
       const initialLod = closestAvailableLod(
-        lods,
+        compiledLods,
         section.requestedLod,
       )
       const boundary = createBoundary(
@@ -180,7 +186,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       this.root.add(boundary)
       runtime = {
         section,
-        lods,
+        compiled: compiledLods,
+        lods: new Map(),
         boundary,
         gpuBytes,
         lod: initialLod,
@@ -202,7 +209,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   setLod(sectionId: SectionId, lod: number): void {
     const runtime = this.runtime.get(sectionId)
     if (!runtime) return
-    const next = closestAvailableLod(runtime.lods, lod)
+    const next = closestAvailableLod(runtime.compiled, lod)
     if (next === runtime.lod) return
     this.detachActiveLod(runtime)
     runtime.lod = next
@@ -348,6 +355,11 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       if (maximumDisplacement > 0) {
         expandPreviewBounds(activeLod.source, maximumDisplacement)
         expandTerrainBrickBounds(activeLod.bricks, maximumDisplacement)
+        // Bricks share the positions that just moved, so any tree already built
+        // over them now describes the shape before the stroke.
+        for (const brick of activeLod.bricks) {
+          refitTerrainBoundsTree(brick.geometry)
+        }
         this.queuePreviewRefresh(activeLod.source)
       }
     }
@@ -399,7 +411,25 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined {
-    const hits = raycaster.intersectObject(this.root, true)
+    // Only sections that are actually attached can be hit, and only their
+    // active LOD is attached, so this builds at most one tree per section the
+    // pointer has visited rather than one per compiled level.
+    for (const runtime of this.runtime.values()) {
+      if (!runtime.visible) continue
+      for (const brick of this.activeBricks(runtime)) {
+        ensureTerrainBoundsTree(brick.geometry)
+      }
+    }
+    // The nearest hit on each mesh is the only one that can win, and the list
+    // comes back sorted, so the deeper hits behind it are pure work.
+    const previousFirstHitOnly = raycaster.firstHitOnly
+    raycaster.firstHitOnly = true
+    let hits
+    try {
+      hits = raycaster.intersectObject(this.root, true)
+    } finally {
+      raycaster.firstHitOnly = previousFirstHitOnly
+    }
     for (const hit of hits) {
       const id = hit.object.userData.terrainSectionId as SectionId | undefined
       if (!id) continue
@@ -499,13 +529,17 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
 
   private applyMaterial(runtime: RuntimeSection): void {
     for (const [level, lod] of runtime.lods) {
-      const material = this.overlay === 'lod'
-        ? this.lodMaterials[level] ?? this.lodMaterials.at(-1)!
-        : this.overlay === 'density'
-          ? this.densityMaterial
-          : this.terrainMaterial.material
-      for (const brick of lod.bricks) brick.mesh.material = material
+      this.applyMaterialToLod(level, lod)
     }
+  }
+
+  private applyMaterialToLod(level: number, lod: RuntimeLod): void {
+    const material = this.overlay === 'lod'
+      ? this.lodMaterials[level] ?? this.lodMaterials.at(-1)!
+      : this.overlay === 'density'
+        ? this.densityMaterial
+        : this.terrainMaterial.material
+    for (const brick of lod.bricks) brick.mesh.material = material
   }
 
   private createRuntimeLod(
@@ -536,7 +570,31 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   private activeBricks(runtime: RuntimeSection): RuntimeBrick[] {
-    return runtime.lods.get(runtime.lod)?.bricks ?? []
+    return this.materializeLod(runtime, runtime.lod)?.bricks ?? []
+  }
+
+  /**
+   * The runtime geometry for one level, built on first use.
+   *
+   * Returns undefined only when the compile produced no such level, which
+   * `closestAvailableLod` already rules out for anything this asks for.
+   */
+  private materializeLod(
+    runtime: RuntimeSection,
+    level: number,
+  ): RuntimeLod | undefined {
+    const existing = runtime.lods.get(level)
+    if (existing) return existing
+    const compiled = runtime.compiled.get(level)
+    if (!compiled) return undefined
+    const lod = this.createRuntimeLod(
+      runtime.section,
+      level,
+      createSectionGeometry(compiled, this.sectionSize),
+    )
+    runtime.lods.set(level, lod)
+    this.applyMaterialToLod(level, lod)
+    return lod
   }
 
   private attachActiveLod(runtime: RuntimeSection): void {
@@ -579,6 +637,10 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private deferGeometries(geometries: BufferGeometry[]): void {
     for (const geometry of geometries) {
       this.pendingPreviewRefresh.delete(geometry)
+      // The tree indexes positions this geometry is about to stop owning, and
+      // nothing can raycast a detached mesh, so it goes now rather than waiting
+      // out the disposal delay that exists for in-flight GPU frames.
+      disposeTerrainBoundsTree(geometry)
       this.deferredDisposals.push({ geometry, framesRemaining: 4 })
     }
   }

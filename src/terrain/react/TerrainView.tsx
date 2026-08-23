@@ -159,7 +159,38 @@ export function TerrainView({
       editor.patch({ status: `Water level set to ${(hit.point.y + 2).toFixed(0)} m` })
     }
 
+    /**
+     * Hover work runs at most once per frame.
+     *
+     * A pointer can report far faster than the display refreshes, and every
+     * report here casts a ray and writes the 3D cursor into the editor store,
+     * which re-renders the surrounding UI. Coalescing to the frame keeps both
+     * off the critical path without losing anything: only the newest pointer
+     * position can matter by the time the frame is drawn.
+     *
+     * A live stroke is exempt. Its samples are authored content rather than a
+     * cursor readout, and dropping the ones that fall between frames would
+     * quietly coarsen the brush path.
+     */
+    let hoverEvent: PointerEvent | undefined
+    let hoverHandle: number | undefined
+    const runHover = () => {
+      hoverHandle = undefined
+      const event = hoverEvent
+      hoverEvent = undefined
+      if (event) applyPointerMove(event)
+    }
     const onPointerMove = (event: PointerEvent) => {
+      if (dragging.current) {
+        applyPointerMove(event)
+        return
+      }
+      hoverEvent = event
+      if (hoverHandle !== undefined) return
+      hoverHandle = requestAnimationFrame(runHover)
+    }
+
+    const applyPointerMove = (event: PointerEvent) => {
       const snapshot = editor.getSnapshot()
       if (snapshot.cameraMode === 'fly' || snapshot.uiViewMode === 'clean') {
         editor.hideCursor()
@@ -326,6 +357,7 @@ export function TerrainView({
     canvas.addEventListener('pointerleave', onPointerLeave)
     canvas.addEventListener('contextmenu', preventContextMenu)
     return () => {
+      if (hoverHandle !== undefined) cancelAnimationFrame(hoverHandle)
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerdown', onPointerDown)
       canvas.removeEventListener('pointerup', endPointer)
