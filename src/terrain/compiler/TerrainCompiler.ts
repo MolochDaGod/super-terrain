@@ -14,6 +14,8 @@ export interface TerrainCompilerResult {
   revision: number
   compiled?: CompiledSection
   error?: string
+  /** The pool dropped the job; the section is fine and should be requeued. */
+  retryable?: boolean
 }
 
 export class TerrainCompiler {
@@ -36,6 +38,7 @@ export class TerrainCompiler {
           key: result.key,
           revision: result.revision,
           error: result.error,
+          retryable: result.retryable,
         })
       }
     }

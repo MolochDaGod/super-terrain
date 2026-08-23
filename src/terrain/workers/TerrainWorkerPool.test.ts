@@ -134,19 +134,44 @@ describe('terrain worker pool revisions', () => {
     pool.dispose()
   })
 
-  it('returns a restarted slot\'s untouched work to the queue', () => {
+  it('hands a restarted slot\'s untouched work back as retryable', () => {
     const pool = new TerrainWorkerPool(1, DEFAULT_TERRAIN_CONFIG, 3)
+    const results: unknown[] = []
+    pool.onResult = (result) => results.push(result)
     const doomed = pool.submit({ x: 0, z: 0 }, 1, 10, [])
     const survivor = pool.submit({ x: 1, z: 0 }, 1, 9, [])
     expect(pool.stats()).toMatchObject({ active: 2, queued: 0 })
 
     // Cancelling in-flight work has to terminate the worker, which takes the
-    // pipelined job beside it down too. That one is still wanted.
+    // pipelined job beside it down too. Its buffers went with the terminated
+    // worker, so it cannot simply be re-sent -- the owner is told to rebuild it.
     expect(pool.cancelSection({ x: 0, z: 0 }, 1)).toEqual({ queued: 0, active: 1 })
     expect(FakeWorker.instances[0].terminated).toBe(true)
-    expect(FakeWorker.instances[1].request).toMatchObject({ jobId: survivor })
-    expect(pool.stats()).toMatchObject({ active: 1, queued: 0, cancelled: 1 })
+    expect(FakeWorker.instances[1].request).toBeUndefined()
+    expect(results).toEqual([
+      expect.objectContaining({ ok: false, jobId: survivor, retryable: true }),
+    ])
+    expect(pool.stats()).toMatchObject({ active: 0, queued: 0, cancelled: 1 })
     expect(doomed).not.toBe(survivor)
+    pool.dispose()
+  })
+
+  it('frees the slot when a send throws instead of stranding the job', () => {
+    const pool = new TerrainWorkerPool(1, DEFAULT_TERRAIN_CONFIG, 2)
+    const results: unknown[] = []
+    pool.onResult = (result) => results.push(result)
+    const failing = pool.submit({ x: 4, z: 0 }, 1, 10, [])
+    // Simulate a transfer list the structured clone algorithm rejects.
+    FakeWorker.instances[0].postMessage = () => {
+      throw new Error('ArrayBuffer at index 0 is already detached')
+    }
+    const second = pool.submit({ x: 5, z: 0 }, 1, 9, [])
+    expect(results).toEqual([
+      expect.objectContaining({ ok: false, jobId: second, retryable: true }),
+    ])
+    // The slot is still usable: nothing was left occupying its pipeline.
+    expect(pool.stats()).toMatchObject({ active: 1, queued: 0 })
+    expect(failing).not.toBe(second)
     pool.dispose()
   })
 

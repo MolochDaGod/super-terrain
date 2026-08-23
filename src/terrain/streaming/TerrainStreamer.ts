@@ -226,11 +226,21 @@ export class TerrainStreamer {
   ): void {
     const id = sectionId(key)
     const current = this.residency.get(id)
+    // Mutated rather than replaced: this runs once per resident section per
+    // frame, and a thousand fresh records a frame is pure garbage-collector
+    // pressure for a record whose identity nothing depends on.
+    if (current) {
+      current.state = state
+      if (this.desired.has(id)) current.lastTouched = now
+      if (cpuBytes !== undefined) current.cpuBytes = cpuBytes
+      if (gpuBytes !== undefined) current.gpuBytes = gpuBytes
+      return
+    }
     this.residency.set(id, {
       state,
-      lastTouched: this.desired.has(id) ? now : (current?.lastTouched ?? now),
-      cpuBytes: cpuBytes ?? current?.cpuBytes ?? 0,
-      gpuBytes: gpuBytes ?? current?.gpuBytes ?? 0,
+      lastTouched: now,
+      cpuBytes: cpuBytes ?? 0,
+      gpuBytes: gpuBytes ?? 0,
     })
   }
 

@@ -13,6 +13,7 @@ import {
   Raycaster,
   type Renderer,
   type Scene,
+  Sphere,
   Vector3,
 } from 'three/webgpu'
 import { smoothstep } from '../core/bounds'
@@ -81,6 +82,37 @@ interface DeferredGeometry {
 
 const LOD_COLORS = [0x59dca9, 0x89c95a, 0xe5c65f, 0xe58d52, 0xd95f69]
 
+/**
+ * Merged draws for the settled far field.
+ *
+ * Triangles were never the problem at world scale: a thousand resident sections
+ * is a thousand draw calls, a thousand matrix updates and a thousand bind-group
+ * switches per frame, and zoomed out none of it is culled because all of it is
+ * on screen. Sections that have stopped changing are copied into one geometry
+ * per grid cell and level, which leaves the frame drawing tens of objects
+ * instead of hundreds while rendering exactly the same triangles with exactly
+ * the same material.
+ *
+ * The rules are all about never merging anything the user is working on:
+ * only coarse levels join (the fine ones are the near ring and the edit
+ * target), a section that changes in any way leaves its batch immediately and
+ * goes back to its own mesh, and a batch waits out a settle delay before it is
+ * rebuilt so a moving camera does not pay for merges it is about to invalidate.
+ */
+const BATCH_GRID_SECTIONS = 4
+const BATCH_MIN_LOD = 2
+const BATCH_MIN_MEMBERS = 4
+const BATCH_SETTLE_MS = 220
+
+interface SectionBatch {
+  key: string
+  level: number
+  members: Set<SectionId>
+  mesh?: Mesh
+  /** 0 once `mesh` describes the current members; a timestamp while it does not. */
+  dirtySince: number
+}
+
 export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private readonly root: Group
   private readonly surfaceRoot: Group
@@ -102,6 +134,9 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     building: new LineBasicMaterial({ color: 0x64d8ff, transparent: true, opacity: 0.95 }),
     failed: new LineBasicMaterial({ color: 0xff5d68, transparent: true, opacity: 1 }),
   }
+  private batches = new Map<string, SectionBatch>()
+  private batchOfSection = new Map<SectionId, string>()
+  private readonly scratchSphere = new Sphere()
   private readonly scratchPoint = new Vector3()
   private readonly scratchNormal = new Vector3()
   private readonly scratchNormalMatrix = new Matrix3()
@@ -163,6 +198,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     const compiledLods = new Map(compiled.lods.map((lod) => [lod.level, lod]))
     let runtime = this.runtime.get(section.id)
     if (runtime) {
+      // The merged copy describes geometry this upload is about to replace.
+      this.breakBatchOf(section.id)
       this.detachActiveLod(runtime)
       this.deferRuntimeLods(runtime.lods)
       runtime.lods = new Map()
@@ -198,6 +235,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     }
     this.applyMaterial(runtime)
     this.setSectionState(section)
+    this.refreshBatchMembership(runtime)
     invalidateTerrainShadows()
     return gpuBytes
   }
@@ -211,22 +249,26 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     if (!runtime) return
     const next = closestAvailableLod(runtime.compiled, lod)
     if (next === runtime.lod) return
+    this.breakBatchOf(sectionId)
     this.detachActiveLod(runtime)
     runtime.lod = next
     runtime.section.activeLod = next
     this.attachActiveLod(runtime)
     this.applyMaterial(runtime)
+    this.refreshBatchMembership(runtime)
     invalidateTerrainShadows()
   }
 
   setVisible(sectionId: SectionId, visible: boolean): void {
     const runtime = this.runtime.get(sectionId)
     if (!runtime || runtime.visible === visible) return
+    this.breakBatchOf(sectionId)
     runtime.visible = visible
     for (const brick of this.activeBricks(runtime)) {
       brick.mesh.visible = visible
     }
     runtime.boundary.visible = visible && this.overlay !== 'none'
+    this.refreshBatchMembership(runtime)
     invalidateTerrainShadows()
   }
 
@@ -268,6 +310,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       }
       this.applyMaterial(runtime)
     }
+    this.refreshBatchMaterials()
     previous.dispose()
     invalidateTerrainShadows()
     return this.materialReadiness()
@@ -289,6 +332,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       this.materialSettings,
     )
     for (const runtime of this.runtime.values()) this.applyMaterial(runtime)
+    this.refreshBatchMaterials()
     previous.dispose()
     invalidateTerrainShadows()
   }
@@ -308,6 +352,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       this.applyMaterial(runtime)
       runtime.boundary.visible = runtime.visible && overlay !== 'none'
     }
+    this.refreshBatchMaterials()
     invalidateTerrainShadows()
   }
 
@@ -353,6 +398,10 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
         sectionSamples,
       )
       if (maximumDisplacement > 0) {
+        // A merged copy holds the positions from before this dab. Sections
+        // under a brush are forced to the finest level and so are normally
+        // unmerged already; this covers the frame where they are not.
+        this.breakBatchOf(runtime.section.id)
         expandPreviewBounds(activeLod.source, maximumDisplacement)
         expandTerrainBrickBounds(activeLod.bricks, maximumDisplacement)
         // Bricks share the positions that just moved, so any tree already built
@@ -398,7 +447,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
             sample.z + preview.radius >= originZ &&
             sample.z - preview.radius <= originZ + this.sectionSize,
         )
-        applyWeightPreviewToGeometry(
+        const changed = applyWeightPreviewToGeometry(
           runtime.lods.get(runtime.lod)!.source,
           originX,
           originZ,
@@ -406,19 +455,29 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
           sectionSamples,
           channel,
         )
+        if (changed > 0) this.breakBatchOf(runtime.section.id)
       }
     }
   }
 
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined {
-    // Only sections that are actually attached can be hit, and only their
-    // active LOD is attached, so this builds at most one tree per section the
-    // pointer has visited rather than one per compiled level.
+    // Only what the ray actually crosses gets a tree. Building one costs a few
+    // milliseconds, and with the whole world resident the old sweep paid that
+    // for a thousand sections on the first cast after a zoom-out -- for a ray
+    // that can only ever touch a handful of them.
     for (const runtime of this.runtime.values()) {
       if (!runtime.visible) continue
+      if (this.batchOfSection.has(runtime.section.id)) continue
       for (const brick of this.activeBricks(runtime)) {
+        if (!brick.mesh.visible) continue
+        if (!this.rayCrosses(raycaster, brick.mesh)) continue
         ensureTerrainBoundsTree(brick.geometry)
       }
+    }
+    for (const batch of this.batches.values()) {
+      if (!batch.mesh) continue
+      if (!this.rayCrosses(raycaster, batch.mesh)) continue
+      ensureTerrainBoundsTree(batch.mesh.geometry)
     }
     // The nearest hit on each mesh is the only one that can win, and the list
     // comes back sorted, so the deeper hits behind it are pure work.
@@ -431,7 +490,11 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       raycaster.firstHitOnly = previousFirstHitOnly
     }
     for (const hit of hits) {
-      const id = hit.object.userData.terrainSectionId as SectionId | undefined
+      const id =
+        (hit.object.userData.terrainSectionId as SectionId | undefined) ??
+        (hit.object.userData.terrainBatchKey
+          ? this.sectionIdAt(hit.point)
+          : undefined)
       if (!id) continue
       this.scratchPoint.copy(hit.point)
       if (hit.face) {
@@ -452,6 +515,21 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     return undefined
   }
 
+  /** Conservative broad phase: does the ray reach this mesh's bounds at all? */
+  private rayCrosses(raycaster: Raycaster, mesh: Mesh): boolean {
+    const sphere = mesh.geometry.boundingSphere
+    if (!sphere) return true
+    this.scratchSphere.copy(sphere).applyMatrix4(mesh.matrixWorld)
+    return raycaster.ray.intersectsSphere(this.scratchSphere)
+  }
+
+  /** The section a world point belongs to, for hits on a merged draw. */
+  private sectionIdAt(point: Vector3): SectionId {
+    const x = Math.floor(point.x / this.sectionSize)
+    const z = Math.floor(point.z / this.sectionSize)
+    return `${x}:${z}` as SectionId
+  }
+
   flushDeferredDisposals(maxCount: number): void {
     let disposed = 0
     const retained: DeferredGeometry[] = []
@@ -470,6 +548,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   evict(sectionId: SectionId): void {
     const runtime = this.runtime.get(sectionId)
     if (!runtime) return
+    this.removeFromBatch(sectionId)
     this.detachActiveLod(runtime)
     this.root.remove(runtime.boundary)
     this.deferRuntimeLods(runtime.lods)
@@ -518,6 +597,14 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     this.previewRefreshHandle = undefined
     this.pendingPreviewRefresh.clear()
     for (const id of [...this.runtime.keys()]) this.evict(id)
+    for (const batch of this.batches.values()) {
+      if (batch.mesh) {
+        this.surfaceRoot.remove(batch.mesh)
+        batch.mesh.geometry.dispose()
+      }
+    }
+    this.batches.clear()
+    this.batchOfSection.clear()
     for (const pending of this.deferredDisposals) pending.geometry.dispose()
     this.deferredDisposals.length = 0
     this.root.remove(this.surfaceRoot)
@@ -525,6 +612,171 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     this.densityMaterial.dispose()
     for (const material of this.lodMaterials) material.dispose()
     for (const material of Object.values(this.boundaryMaterials)) material.dispose()
+  }
+
+  /**
+   * Rebuilds up to `maxBatches` merged draws whose members have settled.
+   *
+   * Called from the terrain frame budget, so a merge competes with uploads and
+   * swaps for main-thread time rather than landing on top of them.
+   */
+  flushSectionBatches(now: number, maxBatches: number): number {
+    let built = 0
+    for (const batch of [...this.batches.values()]) {
+      if (batch.members.size === 0) {
+        this.batches.delete(batch.key)
+        continue
+      }
+      if (built >= maxBatches) continue
+      if (batch.mesh || batch.dirtySince === 0) continue
+      if (batch.members.size < BATCH_MIN_MEMBERS) continue
+      if (now - batch.dirtySince < BATCH_SETTLE_MS) continue
+      if (this.buildBatch(batch)) built += 1
+    }
+    return built
+  }
+
+  /** Grid cell and level a section may merge into, or undefined if it may not. */
+  private batchKeyFor(runtime: RuntimeSection): string | undefined {
+    if (!runtime.visible) return undefined
+    if (runtime.lod < BATCH_MIN_LOD) return undefined
+    if (!runtime.lods.has(runtime.lod)) return undefined
+    const cellX = Math.floor(runtime.section.key.x / BATCH_GRID_SECTIONS)
+    const cellZ = Math.floor(runtime.section.key.z / BATCH_GRID_SECTIONS)
+    return `${cellX}:${cellZ}:${runtime.lod}`
+  }
+
+  /**
+   * Re-files a section that has just changed.
+   *
+   * Any change breaks the merged mesh it was part of first, which restores
+   * every member to its own mesh. That keeps one invariant the rest of the
+   * class depends on: while a section is being touched, it is drawn by its own
+   * mesh, so attach, detach, preview and material paths need no special case.
+   */
+  private refreshBatchMembership(runtime: RuntimeSection): void {
+    const id = runtime.section.id
+    const previousKey = this.batchOfSection.get(id)
+    const nextKey = this.batchKeyFor(runtime)
+    if (previousKey === nextKey) return
+    if (previousKey) {
+      const previous = this.batches.get(previousKey)
+      if (previous) {
+        this.breakBatch(previous)
+        previous.members.delete(id)
+        if (previous.members.size === 0) this.batches.delete(previousKey)
+      }
+      this.batchOfSection.delete(id)
+    }
+    if (!nextKey) return
+    let batch = this.batches.get(nextKey)
+    if (!batch) {
+      batch = {
+        key: nextKey,
+        level: runtime.lod,
+        members: new Set(),
+        dirtySince: 0,
+      }
+      this.batches.set(nextKey, batch)
+    }
+    this.breakBatch(batch)
+    batch.members.add(id)
+    this.batchOfSection.set(id, nextKey)
+    batch.dirtySince = performance.now()
+  }
+
+  /** Drops a merged mesh and puts its members back on their own. */
+  private breakBatch(batch: SectionBatch): void {
+    if (batch.mesh) {
+      this.surfaceRoot.remove(batch.mesh)
+      this.deferGeometries([batch.mesh.geometry])
+      batch.mesh = undefined
+      for (const id of batch.members) {
+        const runtime = this.runtime.get(id)
+        if (runtime) this.attachActiveLod(runtime)
+      }
+    }
+    batch.dirtySince = performance.now()
+  }
+
+  /** Drops a section out of its batch entirely, for eviction and disposal. */
+  private removeFromBatch(sectionId: SectionId): void {
+    const key = this.batchOfSection.get(sectionId)
+    if (!key) return
+    this.batchOfSection.delete(sectionId)
+    const batch = this.batches.get(key)
+    if (!batch) return
+    this.breakBatch(batch)
+    batch.members.delete(sectionId)
+    if (batch.members.size === 0) this.batches.delete(key)
+  }
+
+  /** Breaks the batch holding this section, if any, without re-filing it. */
+  private breakBatchOf(sectionId: SectionId): void {
+    const key = this.batchOfSection.get(sectionId)
+    if (!key) return
+    const batch = this.batches.get(key)
+    if (batch) this.breakBatch(batch)
+  }
+
+  private buildBatch(batch: SectionBatch): boolean {
+    const parts: { geometry: BufferGeometry; offsetX: number; offsetZ: number }[] = []
+    for (const id of batch.members) {
+      const runtime = this.runtime.get(id)
+      if (!runtime || !runtime.visible || runtime.lod !== batch.level) return false
+      const lod = runtime.lods.get(runtime.lod)
+      if (!lod) return false
+      for (const brick of lod.bricks) {
+        if (!brick.mesh.visible) continue
+        parts.push({
+          geometry: brick.geometry,
+          offsetX: runtime.section.key.x * this.sectionSize,
+          offsetZ: runtime.section.key.z * this.sectionSize,
+        })
+      }
+    }
+    if (parts.length < BATCH_MIN_MEMBERS) return false
+    const merged = mergeTerrainGeometries(parts)
+    if (!merged) return false
+
+    const mesh = new Mesh(merged, this.materialForLevel(batch.level))
+    const castsShadow = this.renderMode === 'full'
+    mesh.castShadow = castsShadow
+    mesh.receiveShadow = castsShadow
+    mesh.frustumCulled = true
+    mesh.matrixAutoUpdate = false
+    mesh.updateMatrix()
+    mesh.name = `terrain-batch-${batch.key}`
+    mesh.userData.terrainBatchKey = batch.key
+    batch.mesh = mesh
+
+    for (const id of batch.members) {
+      const runtime = this.runtime.get(id)
+      if (runtime) this.detachActiveLod(runtime)
+    }
+    this.surfaceRoot.add(mesh)
+    batch.dirtySince = 0
+    invalidateTerrainShadows()
+    return true
+  }
+
+  private materialForLevel(level: number): Material {
+    if (this.overlay === 'lod') {
+      return this.lodMaterials[level] ?? this.lodMaterials.at(-1)!
+    }
+    if (this.overlay === 'density') return this.densityMaterial
+    return this.terrainMaterial.material
+  }
+
+  /** Re-points merged draws at the current material without rebuilding them. */
+  private refreshBatchMaterials(): void {
+    const castsShadow = this.renderMode === 'full'
+    for (const batch of this.batches.values()) {
+      if (!batch.mesh) continue
+      batch.mesh.material = this.materialForLevel(batch.level)
+      batch.mesh.castShadow = castsShadow
+      batch.mesh.receiveShadow = castsShadow
+    }
   }
 
   private applyMaterial(runtime: RuntimeSection): void {
@@ -670,6 +922,88 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     }
     this.pendingPreviewRefresh.clear()
   }
+}
+
+/**
+ * Concatenates section geometries into one, baking each section's world offset
+ * into its positions.
+ *
+ * Bails out rather than guessing whenever the parts disagree about their
+ * attribute set: a merged draw must be pixel-identical to the draws it
+ * replaces, and a missing paint-weight or surface-field stream would not be.
+ */
+function mergeTerrainGeometries(
+  parts: readonly { geometry: BufferGeometry; offsetX: number; offsetZ: number }[],
+): BufferGeometry | undefined {
+  const template = parts[0]?.geometry
+  if (!template) return undefined
+  const names = Object.keys(template.attributes)
+  let vertexCount = 0
+  let indexCount = 0
+  for (const part of parts) {
+    const index = part.geometry.getIndex()
+    const position = part.geometry.getAttribute('position') as
+      | BufferAttribute
+      | undefined
+    if (!index || !position) return undefined
+    if (Object.keys(part.geometry.attributes).length !== names.length) return undefined
+    for (const name of names) {
+      const attribute = part.geometry.getAttribute(name) as BufferAttribute | undefined
+      const reference = template.getAttribute(name) as BufferAttribute
+      if (
+        !attribute ||
+        attribute.itemSize !== reference.itemSize ||
+        attribute.normalized !== reference.normalized ||
+        attribute.array.constructor !== reference.array.constructor
+      ) {
+        return undefined
+      }
+    }
+    vertexCount += position.count
+    indexCount += index.count
+  }
+
+  const merged = new BufferGeometry()
+  for (const name of names) {
+    const reference = template.getAttribute(name) as BufferAttribute
+    const Constructor = reference.array.constructor as new (
+      length: number,
+    ) => typeof reference.array
+    const values = new Constructor(vertexCount * reference.itemSize)
+    let cursor = 0
+    for (const part of parts) {
+      const attribute = part.geometry.getAttribute(name) as BufferAttribute
+      values.set(attribute.array, cursor)
+      if (name === 'position') {
+        for (let offset = cursor; offset < cursor + attribute.array.length; offset += 3) {
+          values[offset] += part.offsetX
+          values[offset + 2] += part.offsetZ
+        }
+      }
+      cursor += attribute.array.length
+    }
+    merged.setAttribute(
+      name,
+      new BufferAttribute(values, reference.itemSize, reference.normalized),
+    )
+  }
+
+  const indices = new Uint32Array(indexCount)
+  let indexCursor = 0
+  let vertexOffset = 0
+  for (const part of parts) {
+    const index = part.geometry.getIndex()!
+    const source = index.array
+    for (let offset = 0; offset < source.length; offset += 1) {
+      indices[indexCursor + offset] = source[offset] + vertexOffset
+    }
+    indexCursor += source.length
+    vertexOffset += (part.geometry.getAttribute('position') as BufferAttribute).count
+  }
+  merged.setIndex(new BufferAttribute(indices, 1))
+  merged.computeBoundingBox()
+  merged.computeBoundingSphere()
+  return merged
 }
 
 function closestAvailableLod(
@@ -971,6 +1305,10 @@ function createTerrainMesh(
   mesh.castShadow = false
   mesh.receiveShadow = true
   mesh.frustumCulled = true
+  // A section never moves once placed, and recomposing a thousand identical
+  // matrices was measurable in the frame profile on its own.
+  mesh.matrixAutoUpdate = false
+  mesh.updateMatrix()
   mesh.userData.terrainSectionId = section.id
   mesh.name = `terrain-section-${section.id}`
   return mesh
@@ -992,6 +1330,11 @@ function createBoundary(
     section.key.z * sectionSize,
   )
   line.frustumCulled = true
+  line.matrixAutoUpdate = false
+  line.updateMatrix()
+  // Debug boundaries are never a pick target, and testing eight segments each
+  // across a thousand sections is real cost on every pointer move.
+  line.raycast = () => {}
   line.name = `section-boundary-${section.id}`
   return line
 }

@@ -397,6 +397,7 @@ function fakeRenderer(
     previewWeightPaint,
     raycast: () => undefined,
     flushDeferredDisposals() {},
+    flushSectionBatches: () => 0,
     evict() {},
     stats: () => ({
       gpuBytes: 0,

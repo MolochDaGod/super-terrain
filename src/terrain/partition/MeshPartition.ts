@@ -28,6 +28,8 @@ export interface TerrainSection {
   requestedLod: number
   buildJobId?: number
   buildingRevision?: number
+  /** When the current worker job was handed to the pool. See `sweepStuckBuilds`. */
+  buildStartedAt?: number
   /** Finest global LOD level requested by the current worker job. */
   buildingLod?: number
   error?: string
@@ -146,11 +148,17 @@ export class MeshPartition {
     section.error = undefined
   }
 
-  markBuilding(section: TerrainSection, jobId: number, minimumLod = 0): void {
+  markBuilding(
+    section: TerrainSection,
+    jobId: number,
+    minimumLod = 0,
+    now = performance.now(),
+  ): void {
     terrainAssert(
       section.buildJobId !== jobId,
       `Duplicate build ${jobId} for section ${section.id}`,
     )
+    section.buildStartedAt = now
     section.buildJobId = jobId
     section.buildingRevision = section.revision
     section.buildingLod = minimumLod

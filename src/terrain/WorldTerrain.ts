@@ -41,6 +41,7 @@ import type { EditorSnapshot, TerrainOverlay } from './editor/EditorStore'
 import {
   cameraSectionDistance,
   constrainNeighborLods,
+  type LodNeighborNode,
   detailFocusLodCeiling,
   focusedLodCeiling,
   selectLod,
@@ -173,6 +174,28 @@ const GRANITE_PLANT_DEPTH_RATIO = 0.06
  */
 const LOD_RECLAIM_SLACK = 1
 
+/**
+ * How long a section may sit in `building` before the job is written off.
+ *
+ * A lost job is not a stall the streamer can see: `hasPendingTerrainWork` stays
+ * true forever, the static-scene fast path can never re-engage, and the whole
+ * per-frame streaming and LOD pass runs for the rest of the session. The
+ * threshold is an order of magnitude above the slowest measured compile (225 ms
+ * at the finest level, behind at most two pipelined jobs), so nothing that is
+ * merely slow is ever cancelled.
+ */
+const STUCK_BUILD_MS = 20_000
+const STUCK_BUILD_SWEEP_MS = 2_000
+
+/**
+ * How far the camera may drift before screen-space LOD is re-derived.
+ *
+ * Well below the distance that can move any section across a level boundary --
+ * the finest transition in the shipped world is tens of metres wide -- so this
+ * only ever suppresses recomputation that would have produced the same answer.
+ */
+const LOD_SELECTION_EPSILON_METRES = 0.75
+
 function compiledGpuBytes(compiled: CompiledSection | undefined): number {
   return compiled?.gpuBytes ?? compiled?.lods.reduce(
     (bytes, lod) => bytes + lod.gpuBytes,
@@ -293,6 +316,17 @@ export class WorldTerrain {
   private processedTerrainStateRevision = -1
   private hasPendingTerrainWork = true
   private lastIdleMaintenanceAt = 0
+  private lastStuckSweepAt = 0
+  /** Screen-space level chosen per section, before the neighbour constraint. */
+  private selectedLod = new Map<SectionId, number>()
+  /** Result of the last neighbour-constraint pass, reused while the view holds. */
+  private constrainedLod = new Map<SectionId, number>()
+  /** Level last handed to the renderer, so unchanged sections enqueue nothing. */
+  private requestedRendererLod = new Map<SectionId, number>()
+  private lodSelectionCamera?: Vec3Like
+  private lodSelectionQuality = Number.NaN
+  private lodSelectionViewportHeight = Number.NaN
+  private lodSelectionFov = Number.NaN
   private readonly compiledCacheSignatures = new CompiledSectionCacheSignatures()
   private persistedCompiledSectionIds = new Set<SectionId>()
   private cacheLookupEligibleIds = new Set<SectionId>()
@@ -359,14 +393,22 @@ export class WorldTerrain {
           section.buildingLod = undefined
         }
       } else if (section.revision === result.revision) {
+        section.buildJobId = undefined
+        section.buildingRevision = undefined
+        section.buildingLod = undefined
+        if (result.retryable) {
+          // The pool lost the job rather than the section failing to compile.
+          // Nothing is wrong with the terrain, so it goes back in the queue
+          // silently instead of turning the section red.
+          section.buildState = 'queued'
+          section.error = undefined
+          return
+        }
         section.buildState = 'failed'
         section.error = result.error ?? 'Terrain compilation failed'
         console.error(
           `Terrain section ${section.id} failed to compile: ${section.error}`,
         )
-        section.buildJobId = undefined
-        section.buildingRevision = undefined
-        section.buildingLod = undefined
       }
     }
   }
@@ -422,6 +464,8 @@ export class WorldTerrain {
     const scheduleStart = performance.now()
     this.updateBenchmark(now)
 
+    this.sweepStuckBuilds(now)
+
     const signature = this.createViewSignature(input)
     const viewUnchanged = sameViewSignature(this.viewSignature, signature)
     this.viewSignature = signature
@@ -450,6 +494,7 @@ export class WorldTerrain {
             estimatedCpuMs: 0.08,
             run: () => this.renderer?.flushDeferredDisposals(2),
           })
+          this.scheduleSectionBatching(now)
         }
       }
       this.scheduleAutosave(now)
@@ -529,6 +574,7 @@ export class WorldTerrain {
         estimatedCpuMs: 0.08,
         run: () => this.renderer?.flushDeferredDisposals(2),
       })
+      this.scheduleSectionBatching(now)
     }
 
     this.schedulingMs = performance.now() - scheduleStart
@@ -2078,7 +2124,7 @@ export class WorldTerrain {
         },
       ),
     )
-    this.partition.markBuilding(section, jobId, minimumLod)
+    this.partition.markBuilding(section, jobId, minimumLod, now)
   }
 
   private minimumBuildLod(
@@ -2130,6 +2176,37 @@ export class WorldTerrain {
     )
   }
 
+  /**
+   * Requeues sections whose worker job never came back.
+   *
+   * Nothing else notices a lost job: the section stays `building`, so
+   * `detectPendingTerrainWork` keeps reporting work in flight and the static
+   * fast path stays off permanently. The sweep is the backstop for that whole
+   * class of failure rather than for any particular cause of it.
+   */
+  private sweepStuckBuilds(now: number): void {
+    if (now - this.lastStuckSweepAt < STUCK_BUILD_SWEEP_MS) return
+    this.lastStuckSweepAt = now
+    let recovered = 0
+    for (const section of this.partition.values()) {
+      if (section.buildState !== 'building') continue
+      if (now - (section.buildStartedAt ?? now) < STUCK_BUILD_MS) continue
+      this.compiler.cancel(section.key, section.buildingRevision)
+      section.buildJobId = undefined
+      section.buildingRevision = undefined
+      section.buildingLod = undefined
+      section.buildStartedAt = undefined
+      section.buildState = 'queued'
+      recovered += 1
+    }
+    if (recovered === 0) return
+    console.warn(
+      `Terrain: requeued ${recovered} section(s) whose compile never returned`,
+    )
+    this.terrainStateRevision += 1
+    this.hasPendingTerrainWork = true
+  }
+
   private cancelDepartedBuilds(
     previous: ReadonlyMap<string, StreamCandidate>,
     next: ReadonlyMap<string, StreamCandidate>,
@@ -2179,6 +2256,10 @@ export class WorldTerrain {
         const compiled = this.partition.commitPending(section)
         if (!compiled || !this.renderer) return
         this.renderer.upload(section, compiled)
+        // The upload decides its own starting level from what the compile
+        // actually produced, so the cached selection is no longer authoritative.
+        this.selectedLod.delete(section.id)
+        this.requestedRendererLod.delete(section.id)
         const visible = this.streamer.isVisible(section.key)
         this.renderer.setVisible(section.id, visible)
         section.residency = visible ? 'VISIBLE' : 'GPU_RESIDENT'
@@ -2197,43 +2278,62 @@ export class WorldTerrain {
     input: TerrainUpdateInput,
   ): void {
     if (!this.renderer) return
-    const nodes = []
+    // Screen-space LOD is a function of the camera, the viewport and the frame
+    // quality scale. None of those change while the camera sits still, and
+    // re-deriving the same answer for a thousand sections -- plus the
+    // neighbour-constraint relaxation over all of them -- was several
+    // milliseconds of every frame that had any other reason to run. Sections
+    // the selection has never seen are still evaluated, so a section arriving
+    // from the streamer picks up its level on the frame it lands.
+    const qualityScale = this.scheduler.snapshot().qualityScale
+    const reuseSelection = this.canReuseLodSelection(input, qualityScale)
+    const errorTolerancePixels =
+      this.config.baseLodErrorPixels / Math.max(0.48, qualityScale)
+    const lastLevel = this.config.lodResolutions.length - 1
+    const nodes: LodNeighborNode[] = []
+    let recomputed = 0
+
     for (const candidate of candidates) {
       const section = this.partition.get(candidate.key)
       if (!section || !section.compiled || !this.renderer.has(section.id)) continue
-      const centerX = (section.bounds.min.x + section.bounds.max.x) * 0.5
-      const centerY = (section.compiled.bounds.min.y + section.compiled.bounds.max.y) * 0.5
-      const centerZ = (section.bounds.min.z + section.bounds.max.z) * 0.5
-      const distance = Math.hypot(
-        input.camera.x - centerX,
-        input.camera.y - centerY,
-        input.camera.z - centerZ,
-      )
-      let lod = selectLod({
-        lods: section.compiled.lods,
-        distance,
-        viewportHeight: input.viewportHeight,
-        verticalFovRadians: input.verticalFovRadians,
-        errorTolerancePixels:
-          this.config.baseLodErrorPixels / Math.max(0.48, this.scheduler.snapshot().qualityScale),
-        currentLod: section.activeLod,
-        focusDistanceSections: cameraSectionDistance(
-          candidate.key,
-          input.camera,
-          this.config.sectionSize,
-        ),
-        lod0FocusRadiusSections: this.config.lod0FocusRadiusSections,
-      })
-      if (this.config.lodDetailFocus) {
-        lod = Math.min(
-          lod,
-          detailFocusLodCeiling(
-            section.key,
-            this.config.lodDetailFocus,
-            this.config.sectionSize,
-            this.config.lodResolutions.length - 1,
-          ),
+      const cached = reuseSelection ? this.selectedLod.get(section.id) : undefined
+      let lod = cached
+      if (lod === undefined) {
+        recomputed += 1
+        const centerX = (section.bounds.min.x + section.bounds.max.x) * 0.5
+        const centerY =
+          (section.compiled.bounds.min.y + section.compiled.bounds.max.y) * 0.5
+        const centerZ = (section.bounds.min.z + section.bounds.max.z) * 0.5
+        const distance = Math.hypot(
+          input.camera.x - centerX,
+          input.camera.y - centerY,
+          input.camera.z - centerZ,
         )
+        lod = selectLod({
+          lods: section.compiled.lods,
+          distance,
+          viewportHeight: input.viewportHeight,
+          verticalFovRadians: input.verticalFovRadians,
+          errorTolerancePixels,
+          currentLod: section.activeLod,
+          focusDistanceSections: cameraSectionDistance(
+            candidate.key,
+            input.camera,
+            this.config.sectionSize,
+          ),
+          lod0FocusRadiusSections: this.config.lod0FocusRadiusSections,
+        })
+        if (this.config.lodDetailFocus) {
+          lod = Math.min(
+            lod,
+            detailFocusLodCeiling(
+              section.key,
+              this.config.lodDetailFocus,
+              this.config.sectionSize,
+              lastLevel,
+            ),
+          )
+        }
       }
       const activeBrushTouchesSection = Boolean(
         (this.activeStroke &&
@@ -2245,6 +2345,10 @@ export class WorldTerrain {
               this.activeDig.radius),
       )
       if (activeBrushTouchesSection || section.dirtyRegion) lod = 0
+      // An override that disagrees with the cached selection is a change like
+      // any other: the neighbour constraint has to see it.
+      if (cached !== undefined && lod !== cached) recomputed += 1
+      this.selectedLod.set(section.id, lod)
       section.requestedLod = lod
       nodes.push({ id: section.id, x: section.key.x, z: section.key.z, lod })
       this.renderer.setVisible(section.id, candidate.visible)
@@ -2256,8 +2360,59 @@ export class WorldTerrain {
         compiledGpuBytes(section.compiled),
       )
     }
-    const constrained = constrainNeighborLods(nodes)
-    for (const [id, lod] of constrained) this.renderer.setLod(id, lod)
+
+    // The relaxation only has anything to do when a level actually moved.
+    const constrained =
+      recomputed > 0 ? constrainNeighborLods(nodes) : this.constrainedLod
+    if (recomputed > 0) {
+      this.constrainedLod = constrained
+      this.lodSelectionCamera = { ...input.camera }
+      this.lodSelectionQuality = qualityScale
+      this.lodSelectionViewportHeight = input.viewportHeight
+      this.lodSelectionFov = input.verticalFovRadians
+    }
+    for (const [id, lod] of constrained) this.requestRendererLod(id, lod)
+  }
+
+  /**
+   * A level swap materialises geometry for a level this section has never
+   * displayed, which is real main-thread work and belongs under the same budget
+   * as an upload rather than running for every section in the frame that
+   * decides it. Anything already built makes this a pointer swap and the
+   * scheduler measures it as such.
+   */
+  private requestRendererLod(id: SectionId, lod: number): void {
+    if (this.requestedRendererLod.get(id) === lod) return
+    this.requestedRendererLod.set(id, lod)
+    this.scheduler.enqueue({
+      id: `lod:${id}`,
+      kind: 'swap',
+      // Constant so a later request always replaces an earlier queued one:
+      // `enqueue` keeps the higher priority, and a stale level must never win.
+      priority: 900,
+      estimatedCpuMs: 0.6,
+      run: () => this.renderer?.setLod(id, lod),
+    })
+  }
+
+  /** True while nothing that feeds screen-space LOD selection has moved. */
+  private canReuseLodSelection(
+    input: TerrainUpdateInput,
+    qualityScale: number,
+  ): boolean {
+    const previous = this.lodSelectionCamera
+    if (!previous) return false
+    if (this.activeStroke || this.activeDig || this.activeTunnel) return false
+    if (this.lodSelectionQuality !== qualityScale) return false
+    if (this.lodSelectionViewportHeight !== input.viewportHeight) return false
+    if (this.lodSelectionFov !== input.verticalFovRadians) return false
+    return (
+      Math.hypot(
+        input.camera.x - previous.x,
+        input.camera.y - previous.y,
+        input.camera.z - previous.z,
+      ) < LOD_SELECTION_EPSILON_METRES
+    )
   }
 
   private forceEditingLod(point: Vec3Like, radius: number): void {
@@ -2280,6 +2435,20 @@ export class WorldTerrain {
     }
   }
 
+  /**
+   * Merging distant sections is opportunistic maintenance, so it queues behind
+   * anything the frame actually needs and is bounded to a couple of merges.
+   */
+  private scheduleSectionBatching(now: number): void {
+    this.scheduler.enqueue({
+      id: 'batch:sections',
+      kind: 'maintenance',
+      priority: -80,
+      estimatedCpuMs: 1.2,
+      run: () => this.renderer?.flushSectionBatches(now, 2),
+    })
+  }
+
   private scheduleEvictions(now: number): void {
     const evictions = this.streamer.collectEvictions(now)
     for (let index = 0; index < Math.min(2, evictions.length); index += 1) {
@@ -2294,6 +2463,9 @@ export class WorldTerrain {
           if (this.streamer.isDesired(key)) return
           this.compiler.cancel(key)
           this.renderer?.evict(id)
+          this.selectedLod.delete(id)
+          this.constrainedLod.delete(id)
+          this.requestedRendererLod.delete(id)
           const section = this.partition.get(key)
           if (section && !section.source.procedural) {
             // Authored source has no durable document store yet. Evict derived

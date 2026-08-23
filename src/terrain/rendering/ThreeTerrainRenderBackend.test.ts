@@ -84,7 +84,83 @@ describe('Three terrain render preview', () => {
   })
 })
 
-function planeSection(): CompiledSection {
+describe('Three terrain far-field batching', () => {
+  const uploadCoarseCell = () => {
+    const root = new Group()
+    const backend = new ThreeTerrainRenderBackend(root, 128)
+    const partition = new MeshPartition({ sectionSize: 128, worldSize: 2048, seed: 1 })
+    const sections = [
+      { x: 0, z: 0 },
+      { x: 1, z: 0 },
+      { x: 0, z: 1 },
+      { x: 1, z: 1 },
+    ].map((key) => {
+      const section = partition.getOrCreate(key)
+      section.requestedLod = 2
+      backend.upload(section, planeSection(2))
+      return section
+    })
+    return { root, backend, sections }
+  }
+
+  it('merges settled coarse sections into one draw at their world offsets', () => {
+    const { root, backend, sections } = uploadCoarseCell()
+    const single = (root.getObjectByName(
+      `terrain-section-${sections[0].id}`,
+    ) as Mesh).geometry
+    const singleVertices = single.getAttribute('position').count
+    const singleIndices = single.getIndex()?.count ?? 0
+    expect(backend.flushSectionBatches(performance.now() + 1_000, 4)).toBe(1)
+
+    const merged = root.children
+      .flatMap((child) => child.children)
+      .filter((child): child is Mesh => child.name.startsWith('terrain-batch-'))
+    expect(merged).toHaveLength(1)
+    for (const section of sections) {
+      expect(root.getObjectByName(`terrain-section-${section.id}`)).toBeUndefined()
+    }
+
+    const positions = merged[0].geometry.getAttribute('position') as BufferAttribute
+    expect(positions.count).toBe(4 * singleVertices)
+    // Section 1:1 contributes the far corner, offset by a section on both axes.
+    const xs = [...(positions.array as Float32Array).filter((_, index) => index % 3 === 0)]
+    expect(Math.max(...xs)).toBeCloseTo(128 + 10, 5)
+    // Triangle count is unchanged: this replaces draws, never geometry.
+    expect(merged[0].geometry.getIndex()?.count).toBe(4 * singleIndices)
+    backend.dispose()
+  })
+
+  it('returns members to their own draws as soon as one of them changes', () => {
+    const { root, backend, sections } = uploadCoarseCell()
+    backend.flushSectionBatches(performance.now() + 1_000, 4)
+
+    backend.setVisible(sections[0].id, false)
+
+    expect(
+      root.children
+        .flatMap((child) => child.children)
+        .filter((child) => child.name.startsWith('terrain-batch-')),
+    ).toHaveLength(0)
+    for (const section of sections) {
+      expect(root.getObjectByName(`terrain-section-${section.id}`)).toBeDefined()
+    }
+    expect(root.getObjectByName(`terrain-section-${sections[0].id}`)?.visible).toBe(false)
+    backend.dispose()
+  })
+
+  it('leaves the editable near field alone', () => {
+    const root = new Group()
+    const backend = new ThreeTerrainRenderBackend(root, 128)
+    const partition = new MeshPartition({ sectionSize: 128, worldSize: 2048, seed: 1 })
+    for (const key of [{ x: 0, z: 0 }, { x: 1, z: 0 }, { x: 0, z: 1 }, { x: 1, z: 1 }]) {
+      backend.upload(partition.getOrCreate(key), planeSection(0))
+    }
+    expect(backend.flushSectionBatches(performance.now() + 1_000, 4)).toBe(0)
+    backend.dispose()
+  })
+})
+
+function planeSection(level = 0): CompiledSection {
   const positions = new Float32Array([
     0, 0, 0, 5, 0, 0, 10, 0, 0,
     0, 0, 5, 5, 0, 5, 10, 0, 5,
@@ -105,7 +181,7 @@ function planeSection(): CompiledSection {
     },
     lods: [
       {
-        level: 0,
+        level,
         geometricError: 0.1,
         positions,
         normals: new Float32Array(

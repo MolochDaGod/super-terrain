@@ -50,7 +50,18 @@ export interface TerrainWorkerCancellation {
 export type WorkerResultHandler = (
   result:
     | { ok: true; jobId: number; compiled: CompiledSection }
-    | { ok: false; jobId: number; key: SectionKey; revision: number; error: string },
+    | {
+        ok: false
+        jobId: number
+        key: SectionKey
+        revision: number
+        error: string
+        /**
+         * The section itself is fine; the pool lost the job. The owner should
+         * put it back in the queue rather than showing it as a failed build.
+         */
+        retryable?: boolean
+      },
 ) => void
 
 export class TerrainWorkerPool {
@@ -234,10 +245,33 @@ export class TerrainWorkerPool {
 
   private send(slot: WorkerSlot, request: CompileSectionRequest): void {
     slot.inFlight.push(request)
-    slot.worker.postMessage(request, [
-      request.modifiers.brushPoints.buffer,
-      ...sourceTransferables(request.source),
-    ])
+    try {
+      slot.worker.postMessage(request, [
+        request.modifiers.brushPoints.buffer,
+        ...sourceTransferables(request.source),
+      ])
+    } catch (error) {
+      // A send that throws never reaches the worker, so no reply is coming.
+      // Leaving the request in `inFlight` would retire that much of the slot's
+      // pipeline permanently and leave the section building for the rest of the
+      // session -- which is what kept the streaming fast path switched off and
+      // cost several milliseconds of scheduling on every subsequent frame.
+      const position = slot.inFlight.indexOf(request)
+      if (position !== -1) slot.inFlight.splice(position, 1)
+      this.failJob(request, `Terrain worker send failed: ${String(error)}`)
+    }
+  }
+
+  /** Reports a job the pool could not run, so its owner can queue it again. */
+  private failJob(request: CompileSectionRequest, error: string): void {
+    this.onResult?.({
+      ok: false,
+      jobId: request.jobId,
+      key: request.key,
+      revision: request.revision,
+      error,
+      retryable: true,
+    })
   }
 
   private handleMessage(slot: WorkerSlot, response: TerrainWorkerResponse): void {
@@ -305,14 +339,22 @@ export class TerrainWorkerPool {
    * it takes the slot's untouched jobs down with the one being cancelled. Those
    * are still wanted, so they go back to the queue rather than being dropped.
    */
-  private restartWorker(slot: WorkerSlot, requeue: CompileSectionRequest[]): void {
+  /**
+   * Replaces a worker, giving up on whatever else it was holding.
+   *
+   * The survivors cannot simply be pushed back on the queue: their source
+   * buffers were transferred to the worker being terminated and are detached,
+   * so re-sending them throws `DataCloneError` and takes the slot down with it.
+   * Reporting them as retryable hands the decision back to the owner, which
+   * still has the authoritative mesh and can build a fresh snapshot.
+   */
+  private restartWorker(slot: WorkerSlot, orphaned: CompileSectionRequest[]): void {
     slot.worker.terminate()
     slot.inFlight = []
     this.installWorker(slot)
-    for (const request of requeue) {
-      this.queue.push({ request, submittedAt: performance.now() })
+    for (const request of orphaned) {
+      this.failJob(request, 'Terrain worker restarted before this job ran')
     }
-    if (requeue.length > 0) this.sortQueue()
   }
 
   private sortQueue(): void {

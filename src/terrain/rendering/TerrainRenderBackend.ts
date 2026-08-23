@@ -67,6 +67,13 @@ export interface TerrainRenderBackend {
   previewWeightPaint(preview: PreviewWeightPaint): void
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined
   flushDeferredDisposals(maxCount: number): void
+  /**
+   * Consolidates settled distant sections into merged draws.
+   *
+   * Returns the number of merges performed, so a caller can tell a frame that
+   * did work from one that had nothing to do.
+   */
+  flushSectionBatches(now: number, maxBatches: number): number
   evict(sectionId: SectionId): void
   stats(): TerrainRenderStats
   dispose(): void
