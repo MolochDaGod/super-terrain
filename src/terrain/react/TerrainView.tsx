@@ -160,17 +160,17 @@ export function TerrainView({
     }
 
     /**
-     * Hover work runs at most once per frame.
+     * Pointer work runs at most once per frame.
      *
-     * A pointer can report far faster than the display refreshes, and every
-     * report here casts a ray and writes the 3D cursor into the editor store,
-     * which re-renders the surrounding UI. Coalescing to the frame keeps both
-     * off the critical path without losing anything: only the newest pointer
-     * position can matter by the time the frame is drawn.
+     * A pointer can report far faster than the display refreshes -- a 1000 Hz
+     * mouse delivers well over a dozen events per frame -- and every report
+     * here casts a ray, writes the 3D cursor into the editor store, and, while
+     * dragging, appends dabs and re-runs the viewport preview over them. None
+     * of that can be seen more often than the display refreshes.
      *
-     * A live stroke is exempt. Its samples are authored content rather than a
-     * cursor readout, and dropping the ones that fall between frames would
-     * quietly coarsen the brush path.
+     * A live stroke loses nothing by being coalesced: the segment between the
+     * last processed position and the newest one is still resampled at brush
+     * spacing, so the dab path is the same one a raw event stream would author.
      */
     let hoverEvent: PointerEvent | undefined
     let hoverHandle: number | undefined
@@ -181,10 +181,6 @@ export function TerrainView({
       if (event) applyPointerMove(event)
     }
     const onPointerMove = (event: PointerEvent) => {
-      if (dragging.current) {
-        applyPointerMove(event)
-        return
-      }
       hoverEvent = event
       if (hoverHandle !== undefined) return
       hoverHandle = requestAnimationFrame(runHover)

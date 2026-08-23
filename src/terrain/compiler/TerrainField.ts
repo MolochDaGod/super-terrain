@@ -1,4 +1,4 @@
-import { clamp, lerp, smoothstep } from '../core/bounds'
+import { lerp, smoothstep } from '../core/bounds'
 import { sampleHeight } from './heightField'
 import type { Vec3Like } from '../core/types'
 import type { TerrainApron } from '../modifiers/boolean/CutterVolume'
@@ -10,6 +10,12 @@ import {
   nearbyBrushSampleIndices,
   supportsIndexedBrushEvaluation,
 } from './BrushSampleIndex'
+import {
+  applyBrushDab,
+  maximumDabDisplacement,
+  type BrushKernelParams,
+  type BrushKernelSample,
+} from '../modifiers/brushKernel'
 
 export function evaluateHeight(
   worldX: number,
@@ -84,10 +90,9 @@ export function evaluateTerrainPoint(
     }
   }
   point.y += apronLift
-  const integratedBase = { ...point }
   for (const modifier of modifiers) {
     if (!modifier.enabled || modifier.type !== 'brush-stroke') continue
-    applyBrushToPoint(point, integratedBase, modifier)
+    applyBrushToPoint(point, modifier)
   }
   return point
 }
@@ -142,7 +147,6 @@ export function evaluateEditableTerrainPoint(
   sourceNormal: Vec3Like,
   modifiers: TerrainModifier[],
 ): Vec3Like {
-  const base = { ...sourcePoint }
   const point = { ...sourcePoint }
   const normalLength = Math.hypot(
     sourceNormal.x,
@@ -176,7 +180,7 @@ export function evaluateEditableTerrainPoint(
         break
       }
       case 'brush-stroke':
-        applyBrushToPoint(point, base, modifier)
+        applyBrushToPoint(point, modifier)
         break
       case 'weight-paint':
       case 'sculpt-layer':
@@ -205,112 +209,74 @@ export function hasLateralDisplacement(
 
 function applyBrushToPoint(
   point: Vec3Like,
-  base: Vec3Like,
   modifier: BrushStrokeModifier,
 ): void {
+  // Most vertices handed to a compile sit outside the stroke that was queried
+  // alongside them. One box test rejects them before any per-dab work, which
+  // matters most for mesh-domain strokes: those cannot use the sample index and
+  // would otherwise pay the full O(vertices x dabs) sweep.
+  const params = brushParams(modifier)
+  const slack = maximumDabDisplacement(params)
+  const bounds = modifier.bounds
+  if (
+    point.x < bounds.min.x - slack ||
+    point.x > bounds.max.x + slack ||
+    point.z < bounds.min.z - slack ||
+    point.z > bounds.max.z + slack ||
+    (modifier.domain !== 'heightfield' &&
+      (point.y < bounds.min.y - slack || point.y > bounds.max.y + slack))
+  ) {
+    return
+  }
+
+  // The position this stroke found the point at. Every dab is bounded against
+  // it, so the limit applies to the stroke and not to each dab in turn.
+  anchor.x = point.x
+  anchor.y = point.y
+  anchor.z = point.z
   const sampleIndices = supportsIndexedBrushEvaluation(modifier)
     ? nearbyBrushSampleIndices(modifier, point)
     : undefined
   const count = sampleIndices?.length ?? modifier.points.length
   for (let orderedIndex = 0; orderedIndex < count; orderedIndex += 1) {
     const sample = modifier.points[sampleIndices?.[orderedIndex] ?? orderedIndex]
-    const dx = point.x - sample.x
-    const dy = point.y - sample.y
-    const dz = point.z - sample.z
-    const isHeightfield = modifier.domain === 'heightfield'
-    const distance = isHeightfield ? Math.hypot(dx, dz) : Math.hypot(dx, dy, dz)
-    if (distance >= modifier.radius) continue
-    const radial = 1 - distance / modifier.radius
-    const weight =
-      smoothstep(0, 1, radial) ** (0.55 + modifier.falloff * 2.4) *
-      clamp(modifier.strength, 0, 1) *
-      Math.max(0, sample.weight ?? 1)
     const normal = sample.normal ?? { x: 0, y: 1, z: 0 }
-    const normalLength = Math.hypot(normal.x, normal.y, normal.z) || 1
-    const nx = normal.x / normalLength
-    const ny = normal.y / normalLength
-    const nz = normal.z / normalLength
+    const length = Math.hypot(normal.x, normal.y, normal.z) || 1
+    kernelSample.x = sample.x
+    kernelSample.y = sample.y
+    kernelSample.z = sample.z
+    kernelSample.normalX = normal.x / length
+    kernelSample.normalY = normal.y / length
+    kernelSample.normalZ = normal.z / length
+    kernelSample.weight = sample.weight ?? 1
+    applyBrushDab(point, params, kernelSample, anchor)
+  }
+}
 
-    switch (modifier.mode) {
-      case 'raise':
-      case 'lower': {
-        const sign = modifier.mode === 'raise' ? 1 : -1
-        const displacement = weight * 2.8 * sign
-        point.x += nx * displacement
-        point.y += ny * displacement
-        point.z += nz * displacement
-        break
-      }
-      case 'flatten': {
-        const planeDistance = isHeightfield
-          ? point.y - (modifier.targetY ?? sample.y)
-          : dx * nx + dy * ny + dz * nz
-        const displacement = -planeDistance * clamp(weight * 0.48, 0, 1)
-        point.x += nx * displacement
-        point.y += ny * displacement
-        point.z += nz * displacement
-        break
-      }
-      case 'smooth': {
-        const amount = clamp(weight * 0.34, 0, 1)
-        if (!isHeightfield) point.x = lerp(point.x, base.x, amount)
-        point.y = lerp(point.y, base.y, amount)
-        if (!isHeightfield) point.z = lerp(point.z, base.z, amount)
-        break
-      }
-      case 'clay': {
-        // A broad, slightly flattened buildup like ZBrush/Blender clay strips.
-        const displacement = Math.min(weight * 3.4, radial * modifier.strength * 1.5)
-        point.x += nx * displacement
-        point.y += ny * displacement
-        point.z += nz * displacement
-        break
-      }
-      case 'pinch': {
-        // Pull vertices toward the dab center in the tangent plane while
-        // preserving the surface's normal depth.
-        const towardX = -dx
-        const towardY = -dy
-        const towardZ = -dz
-        const normalComponent = towardX * nx + towardY * ny + towardZ * nz
-        const amount = clamp(weight * 0.32, 0, 0.45)
-        point.x += (towardX - nx * normalComponent) * amount
-        point.y += (towardY - ny * normalComponent) * amount
-        point.z += (towardZ - nz * normalComponent) * amount
-        break
-      }
-      case 'scrape': {
-        const planeDistance = isHeightfield
-          ? point.y - (modifier.targetY ?? sample.y)
-          : dx * nx + dy * ny + dz * nz
-        if (planeDistance <= 0) break
-        const displacement = -planeDistance * clamp(weight * 0.7, 0, 1)
-        point.x += nx * displacement
-        point.y += ny * displacement
-        point.z += nz * displacement
-        break
-      }
-      case 'terrace': {
-        const step = Math.max(0.25, modifier.terraceStep ?? 4)
-        const target = Math.round(point.y / step) * step
-        point.y = lerp(point.y, target, clamp(weight * 0.65, 0, 1))
-        break
-      }
-      case 'noise': {
-        const scale = Math.max(0.15, modifier.noiseScale ?? 3)
-        const noise = hash3(
-          Math.floor(point.x / scale),
-          Math.floor(point.y / scale),
-          Math.floor(point.z / scale),
-          modifier.noiseSeed ?? 1,
-        ) * 2 - 1
-        const displacement = noise * weight * 3.2
-        point.x += nx * displacement
-        point.y += ny * displacement
-        point.z += nz * displacement
-        break
-      }
-    }
+const anchor = { x: 0, y: 0, z: 0 }
+
+/** Reused across the vertex loop; the kernel never retains either object. */
+const kernelSample: BrushKernelSample = {
+  x: 0,
+  y: 0,
+  z: 0,
+  normalX: 0,
+  normalY: 1,
+  normalZ: 0,
+  weight: 1,
+}
+
+function brushParams(modifier: BrushStrokeModifier): BrushKernelParams {
+  return {
+    mode: modifier.mode,
+    domain: modifier.domain,
+    radius: modifier.radius,
+    strength: modifier.strength,
+    falloff: modifier.falloff,
+    targetY: modifier.targetY,
+    terraceStep: modifier.terraceStep,
+    noiseScale: modifier.noiseScale,
+    noiseSeed: modifier.noiseSeed,
   }
 }
 
@@ -343,12 +309,3 @@ function hash2(x: number, z: number, seed: number): number {
   return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295
 }
 
-function hash3(x: number, y: number, z: number, seed: number): number {
-  let value =
-    Math.imul(x, 374_761_393) ^
-    Math.imul(y, 668_265_263) ^
-    Math.imul(z, 2_147_483_647) ^
-    seed
-  value = Math.imul(value ^ (value >>> 13), 1_274_126_177)
-  return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295
-}

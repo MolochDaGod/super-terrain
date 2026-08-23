@@ -43,7 +43,7 @@ export const TOOLS: ToolDefinition[] = [
   { id: 'cursor', label: '3D cursor', shortcut: 'X', code: 'KeyX', icon: Crosshair, kind: 'viewport', group: 'viewport', description: 'Click the terrain to place the point that Add uses. Right-click places it from any tool.' },
   { id: 'raise', label: 'Raise', shortcut: '2', code: 'Digit2', icon: ArrowUp, kind: 'sculpt', group: 'primary', description: 'Push the surface outward along its normal, or up along world Y in heightfield mode.' },
   { id: 'lower', label: 'Lower', shortcut: '3', code: 'Digit3', icon: ArrowDown, kind: 'sculpt', group: 'primary', description: 'Pull the surface inward along its normal, or down along world Y in heightfield mode.' },
-  { id: 'smooth', label: 'Smooth', shortcut: '4', code: 'Digit4', icon: Waves, kind: 'sculpt', group: 'primary', description: 'Relax local detail toward the broad terrain field.' },
+  { id: 'smooth', label: 'Smooth', shortcut: '4', code: 'Digit4', icon: Waves, kind: 'sculpt', group: 'primary', description: 'Relax the surface toward the level the stroke passes over, so bumps sink and hollows fill.' },
   { id: 'flatten', label: 'Flatten', shortcut: '5', code: 'Digit5', icon: CircleDotDashed, kind: 'sculpt', group: 'primary', description: 'Converge the surface toward the first sampled elevation.' },
   { id: 'clay', label: 'Clay', shortcut: '6', code: 'Digit6', icon: CirclePlus, kind: 'sculpt', group: 'detail', description: 'Build broad clay-like mass with a naturally flattened crest.' },
   { id: 'pinch', label: 'Pinch', shortcut: '7', code: 'Digit7', icon: Focus, kind: 'sculpt', group: 'detail', description: 'Pull the surface inward in the tangent plane to sharpen ridges and creases.' },

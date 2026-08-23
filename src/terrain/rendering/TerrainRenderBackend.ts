@@ -63,6 +63,16 @@ export interface TerrainRenderBackend {
   setMaterialSettings(settings: TerrainMaterialSettings): void
   /** Builds current-camera depth from last-visible bricks and applies Hi-Z. */
   updateOcclusion(renderer: Renderer, camera: Camera, scene: Scene): void
+  /**
+   * Opens and closes a sculpt gesture.
+   *
+   * Dabs arrive incrementally while the compiler evaluates the finished stroke
+   * in one pass from the unsculpted surface. The backend keeps the positions
+   * each section held at the press so both sides bound displacement against
+   * the same reference and stay in agreement.
+   */
+  beginBrushPreview(): void
+  endBrushPreview(): void
   previewBrush(preview: PreviewBrush): void
   previewWeightPaint(preview: PreviewWeightPaint): void
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined

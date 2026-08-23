@@ -6,6 +6,9 @@ import {
 } from 'three/webgpu'
 import type { CompiledSection } from '../core/types'
 import { MeshPartition } from '../partition/MeshPartition'
+import { BRUSH_DEPTH_PER_RADIUS } from '../modifiers/brushKernel'
+import { appendBrushPoint, createBrushStroke } from '../modifiers/factories'
+import { evaluateEditableTerrainPoint } from '../compiler/TerrainField'
 import { ThreeTerrainRenderBackend } from './ThreeTerrainRenderBackend'
 
 describe('Three terrain render preview', () => {
@@ -37,9 +40,68 @@ describe('Three terrain render preview', () => {
 
     const mesh = root.getObjectByName(`terrain-section-${section.id}`) as Mesh
     const positions = mesh.geometry.getAttribute('position') as BufferAttribute
-    expect(positions.getY(4)).toBeCloseTo(2.8, 5)
-    expect(mesh.geometry.boundingBox?.max.y).toBeGreaterThan(2.7)
+    // One full-weight dab lifts the surface by a fixed fraction of the brush
+    // radius, so the preview reports exactly what the compiler will produce.
+    const peak = 6 * BRUSH_DEPTH_PER_RADIUS
+    expect(positions.getY(4)).toBeCloseTo(peak, 5)
+    expect(mesh.geometry.boundingBox?.max.y).toBeGreaterThan(peak - 0.1)
     expect((mesh.geometry.getAttribute('normal') as BufferAttribute).version).toBeGreaterThan(0)
+    backend.dispose()
+  })
+
+  it('previews exactly what the compiler will evaluate for the same stroke', () => {
+    const root = new Group()
+    const backend = new ThreeTerrainRenderBackend(root, 128)
+    const partition = new MeshPartition({ sectionSize: 128, worldSize: 512, seed: 1 })
+    const section = partition.getOrCreate({ x: 0, z: 0 })
+    section.activeLod = 0
+    backend.upload(section, planeSection())
+    const mesh = root.getObjectByName(`terrain-section-${section.id}`) as Mesh
+    const positions = mesh.geometry.getAttribute('position') as BufferAttribute
+    const source = Float32Array.from(positions.array)
+
+    const stroke = createBrushStroke({
+      point: { x: 5, y: 0, z: 5 },
+      normal: { x: 0, y: 1, z: 0 },
+      domain: 'mesh',
+      mode: 'clay',
+      radius: 7,
+      strength: 0.6,
+      falloff: 0.35,
+      sampleWeight: 0.4,
+    })
+    appendBrushPoint(stroke, { x: 7, y: 0, z: 5 }, { x: 0, y: 1, z: 0 }, 0.4)
+
+    backend.previewBrush({
+      mode: stroke.mode,
+      domain: stroke.domain,
+      samples: stroke.points,
+      radius: stroke.radius,
+      strength: stroke.strength,
+      falloff: stroke.falloff,
+      noiseSeed: stroke.noiseSeed,
+    })
+
+    // The viewport and the worker are two evaluations of one kernel. If they
+    // ever diverge the surface visibly jumps when a stroke commits, which is
+    // exactly what a sculpt gesture must never do.
+    let moved = 0
+    for (let vertex = 0; vertex < positions.count; vertex += 1) {
+      const compiled = evaluateEditableTerrainPoint(
+        {
+          x: source[vertex * 3],
+          y: source[vertex * 3 + 1],
+          z: source[vertex * 3 + 2],
+        },
+        { x: 0, y: 1, z: 0 },
+        [stroke],
+      )
+      expect(positions.getX(vertex)).toBeCloseTo(compiled.x, 4)
+      expect(positions.getY(vertex)).toBeCloseTo(compiled.y, 4)
+      expect(positions.getZ(vertex)).toBeCloseTo(compiled.z, 4)
+      if (compiled.y !== source[vertex * 3 + 1]) moved += 1
+    }
+    expect(moved).toBeGreaterThan(0)
     backend.dispose()
   })
 

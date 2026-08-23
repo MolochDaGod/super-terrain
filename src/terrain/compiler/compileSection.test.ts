@@ -8,6 +8,7 @@ import {
   createWeightPaintStroke,
 } from '../modifiers/factories'
 import type { TerrainModifier } from '../modifiers/types'
+import { BRUSH_DEPTH_PER_RADIUS } from '../modifiers/brushKernel'
 import { EditableMesh, EditableMeshSection } from '../mesh/EditableMesh'
 import { encodeModifiers, type CompileSectionRequest } from '../workers/protocol'
 import {
@@ -390,7 +391,14 @@ describe('section compiler', () => {
       compiled.lods[0].triangleCount,
     )
     for (const lod of compiled.lods) {
-      expect(retainsSculptPeak(lod.positions, point.x, point.z)).toBe(true)
+      expect(
+        retainsSculptPeak(
+          lod.positions,
+          point.x,
+          point.z,
+          5 * BRUSH_DEPTH_PER_RADIUS,
+        ),
+      ).toBe(true)
     }
 
     request.levels = [2]
@@ -398,7 +406,12 @@ describe('section compiler', () => {
     expect(distantOnly.metadata.vertexCount).toBe(17 * 17)
     expect(distantOnly.lods[0].level).toBe(2)
     expect(
-      retainsSculptPeak(distantOnly.lods[0].positions, point.x, point.z),
+      retainsSculptPeak(
+        distantOnly.lods[0].positions,
+        point.x,
+        point.z,
+        5 * BRUSH_DEPTH_PER_RADIUS,
+      ),
     ).toBe(true)
   })
 
@@ -694,12 +707,13 @@ function retainsSculptPeak(
   positions: Float32Array,
   sourceX: number,
   sourceZ: number,
+  peak: number,
 ): boolean {
   for (let offset = 0; offset < positions.length; offset += 3) {
     if (
       Math.abs(positions[offset + 2] - sourceZ) < 1e-4 &&
-      positions[offset] > sourceX + 2.5 &&
-      positions[offset] < sourceX + 3.1
+      positions[offset] > sourceX + peak * 0.85 &&
+      positions[offset] < sourceX + peak * 1.15
     ) {
       return true
     }

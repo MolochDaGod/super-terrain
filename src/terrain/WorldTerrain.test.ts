@@ -117,6 +117,33 @@ describe('world terrain brush sessions', () => {
     terrain.dispose()
   })
 
+  it('rebuilds the section once for a whole stroke, not once per dab', () => {
+    const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
+    terrain.attachRenderer(fakeRenderer(vi.fn()))
+    const editor = new EditorStore()
+    editor.patch({ tool: 'raise', brushDomain: 'mesh', brushRadius: 10 })
+    const snapshot = editor.getSnapshot()
+
+    const section = terrain.partition.getOrCreate({ x: 0, z: 0 })
+    terrain.beginStroke({ x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 }, snapshot)
+    const atPress = section.revision
+
+    for (let step = 1; step <= 12; step += 1) {
+      terrain.advanceActiveStroke(1 / 60)
+      terrain.continueStroke({ x: step * 3, y: 0, z: 0 }, { x: 0, y: 1, z: 0 })
+    }
+
+    // A dab used to invalidate, so a drag queued a section recompile per
+    // pointer event and spent the gesture swapping half-finished results into
+    // the viewport. The preview runs the same kernel the worker will, so the
+    // authored stroke is worth exactly one rebuild.
+    expect(section.revision).toBe(atPress)
+
+    terrain.endStroke()
+    expect(section.revision).toBe(atPress + 1)
+    terrain.dispose()
+  })
+
   it('accumulates held-brush flow in small frame-scaled increments', () => {
     const terrain = new WorldTerrain({ workerCount: 1 }, memoryStorage)
     const previewBrush = vi.fn<TerrainRenderBackend['previewBrush']>()
@@ -140,11 +167,12 @@ describe('world terrain brush sessions', () => {
         (total, sample) => total + sample.weight,
         0,
       )
-      expect(totalWeight).toBeCloseTo(1.28, 5)
-      expect(Math.max(...stroke.points.map((sample) => sample.weight))).toBeLessThanOrEqual(0.2)
+      // The opening dab plus half a second of held flow at 1.5 per second.
+      expect(totalWeight).toBeCloseTo(0.85, 5)
+      expect(Math.max(...stroke.points.map((sample) => sample.weight))).toBeLessThanOrEqual(0.25)
     }
     const frameDab = previewBrush.mock.calls.at(-1)?.[0].samples[0]
-    expect(frameDab?.weight).toBeCloseTo(0.04, 5)
+    expect(frameDab?.weight).toBeCloseTo(1.5 / 60, 5)
     terrain.endStroke()
     terrain.dispose()
   })
@@ -465,6 +493,8 @@ function fakeRenderer(
     setRenderMode() {},
     setMaterialSettings() {},
     updateOcclusion() {},
+    beginBrushPreview() {},
+    endBrushPreview() {},
     previewBrush,
     previewWeightPaint,
     raycast: () => undefined,

@@ -4,6 +4,7 @@ import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
 import { inspectorSectionForTool } from '../../terrain/editor/EditorStore'
 import type { BrushDomain, PaintMode } from '../../terrain/modifiers/types'
+import { BRUSH_DEPTH_PER_RADIUS } from '../../terrain/modifiers/brushKernel'
 import { useEditorSnapshot } from '../../terrain/react/hooks'
 import { RangeField } from './RangeField'
 import { MaterialChannelsPanel } from './MaterialChannelsPanel'
@@ -108,6 +109,14 @@ export function InspectorPanel({
           <>
             <RangeField
               label="Strength"
+              // Deposition scales with the brush footprint, so the same
+              // strength means different metres on different brushes. Naming
+              // the depth one pass reaches saves guessing at the slider.
+              hint={`≈ ${(
+                snapshot.brushRadius *
+                BRUSH_DEPTH_PER_RADIUS *
+                snapshot.brushStrength
+              ).toFixed(1)} m per pass`}
               value={snapshot.brushStrength}
               min={0.03}
               max={1}
@@ -115,7 +124,8 @@ export function InspectorPanel({
               onChange={(brushStrength) => editor.patch({ brushStrength })}
             />
             <RangeField
-              label="Falloff"
+              label="Softness"
+              hint={snapshot.brushFalloff < 0.08 ? 'flat disc' : undefined}
               value={snapshot.brushFalloff}
               min={0}
               max={1}

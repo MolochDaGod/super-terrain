@@ -19,6 +19,10 @@ export function sampleStrokeSegment(
   const rawCount = Math.floor(distance / Math.max(0.001, spacing))
   if (rawCount === 0) return []
   const count = Math.min(rawCount, MAX_SAMPLES_PER_POINTER_EVENT)
+  // A fast drag can cover more than the cap allows. Spreading the dabs it did
+  // earn across the whole segment and thickening each one by what was dropped
+  // keeps a quick pass depositing the same material as a slow one.
+  const weight = (sampleWeight * rawCount) / count
   const samples: BrushSample[] = []
 
   for (let index = 1; index <= count; index += 1) {
@@ -31,7 +35,7 @@ export function sampleStrokeSegment(
       y: from.y + dy * t,
       z: from.z + dz * t,
       normal: normalizedLerp(fromNormal, toNormal, t),
-      weight: sampleWeight,
+      weight,
     })
   }
   return samples

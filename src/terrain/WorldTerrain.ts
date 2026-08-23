@@ -164,9 +164,31 @@ interface TerrainViewSignature {
   verticalFovRadians: number
 }
 
-const BRUSH_FLOW_PER_SECOND = 2.4
-const SPATIAL_DAB_WEIGHT = 0.08
-const MAX_AUTHORED_DAB_WEIGHT = 0.2
+/**
+ * Deposition while the pointer is held still, in accumulated brush weight per
+ * second. One unit is roughly what a single unhurried pass lays down, so a held
+ * brush reaches full depth in a little under a second.
+ */
+const BRUSH_FLOW_PER_SECOND = 1.5
+/** Ceiling on a single authored dab, so no one frame steps the surface. */
+const MAX_AUTHORED_DAB_WEIGHT = 0.25
+/** Dab spacing along a stroke, as a fraction of brush radius. */
+const BRUSH_SPACING_FRACTION = 0.1
+
+/**
+ * Dab spacing for a brush, in metres.
+ *
+ * Spacing and per-dab weight are derived from each other, so how much material
+ * a pass deposits depends on the brush and the strength the user set and not on
+ * how fast they happened to drag the pointer.
+ */
+function strokeSpacing(radius: number): number {
+  return Math.max(0.25, radius * BRUSH_SPACING_FRACTION)
+}
+
+function spatialDabWeight(radius: number): number {
+  return strokeSpacing(radius) / Math.max(0.001, radius)
+}
 const GRANITE_PLANT_DEPTH_RATIO = 0.06
 /**
  * How far a section's compiled detail may exceed what its distance now asks
@@ -693,7 +715,7 @@ export class WorldTerrain {
           radius: editor.brushRadius,
           strength: editor.brushStrength,
           falloff: editor.brushFalloff,
-          sampleWeight: SPATIAL_DAB_WEIGHT,
+          sampleWeight: spatialDabWeight(editor.brushRadius),
         })
       : createBrushStroke({
           point,
@@ -710,7 +732,7 @@ export class WorldTerrain {
           terraceStep: editor.terraceStep,
           noiseScale: editor.noiseScale,
           sculptLayerId,
-          sampleWeight: SPATIAL_DAB_WEIGHT,
+          sampleWeight: spatialDabWeight(editor.brushRadius),
         })
     this.modifiers.add(stroke)
     this.activeStroke = stroke
@@ -718,8 +740,8 @@ export class WorldTerrain {
     this.lastStrokeNormal = { ...strokeNormal }
     this.liveStrokePoint = { ...point }
     this.liveStrokeNormal = { ...strokeNormal }
-    if (stroke.type === 'brush-stroke') this.invalidate(stroke.bounds)
     this.forceEditingLod(point, stroke.radius)
+    this.renderer?.beginBrushPreview()
     this.applyPreview(stroke, [stroke.points[0]])
     return stroke.id
   }
@@ -741,7 +763,7 @@ export class WorldTerrain {
     }
     const stroke = this.activeStroke
     if (!stroke || !this.lastStrokePoint || !this.lastStrokeNormal) return
-    const spacing = Math.max(0.35, stroke.radius * 0.05)
+    const spacing = strokeSpacing(stroke.radius)
     const strokeNormal =
       stroke.type === 'brush-stroke' && stroke.domain === 'heightfield'
         ? { x: 0, y: 1, z: 0 }
@@ -756,21 +778,21 @@ export class WorldTerrain {
       this.lastStrokeNormal,
       strokeNormal,
       spacing,
-      SPATIAL_DAB_WEIGHT,
+      spatialDabWeight(stroke.radius),
     )
     if (samples.length === 0) return
-    let dirtyBounds: AABB | undefined
     for (const sample of samples) {
-      dirtyBounds = unionBounds(
-        dirtyBounds,
-        appendBrushPoint(stroke, sample, sample.normal, sample.weight),
-      )
+      appendBrushPoint(stroke, sample, sample.normal, sample.weight)
     }
     if (stroke.type === 'brush-stroke') this.modifiers.touch()
     const latest = samples.at(-1)!
     this.lastStrokePoint = { x: latest.x, y: latest.y, z: latest.z }
     this.lastStrokeNormal = { ...latest.normal }
-    if (stroke.type === 'brush-stroke') this.invalidate(dirtyBounds!)
+    // No authoritative rebuild mid-stroke. Every dab used to invalidate, so a
+    // drag queued a section recompile per pointer event and the viewport spent
+    // the stroke swapping between half-finished results. The preview already
+    // shows the exact same kernel the worker will run, so the rebuild is worth
+    // exactly one compile and it happens when the gesture ends.
     this.applyPreview(stroke, samples)
   }
 
@@ -799,6 +821,9 @@ export class WorldTerrain {
     const hadStroke = Boolean(completedStroke)
     if (completedStroke) {
       this.modifiers.touch()
+      if (completedStroke.type === 'brush-stroke') {
+        this.invalidate(completedStroke.bounds)
+      }
       if (completedStroke.type === 'weight-paint') {
         // Painting already mutated the resident GPU attributes directly. Only
         // now advance the authoritative revisions. Provenance lets current
@@ -809,6 +834,7 @@ export class WorldTerrain {
       }
       this.markPersistenceDirty()
     }
+    if (hadStroke) this.renderer?.endBrushPreview()
     this.activeStroke = undefined
     this.lastStrokePoint = undefined
     this.lastStrokeNormal = undefined

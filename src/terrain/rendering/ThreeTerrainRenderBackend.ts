@@ -17,6 +17,12 @@ import {
   Vector3,
 } from 'three/webgpu'
 import { smoothstep } from '../core/bounds'
+import {
+  applyBrushDab,
+  maximumDabDisplacement,
+  type BrushKernelParams,
+  type MutablePoint,
+} from '../modifiers/brushKernel'
 import type { CompiledLOD, CompiledSection, SectionId } from '../core/types'
 import type { TerrainOverlay } from '../editor/EditorStore'
 import type { TerrainSection } from '../partition/MeshPartition'
@@ -141,6 +147,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private readonly scratchNormal = new Vector3()
   private readonly scratchNormalMatrix = new Matrix3()
   private readonly pendingPreviewRefresh = new Set<BufferGeometry>()
+  private readonly pendingBrickRefit = new Set<BufferGeometry>()
+  private readonly strokeAnchors = new Map<BufferGeometry, Float32Array>()
   private previewRefreshHandle?: number
 
   private readonly debugView: FullMaterialDebug
@@ -356,6 +364,14 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     invalidateTerrainShadows()
   }
 
+  beginBrushPreview(): void {
+    this.strokeAnchors.clear()
+  }
+
+  endBrushPreview(): void {
+    this.strokeAnchors.clear()
+  }
+
   previewBrush(preview: PreviewBrush): void {
     if (preview.samples.length === 0) return
     const samples = preview.samples.map(preparePreviewSample)
@@ -392,6 +408,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       const activeLod = runtime.lods.get(runtime.lod)!
       const maximumDisplacement = applyPreviewToGeometry(
         activeLod.source,
+        this.strokeAnchorFor(activeLod.source),
         minX,
         minZ,
         preview,
@@ -405,9 +422,11 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
         expandPreviewBounds(activeLod.source, maximumDisplacement)
         expandTerrainBrickBounds(activeLod.bricks, maximumDisplacement)
         // Bricks share the positions that just moved, so any tree already built
-        // over them now describes the shape before the stroke.
+        // over them now describes the shape before the stroke. Refitting is the
+        // most expensive thing a dab can trigger, so it is collapsed to once per
+        // frame -- or to the next ray, whichever comes first.
         for (const brick of activeLod.bricks) {
-          refitTerrainBoundsTree(brick.geometry)
+          this.pendingBrickRefit.add(brick.geometry)
         }
         this.queuePreviewRefresh(activeLod.source)
       }
@@ -461,6 +480,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   }
 
   raycast(raycaster: Raycaster): TerrainRaycastHit | undefined {
+    this.flushBrickRefits()
     // Only what the ray actually crosses gets a tree. Building one costs a few
     // milliseconds, and with the whole world resident the old sweep paid that
     // for a thousand sections on the first cast after a zoom-out -- for a ray
@@ -596,6 +616,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     }
     this.previewRefreshHandle = undefined
     this.pendingPreviewRefresh.clear()
+    this.pendingBrickRefit.clear()
+    this.strokeAnchors.clear()
     for (const id of [...this.runtime.keys()]) this.evict(id)
     for (const batch of this.batches.values()) {
       if (batch.mesh) {
@@ -889,6 +911,8 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
   private deferGeometries(geometries: BufferGeometry[]): void {
     for (const geometry of geometries) {
       this.pendingPreviewRefresh.delete(geometry)
+      this.pendingBrickRefit.delete(geometry)
+      this.strokeAnchors.delete(geometry)
       // The tree indexes positions this geometry is about to stop owning, and
       // nothing can raycast a detached mesh, so it goes now rather than waiting
       // out the disposal delay that exists for in-flight GPU frames.
@@ -913,7 +937,33 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     })
   }
 
+  /**
+   * Positions this geometry held when the gesture began.
+   *
+   * Taken on the first dab that reaches the section rather than at the press,
+   * so a stroke that never touches a section never copies its buffer.
+   */
+  private strokeAnchorFor(geometry: BufferGeometry): Float32Array {
+    const existing = this.strokeAnchors.get(geometry)
+    if (existing) return existing
+    const positions = (geometry.getAttribute('position') as BufferAttribute)
+      .array as Float32Array
+    const anchor = Float32Array.from(positions)
+    this.strokeAnchors.set(geometry, anchor)
+    return anchor
+  }
+
+  /** Brings deferred BVH refits up to date before anything reads a tree. */
+  private flushBrickRefits(): void {
+    if (this.pendingBrickRefit.size === 0) return
+    for (const geometry of this.pendingBrickRefit) {
+      refitTerrainBoundsTree(geometry)
+    }
+    this.pendingBrickRefit.clear()
+  }
+
   private flushPreviewRefresh(): void {
+    this.flushBrickRefits()
     if (this.pendingPreviewRefresh.size === 0) return
     for (const geometry of this.pendingPreviewRefresh) {
       geometry.computeVertexNormals()
@@ -1122,6 +1172,7 @@ function applyWeightPreviewToGeometry(
 
 function applyPreviewToGeometry(
   geometry: BufferGeometry,
+  anchors: Float32Array,
   originX: number,
   originZ: number,
   preview: PreviewBrush,
@@ -1129,146 +1180,68 @@ function applyPreviewToGeometry(
 ): number {
   const attribute = geometry.getAttribute('position') as BufferAttribute
   const positions = attribute.array as Float32Array
-  const radiusSquared = preview.radius * preview.radius
+  const params = previewKernelParams(preview)
   let changed = false
   let maximumDisplacement = 0
+
+  // Section geometry is a few thousand vertices and a dab covers a fraction of
+  // it. Rejecting on the dab's own box first keeps the cost of a pointer event
+  // proportional to what the brush actually touches rather than to the section.
+  let minimumX = Infinity
+  let minimumY = Infinity
+  let minimumZ = Infinity
+  let maximumX = -Infinity
+  let maximumY = -Infinity
+  let maximumZ = -Infinity
+  for (const sample of samples) {
+    minimumX = Math.min(minimumX, sample.x)
+    minimumY = Math.min(minimumY, sample.y)
+    minimumZ = Math.min(minimumZ, sample.z)
+    maximumX = Math.max(maximumX, sample.x)
+    maximumY = Math.max(maximumY, sample.y)
+    maximumZ = Math.max(maximumZ, sample.z)
+  }
+  // Vertices already lifted by earlier dabs of this stroke can still be pulled
+  // back by a later one, so the reject box carries a dab's worth of slack.
+  const reach = preview.radius + maximumDabDisplacement(params)
+  const isHeightfield = preview.domain === 'heightfield'
 
   for (let offset = 0; offset < positions.length; offset += 3) {
     const startX = positions[offset]
     const startY = positions[offset + 1]
     const startZ = positions[offset + 2]
-    let vertexChanged = false
-    for (const sample of samples) {
-      const worldX = originX + positions[offset]
-      const worldY = positions[offset + 1]
-      const worldZ = originZ + positions[offset + 2]
-      const dx = worldX - sample.x
-      const dy = worldY - sample.y
-      const dz = worldZ - sample.z
-      const distanceSquared =
-        preview.domain === 'heightfield'
-          ? dx * dx + dz * dz
-          : dx * dx + dy * dy + dz * dz
-      if (distanceSquared >= radiusSquared) continue
-      const radial = 1 - Math.sqrt(distanceSquared) / preview.radius
-      const weight =
-        smoothstep(0, 1, radial) ** (0.55 + preview.falloff * 2.4) *
-        preview.strength *
-        sample.weight
+    const worldX = originX + startX
+    const worldZ = originZ + startZ
+    if (
+      worldX < minimumX - reach ||
+      worldX > maximumX + reach ||
+      worldZ < minimumZ - reach ||
+      worldZ > maximumZ + reach ||
+      (!isHeightfield &&
+        (startY < minimumY - reach || startY > maximumY + reach))
+    ) {
+      continue
+    }
 
-      switch (preview.mode) {
-        case 'raise':
-        case 'lower': {
-          const direction = preview.mode === 'raise' ? 1 : -1
-          const displacement = weight * 2.8 * direction
-          positions[offset] += sample.normalX * displacement
-          positions[offset + 1] += sample.normalY * displacement
-          positions[offset + 2] += sample.normalZ * displacement
-          break
-        }
-        case 'flatten': {
-          const planeDistance =
-            preview.domain === 'heightfield'
-              ? worldY - (preview.targetY ?? sample.y)
-              : dx * sample.normalX +
-                dy * sample.normalY +
-                dz * sample.normalZ
-          const displacement = -planeDistance * weight * 0.48
-          positions[offset] += sample.normalX * displacement
-          positions[offset + 1] += sample.normalY * displacement
-          positions[offset + 2] += sample.normalZ * displacement
-          break
-        }
-        case 'smooth': {
-          const planeDistance =
-            preview.domain === 'heightfield'
-              ? worldY - sample.y
-              : dx * sample.normalX +
-                dy * sample.normalY +
-                dz * sample.normalZ
-          const displacement = -planeDistance * weight * 0.12
-          positions[offset] += sample.normalX * displacement
-          positions[offset + 1] += sample.normalY * displacement
-          positions[offset + 2] += sample.normalZ * displacement
-          break
-        }
-        case 'clay': {
-          const displacement = Math.min(
-            weight * 3.4,
-            radial * preview.strength * 1.5,
-          )
-          positions[offset] += sample.normalX * displacement
-          positions[offset + 1] += sample.normalY * displacement
-          positions[offset + 2] += sample.normalZ * displacement
-          break
-        }
-        case 'pinch': {
-          const towardX = -dx
-          const towardY = -dy
-          const towardZ = -dz
-          const normalComponent =
-            towardX * sample.normalX +
-            towardY * sample.normalY +
-            towardZ * sample.normalZ
-          const amount = Math.max(0, Math.min(0.45, weight * 0.32))
-          positions[offset] +=
-            (towardX - sample.normalX * normalComponent) * amount
-          positions[offset + 1] +=
-            (towardY - sample.normalY * normalComponent) * amount
-          positions[offset + 2] +=
-            (towardZ - sample.normalZ * normalComponent) * amount
-          break
-        }
-        case 'scrape': {
-          const planeDistance =
-            preview.domain === 'heightfield'
-              ? worldY - (preview.targetY ?? sample.y)
-              : dx * sample.normalX +
-                dy * sample.normalY +
-                dz * sample.normalZ
-          if (planeDistance <= 0) break
-          const displacement =
-            -planeDistance * Math.max(0, Math.min(1, weight * 0.7))
-          positions[offset] += sample.normalX * displacement
-          positions[offset + 1] += sample.normalY * displacement
-          positions[offset + 2] += sample.normalZ * displacement
-          break
-        }
-        case 'terrace': {
-          const step = Math.max(0.25, preview.terraceStep ?? 4)
-          const target = Math.round(worldY / step) * step
-          positions[offset + 1] +=
-            (target - worldY) * Math.max(0, Math.min(1, weight * 0.65))
-          break
-        }
-        case 'noise': {
-          const scale = Math.max(0.15, preview.noiseScale ?? 3)
-          const noise = previewHash3(
-            Math.floor(worldX / scale),
-            Math.floor(worldY / scale),
-            Math.floor(worldZ / scale),
-            preview.noiseSeed ?? 1,
-          ) * 2 - 1
-          const displacement = noise * weight * 3.2
-          positions[offset] += sample.normalX * displacement
-          positions[offset + 1] += sample.normalY * displacement
-          positions[offset + 2] += sample.normalZ * displacement
-          break
-        }
-      }
-      changed = true
-      vertexChanged = true
+    previewAnchor.x = originX + anchors[offset]
+    previewAnchor.y = anchors[offset + 1]
+    previewAnchor.z = originZ + anchors[offset + 2]
+    previewPoint.x = worldX
+    previewPoint.y = startY
+    previewPoint.z = worldZ
+    for (const sample of samples) {
+      applyBrushDab(previewPoint, params, sample, previewAnchor)
     }
-    if (vertexChanged) {
-      maximumDisplacement = Math.max(
-        maximumDisplacement,
-        Math.hypot(
-          positions[offset] - startX,
-          positions[offset + 1] - startY,
-          positions[offset + 2] - startZ,
-        ),
-      )
-    }
+
+    const dx = previewPoint.x - worldX
+    const dy = previewPoint.y - startY
+    const dz = previewPoint.z - worldZ
+    if (dx === 0 && dy === 0 && dz === 0) continue
+    positions[offset] = startX + dx
+    positions[offset + 1] = startY + dy
+    positions[offset + 2] = startZ + dz
+    changed = true
+    maximumDisplacement = Math.max(maximumDisplacement, Math.hypot(dx, dy, dz))
   }
 
   if (!changed) return 0
@@ -1276,14 +1249,22 @@ function applyPreviewToGeometry(
   return maximumDisplacement
 }
 
-function previewHash3(x: number, y: number, z: number, seed: number): number {
-  let value =
-    Math.imul(x, 374_761_393) ^
-    Math.imul(y, 668_265_263) ^
-    Math.imul(z, 2_147_483_647) ^
-    seed
-  value = Math.imul(value ^ (value >>> 13), 1_274_126_177)
-  return ((value ^ (value >>> 16)) >>> 0) / 4_294_967_295
+/** Reused by the vertex loop above; the kernel never retains either. */
+const previewPoint: MutablePoint = { x: 0, y: 0, z: 0 }
+const previewAnchor: MutablePoint = { x: 0, y: 0, z: 0 }
+
+function previewKernelParams(preview: PreviewBrush): BrushKernelParams {
+  return {
+    mode: preview.mode,
+    domain: preview.domain,
+    radius: preview.radius,
+    strength: preview.strength,
+    falloff: preview.falloff,
+    targetY: preview.targetY,
+    terraceStep: preview.terraceStep,
+    noiseScale: preview.noiseScale,
+    noiseSeed: preview.noiseSeed,
+  }
 }
 
 function expandPreviewBounds(

@@ -19,6 +19,7 @@ export class ModifierStack {
   private seenAt = new WeakMap<TerrainModifier, number>()
   private revision = 0
   private listeners = new Set<() => void>()
+  private emitHandle?: number
 
   constructor(bucketSize = 128) {
     this.bucketSize = Math.max(1, bucketSize)
@@ -58,7 +59,7 @@ export class ModifierStack {
     // stroke pays for one index update at commit rather than one per dab.
     this.indexDirty = true
     this.revision += 1
-    this.emit()
+    this.emitSoon()
   }
 
   clear(): void {
@@ -130,7 +131,24 @@ export class ModifierStack {
   }
 
   private emit(): void {
+    this.emitHandle = undefined
     for (const listener of this.listeners) listener()
+  }
+
+  /**
+   * Notifies at most once per frame.
+   *
+   * A live stroke mutates its modifier several times per pointer event, and
+   * every notification re-renders the panels that list the stack. Only the
+   * newest revision can matter to a frame that has not been drawn yet.
+   */
+  private emitSoon(): void {
+    if (this.emitHandle !== undefined) return
+    if (typeof requestAnimationFrame !== 'function') {
+      this.emit()
+      return
+    }
+    this.emitHandle = requestAnimationFrame(() => this.emit())
   }
 
   private ensureSpatialIndex(): void {
