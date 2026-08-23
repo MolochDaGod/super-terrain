@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import {
   Box,
   Copy,
@@ -26,6 +26,7 @@ import {
   Trash2,
   Triangle,
   HardDrive,
+  PackageOpen,
 } from 'lucide-react'
 import type { BenchmarkScenario, WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore, TransformMode } from '../../terrain/editor/EditorStore'
@@ -85,6 +86,7 @@ interface EditorMenuBarProps {
  * readout only needs to be legible at a glance.
  */
 export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
+  const [exportingGodot, setExportingGodot] = useState(false)
   const snapshot = useEditorSnapshot(editor)
   const selection = currentSelection(terrain, snapshot)
   const isMac =
@@ -381,6 +383,52 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
             shortcut="H"
             checked={snapshot.showHud}
             onSelect={() => editor.patch({ showHud: !snapshot.showHud })}
+          />
+        </Menu>
+
+        <Menu label="Export">
+          <MenuGroupLabel>Godot 4</MenuGroupLabel>
+          <MenuItem
+            label={exportingGodot ? 'Building Godot project…' : 'Godot project (.zip)'}
+            icon={PackageOpen}
+            disabled={exportingGodot}
+            onSelect={() => {
+              setExportingGodot(true)
+              void (async () => {
+                try {
+                  const { downloadGodotProject, exportGodotProject } = await import(
+                    '../../terrain/export/godotExport'
+                  )
+                  const result = await exportGodotProject({
+                    terrain,
+                    lights: editor.getSnapshot().lights,
+                    onProgress: ({ message }) => editor.patch({ status: message }),
+                  })
+                  downloadGodotProject(result)
+                  editor.patch({
+                    status: `Godot project exported · ${result.patchCount} patches · ${result.triangleCount.toLocaleString()} triangles`,
+                  })
+                } catch (error: unknown) {
+                  editor.patch({
+                    status: `Godot export failed · ${error instanceof Error ? error.message : String(error)}`,
+                  })
+                } finally {
+                  setExportingGodot(false)
+                }
+              })()
+            }}
+          />
+          <MenuSeparator />
+          <MenuGroupLabel>Includes</MenuGroupLabel>
+          <MenuItem
+            label="Scene, meshes, procedural PBR textures"
+            disabled
+            onSelect={() => {}}
+          />
+          <MenuItem
+            label="Water, rocks, lights, source & collision"
+            disabled
+            onSelect={() => {}}
           />
         </Menu>
 

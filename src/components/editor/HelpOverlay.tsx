@@ -71,7 +71,7 @@ export function HelpOverlay({ editor }: { editor: EditorStore }) {
           <HelpGroup
             title="Where things live"
             rows={[
-              ['Menu bar', 'File, Edit, Selection, Add, View, Run, Help'],
+              ['Menu bar', 'File, Edit, Selection, Add, View, Run, Export, Help'],
               ['Toolbar', 'Pointer modes, brushes, add and object verbs'],
               ['Left panel', 'Everything in the scene, as one list'],
               ['Right panel', 'Parameters for the tool and the selection'],
