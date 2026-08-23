@@ -62,6 +62,20 @@ export class TerrainStreamer {
   private velocity = { x: 0, y: 0, z: 0 }
   private loadEvents: number[] = []
   private evictionEvents: number[] = []
+  /**
+   * Candidate records live for as long as the section stays in range and are
+   * rewritten in place.
+   *
+   * At world residency this list is a thousand entries long and is rebuilt on
+   * every frame the camera moves. Allocating it fresh each time made the
+   * garbage collector one of the largest single costs of flying the camera,
+   * for objects whose identity nothing outside this class depends on.
+   */
+  private candidateRecords = new Map<SectionId, StreamCandidate>()
+  private candidateList: StreamCandidate[] = []
+  private candidateIndex = new Map<SectionId, StreamCandidate>()
+  private departedIds: SectionId[] = []
+  private hiddenIds: SectionId[] = []
   private visibleRadius?: number
   private targetVisibleRadius?: number
 
@@ -129,7 +143,10 @@ export class TerrainStreamer {
     const maxSection = Math.ceil(worldHalf / this.config.sectionSize) - 1
     const nextDesired = new Set<SectionId>()
     const nextVisible = new Set<SectionId>()
-    const candidates: StreamCandidate[] = []
+    const candidates = this.candidateList
+    candidates.length = 0
+    this.departedIds.length = 0
+    this.hiddenIds.length = 0
 
     // Clamped to the world rather than swept as a full square around the
     // camera. The residency radius now reaches the far corner of the map, so an
@@ -165,30 +182,66 @@ export class TerrainStreamer {
           ? worldToSection(editFocus.x, editFocus.z, this.config.sectionSize)
           : undefined
         const editFocused = editSection?.x === key.x && editSection.z === key.z
-        candidates.push({
-          id,
-          key,
+        let candidate = this.candidateRecords.get(id)
+        if (!candidate) {
+          candidate = { id, key, distance: 0, visible: false, prefetch: false, priority: 0 }
+          this.candidateRecords.set(id, candidate)
+        }
+        candidate.distance = distance
+        candidate.visible = inBaseRadius
+        candidate.prefetch = !inBaseRadius
+        candidate.priority = streamingPriority(
           distance,
-          visible: inBaseRadius,
-          prefetch: !inBaseRadius,
-          priority: streamingPriority(
-            distance,
-            alignment,
-            editFocused,
-            inBaseRadius,
-            viewAlignment,
-          ),
-        })
+          alignment,
+          editFocused,
+          inBaseRadius,
+          viewAlignment,
+        )
+        candidates.push(candidate)
         nextDesired.add(id)
         if (inBaseRadius) nextVisible.add(id)
       }
     }
 
+    // What left the working set, reported rather than rediscovered. Both
+    // callers used to find this by walking every section in the world every
+    // frame to ask a question whose answer is almost always "nothing changed".
+    for (const id of this.desired) {
+      if (!nextDesired.has(id)) this.departedIds.push(id)
+    }
+    for (const id of this.visible) {
+      if (!nextVisible.has(id)) this.hiddenIds.push(id)
+    }
+    for (const id of this.candidateRecords.keys()) {
+      if (!nextDesired.has(id)) this.candidateRecords.delete(id)
+    }
+
     this.desired = nextDesired
     this.visible = nextVisible
     candidates.sort((a, b) => b.priority - a.priority)
+    this.candidateIndex = this.candidateRecords
     this.trimEventHistory(now)
     return candidates
+  }
+
+  /** Candidates by id, valid until the next `update`. */
+  get candidatesById(): ReadonlyMap<SectionId, StreamCandidate> {
+    return this.candidateIndex
+  }
+
+  /** Sections that left the working set in the last `update`. */
+  get departed(): readonly SectionId[] {
+    return this.departedIds
+  }
+
+  /** Sections that stopped being visible in the last `update`. */
+  get hidden(): readonly SectionId[] {
+    return this.hiddenIds
+  }
+
+  /** Horizontal camera speed, metres per second, smoothed. */
+  get horizontalSpeed(): number {
+    return Math.hypot(this.velocity.x, this.velocity.z)
   }
 
   /**

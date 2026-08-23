@@ -33,6 +33,43 @@ describe('terrain streaming', () => {
     expect(streamer.collectEvictions(1_500)).toContain('0:0')
   })
 
+  it('reports what left the working set and reuses its candidate records', () => {
+    const streamer = new TerrainStreamer({
+      ...DEFAULT_TERRAIN_CONFIG,
+      worldSize: 4_096,
+      renderRadiusSections: 2,
+      maxRenderRadiusSections: 2,
+      prefetchSections: 0,
+    })
+    const first = streamer.update({ x: 0, y: 20, z: 0 }, 1, undefined, 0)
+    const centre = first.find((candidate) => candidate.id === '0:0')
+    expect(centre).toBeDefined()
+    expect(streamer.candidatesById.get('0:0')).toBe(centre)
+
+    const second = streamer.update({ x: 40, y: 20, z: 0 }, 1, undefined, 16)
+    // Still in range, so the record is the same object rewritten in place
+    // rather than a replacement allocated for the frame.
+    expect(second.find((candidate) => candidate.id === '0:0')).toBe(centre)
+    expect(streamer.departed).toHaveLength(0)
+
+    streamer.update({ x: 3_000, y: 20, z: 3_000 }, 1, undefined, 32)
+    expect(streamer.departed).toContain('0:0')
+    expect(streamer.hidden).toContain('0:0')
+    expect(streamer.candidatesById.has('0:0')).toBe(false)
+  })
+
+  it('reports the smoothed speed the detail floor is chosen from', () => {
+    const streamer = new TerrainStreamer(DEFAULT_TERRAIN_CONFIG)
+    streamer.update({ x: 0, y: 20, z: 0 }, 1, undefined, 0)
+    expect(streamer.horizontalSpeed).toBe(0)
+    for (let step = 1; step <= 30; step += 1) {
+      streamer.update({ x: step * 2, y: 20, z: 0 }, 1, undefined, step * 16)
+    }
+    // 2 m per 16 ms is 125 m/s; the smoothing only has to have caught up enough
+    // to be recognisably fast.
+    expect(streamer.horizontalSpeed).toBeGreaterThan(90)
+  })
+
   it('centers residency on the viewed terrain instead of the orbiting camera', () => {
     const streamer = new TerrainStreamer({
       ...DEFAULT_TERRAIN_CONFIG,

@@ -1,6 +1,6 @@
 import { sectionId } from '../core/bounds'
 import type { TerrainConfig } from '../config'
-import type { CompiledSection, SectionKey } from '../core/types'
+import type { CompiledSection, SectionId, SectionKey } from '../core/types'
 import type { TerrainSectionSourceSnapshot } from '../mesh/EditableMesh'
 import type { TerrainModifier } from '../modifiers/types'
 import type {
@@ -68,8 +68,21 @@ export class TerrainWorkerPool {
   private readonly config: TerrainConfig
   private readonly pipelineDepth: number
   private slots: WorkerSlot[] = []
-  private queue: QueuedJob[] = []
+  /**
+   * At most one waiting job per section, indexed by it.
+   *
+   * `submit` already guaranteed that invariant -- a new request drops any
+   * earlier one for the same section -- but the queue was a plain array, so
+   * every submit, cancel, retarget and reprioritise scanned all of it. With a
+   * thousand sections streaming and a few hundred reprioritised per frame that
+   * is hundreds of thousands of comparisons a frame, and it was the largest
+   * single cost of both a cold load and a moving camera.
+   */
+  private queued = new Map<SectionId, QueuedJob>()
+  /** Priority order, rebuilt from `queued` only when something has changed. */
+  private queueOrder: QueuedJob[] = []
   private nextJobId = 1
+  private queueDirty = false
   private cancelled = 0
   private stale = 0
   private latestRevision = new Map<string, number>()
@@ -99,16 +112,18 @@ export class TerrainWorkerPool {
   ): number {
     const id = sectionId(key)
     this.latestRevision.set(id, revision)
-    const retained: QueuedJob[] = []
-    for (const queued of this.queue) {
-      if (sectionId(queued.request.key) === id && queued.request.revision <= revision) {
+    const superseded = this.queued.get(id)
+    if (superseded) {
+      if (superseded.request.revision > revision) {
+        // A newer revision is already waiting; this request is the stale one.
         this.cancelled += 1
-      } else retained.push(queued)
+        return superseded.request.jobId
+      }
+      this.cancelled += 1
     }
-    this.queue = retained
 
     const jobId = this.nextJobId++
-    this.queue.push({
+    this.queued.set(id, {
       request: {
         kind: 'compile-section',
         jobId,
@@ -128,7 +143,7 @@ export class TerrainWorkerPool {
       },
       submittedAt: performance.now(),
     })
-    this.sortQueue()
+    this.queueDirty = true
     this.dispatch()
     return jobId
   }
@@ -140,17 +155,13 @@ export class TerrainWorkerPool {
     const id = sectionId(key)
     let queuedCount = 0
     let activeCount = 0
-    const retained: QueuedJob[] = []
-    for (const queued of this.queue) {
-      if (
-        sectionId(queued.request.key) === id &&
-        queued.request.revision <= beforeRevision
-      ) {
-        this.cancelled += 1
-        queuedCount += 1
-      } else retained.push(queued)
+    const waiting = this.queued.get(id)
+    if (waiting && waiting.request.revision <= beforeRevision) {
+      this.queued.delete(id)
+      this.queueDirty = true
+      this.cancelled += 1
+      queuedCount += 1
     }
-    this.queue = retained
 
     // Worker computation is synchronous, so a message cannot interrupt it.
     // Terminate and replace the module instead: departed travel work must not
@@ -172,37 +183,62 @@ export class TerrainWorkerPool {
     return { queued: queuedCount, active: activeCount }
   }
 
+  /**
+   * Coarsens a job that has not started yet.
+   *
+   * Flying across the map queues fine detail for everything the camera passes
+   * over, and by the time a worker reaches those jobs the camera is kilometres
+   * away and needs a fraction of the detail. The queued request has not been
+   * transferred anywhere yet, so the level set can simply be rewritten -- far
+   * cheaper than cancelling the job and building a fresh snapshot, and unlike
+   * cancelling it cannot disturb a worker that is mid-compile.
+   *
+   * Returns false when there is no queued job to retarget, which includes the
+   * case where it is already in flight.
+   */
+  retargetQueued(
+    key: SectionKey,
+    revision: number,
+    levels: readonly number[],
+    priority: number,
+  ): boolean {
+    const waiting = this.queued.get(sectionId(key))
+    if (!waiting || waiting.request.revision !== revision) return false
+    waiting.request.levels = [...levels]
+    waiting.request.priority = priority
+    this.queueDirty = true
+    return true
+  }
+
   reprioritizeSection(
     key: SectionKey,
     revision: number,
     priority: number,
   ): boolean {
-    const id = sectionId(key)
-    let changed = false
-    for (const queued of this.queue) {
-      if (
-        sectionId(queued.request.key) === id &&
-        queued.request.revision === revision &&
-        queued.request.priority !== priority
-      ) {
-        queued.request.priority = priority
-        changed = true
-      }
+    const waiting = this.queued.get(sectionId(key))
+    if (
+      !waiting ||
+      waiting.request.revision !== revision ||
+      waiting.request.priority === priority
+    ) {
+      return false
     }
-    if (changed) this.sortQueue()
-    return changed
+    waiting.request.priority = priority
+    this.queueDirty = true
+    return true
   }
 
   dispose(): void {
     for (const slot of this.slots) slot.worker.terminate()
     this.slots = []
-    this.queue = []
+    this.queued.clear()
+    this.queueOrder.length = 0
   }
 
   stats(): TerrainWorkerPoolStats {
     return {
       active: this.slots.reduce((count, slot) => count + slot.inFlight.length, 0),
-      queued: this.queue.length,
+      queued: this.queued.size,
       cancelled: this.cancelled,
       stale: this.stale,
     }
@@ -231,9 +267,18 @@ export class TerrainWorkerPool {
    * at the time; this is the check at the point of use.
    */
   private nextJob(): CompileSectionRequest | undefined {
-    while (this.queue.length > 0) {
-      const job = this.queue.shift()!
-      const latest = this.latestRevision.get(sectionId(job.request.key))
+    // Ordered at the point of use. Reprioritising is a per-frame, per-section
+    // event while the camera moves, and re-sorting on each of those was a
+    // measurable share of the frame on its own.
+    if (this.queueDirty) this.sortQueue()
+    while (this.queueOrder.length > 0) {
+      const job = this.queueOrder.pop()!
+      const id = sectionId(job.request.key)
+      // The order is a snapshot: an entry can have been replaced or cancelled
+      // since it was taken.
+      if (this.queued.get(id) !== job) continue
+      this.queued.delete(id)
+      const latest = this.latestRevision.get(id)
       if (latest !== undefined && job.request.revision < latest) {
         this.cancelled += 1
         continue
@@ -357,12 +402,16 @@ export class TerrainWorkerPool {
     }
   }
 
+  /** Rebuilds the dispatch order, lowest priority first so it can be popped. */
   private sortQueue(): void {
-    this.queue.sort((a, b) => {
+    this.queueDirty = false
+    this.queueOrder.length = 0
+    for (const job of this.queued.values()) this.queueOrder.push(job)
+    this.queueOrder.sort((a, b) => {
       if (a.request.priority !== b.request.priority) {
-        return b.request.priority - a.request.priority
+        return a.request.priority - b.request.priority
       }
-      return a.submittedAt - b.submittedAt
+      return b.submittedAt - a.submittedAt
     })
   }
 }

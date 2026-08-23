@@ -1,4 +1,5 @@
 import {
+  clamp,
   cloneBounds,
   distanceToAabb,
   expandBounds,
@@ -195,6 +196,26 @@ const STUCK_BUILD_SWEEP_MS = 2_000
  * only ever suppresses recomputation that would have produced the same answer.
  */
 const LOD_SELECTION_EPSILON_METRES = 0.75
+/** Fraction of its own distance a section may drift before it is re-selected. */
+const LOD_SELECTION_DISTANCE_BAND = 0.06
+
+/**
+ * How many sections are given a full build decision per frame.
+ *
+ * The candidate list is priority-ordered, so the first slice is what the camera
+ * is pointed at and gets decided every frame; the rest is walked by a cursor
+ * that covers a thousand-section world in about four frames. Both numbers exist
+ * because the alternative -- deciding for everything, every frame -- was tens
+ * of milliseconds of the frame while the camera moved, spent almost entirely on
+ * sections whose answer had not changed.
+ */
+const HOT_CANDIDATES_PER_FRAME = 128
+const COLD_CANDIDATES_PER_FRAME = 192
+
+/** First level compiled for a section that has nothing to show yet. */
+const COLD_START_LOD_FLOOR = 2
+const MOVING_CAMERA_METRES_PER_SECOND = 35
+const FAST_CAMERA_METRES_PER_SECOND = 90
 
 function compiledGpuBytes(compiled: CompiledSection | undefined): number {
   return compiled?.gpuBytes ?? compiled?.lods.reduce(
@@ -311,7 +332,11 @@ export class WorldTerrain {
   private viewTarget?: Vec3Like
   private readonly horizonProxyMask: HorizonProxyMask
   private viewSignature?: TerrainViewSignature
-  private cachedCandidateMap = new Map<string, StreamCandidate>()
+  private cachedCandidateMap: ReadonlyMap<SectionId, StreamCandidate> = new Map()
+  /** Rotating position in the low-priority tail of the candidate list. */
+  private serviceCursor = 0
+  /** Sections holding a finished compile that has not been presented yet. */
+  private readySwaps = new Set<SectionId>()
   private terrainStateRevision = 0
   private processedTerrainStateRevision = -1
   private hasPendingTerrainWork = true
@@ -323,7 +348,11 @@ export class WorldTerrain {
   private constrainedLod = new Map<SectionId, number>()
   /** Level last handed to the renderer, so unchanged sections enqueue nothing. */
   private requestedRendererLod = new Map<SectionId, number>()
-  private lodSelectionCamera?: Vec3Like
+  /** Distance to each section when its level was last chosen. */
+  private lodSelectionDistance = new Map<SectionId, number>()
+  /** Reused between frames: the constraint input is rebuilt on every one. */
+  private lodNodes: LodNeighborNode[] = []
+  private lodNodeRecords = new Map<SectionId, LodNeighborNode>()
   private lodSelectionQuality = Number.NaN
   private lodSelectionViewportHeight = Number.NaN
   private lodSelectionFov = Number.NaN
@@ -348,6 +377,10 @@ export class WorldTerrain {
   private compiledCacheGeneration = 0
   private warnedAboutCompiledCache = false
   private warmCacheStartup = false
+  private readonly heightColumn: AABB = {
+    min: { x: 0, y: -Infinity, z: 0 },
+    max: { x: 0, y: Infinity, z: 0 },
+  }
 
   constructor(
     config: Partial<TerrainConfig> = {},
@@ -384,6 +417,7 @@ export class WorldTerrain {
       if (!section) return
       if (result.compiled) {
         if (this.partition.acceptCompiled(section, result.compiled)) {
+          this.readySwaps.add(section.id)
           this.benchmarkHistory.record('compile', result.compiled.metadata.compileMs)
           this.queueCompiledCacheWrite(section, result.compiled)
         } else if (section.buildingRevision === result.revision) {
@@ -518,50 +552,20 @@ export class WorldTerrain {
           }
         : undefined,
     )
-    const candidateMap = new Map(candidates.map((candidate) => [candidate.id, candidate]))
-    this.cancelDepartedBuilds(this.cachedCandidateMap, candidateMap)
+    const candidateMap = this.streamer.candidatesById
+    this.cancelDepartedBuilds(this.streamer.departed)
     this.cachedCandidateMap = candidateMap
 
+    // Only what actually stopped being visible is hidden. The old sweep asked
+    // the same question of every section in the world on every frame.
     if (this.renderer) {
-      for (const section of this.partition.values()) {
-        // Preserve stable visibility. The old hide-all/show-desired cycle
-        // toggled every resident mesh twice per frame even when the camera had
-        // not moved, invalidating cached shadows and scene state for no visual
-        // change. Only sections that actually left the visible set are hidden.
-        if (
-          this.renderer.has(section.id) &&
-          candidateMap.get(section.id)?.visible !== true
-        ) {
-          this.renderer.setVisible(section.id, false)
-        }
+      for (const id of this.streamer.hidden) {
+        if (this.renderer.has(id)) this.renderer.setVisible(id, false)
       }
     }
 
-    for (const candidate of candidates) {
-      const existing = this.partition.get(candidate.key)
-      const section = existing ?? this.partition.getOrCreate(candidate.key, now)
-      if (!existing) {
-        this.streamer.touch(section.key, 'SOURCE_RESIDENT', 0, 0, now)
-      } else {
-        this.streamer.setState(
-          section.key,
-          section.residency,
-          section.compiled?.cpuBytes ?? 0,
-          this.renderer?.has(section.id) ? compiledGpuBytes(section.compiled) : 0,
-          now,
-        )
-      }
-      section.lastTouched = now
-      const minimumLod = this.minimumBuildLod(
-        section,
-        candidate,
-        input,
-      )
-      section.requestedLod = minimumLod
-      this.maybeQueueBuild(section, candidate, minimumLod, now)
-      this.maybeScheduleSwap(section, candidate)
-      this.renderer?.setSectionState(section)
-    }
+    this.serviceCandidates(candidates, input, now)
+    this.scheduleReadySwaps(candidateMap)
 
     this.updateLods(candidates, input)
     this.scheduleEvictions(now)
@@ -1452,12 +1456,18 @@ export class WorldTerrain {
   }
 
   sampleHeight(x: number, z: number): number {
-    return evaluateHeight(
-      x,
-      z,
-      this.config.seed,
-      this.modifiers.snapshot(),
-    )
+    // Deliberately not `snapshot()`. This is called per pointer move by the
+    // cursor, per planted rock and per frame by anything following the ground,
+    // and a snapshot deep-clones every modifier in the document -- including
+    // re-deriving mesh-cutter world bounds, which walks their vertices. The
+    // column query hands back the same live modifiers the compiler reads, and
+    // only the ones whose bounds actually cover this point.
+    const column = this.heightColumn
+    column.min.x = x - 0.001
+    column.max.x = x + 0.001
+    column.min.z = z - 0.001
+    column.max.z = z + 0.001
+    return evaluateHeight(x, z, this.config.seed, this.modifiers.query(column))
   }
 
   /**
@@ -1680,6 +1690,7 @@ export class WorldTerrain {
       if (section.compiled || section.pendingCompiled) continue
       compiled.sourceRevision = section.revision
       if (this.partition.acceptCompiled(section, compiled)) {
+        this.readySwaps.add(section.id)
         // The shipped bake is also useful to saved documents on later boots.
         // Persist it under the same exact input signature as worker results.
         this.queueCompiledCacheWrite(section, compiled)
@@ -1829,6 +1840,7 @@ export class WorldTerrain {
 
     record.compiled.sourceRevision = revision
     if (this.partition.acceptCompiled(section, record.compiled)) {
+      this.readySwaps.add(section.id)
       this.bestCompiledCacheWrites.set(id, {
         revision,
         finestLod: finestCompiledLod(record.compiled),
@@ -2049,6 +2061,23 @@ export class WorldTerrain {
       section.buildingRevision === section.revision &&
       (section.buildingLod ?? 0) <= minimumLod
     ) {
+      // The job in flight is at least as detailed as what is wanted. If the
+      // camera has since moved far enough that it is now *much* too detailed,
+      // coarsen it in place -- otherwise a fly-over leaves a trail of finest
+      // level compiles that the pool works through long after the camera has
+      // gone, which is what made the view ahead wait tens of seconds.
+      if (
+        (section.buildingLod ?? 0) < minimumLod - LOD_RECLAIM_SLACK &&
+        this.compiler.retarget(
+          section.key,
+          section.revision,
+          requestedLevels(minimumLod, this.config.lodResolutions.length),
+          candidate.priority,
+        )
+      ) {
+        section.buildingLod = minimumLod
+        return
+      }
       this.compiler.reprioritize(
         section.key,
         section.revision,
@@ -2165,7 +2194,7 @@ export class WorldTerrain {
           lastLevel,
         )
       : lastLevel
-    return Math.min(
+    const target = Math.min(
       screenLod,
       focusedLodCeiling(
         cameraDistance,
@@ -2174,6 +2203,38 @@ export class WorldTerrain {
       ),
       detailFocusCeiling,
     )
+    // Detail is earned in two steps rather than demanded in one.
+    //
+    // A section with nothing compiled yet is asked for a coarse level first,
+    // whatever the screen error says: a level-2 compile is a couple of
+    // milliseconds against a couple of hundred for the finest one, so this is
+    // the difference between the view ahead filling in immediately and it
+    // filling in after the pool has ground through every fine job the camera
+    // queued on its way here. The finer rebuild follows through the ordinary
+    // refinement path once the section is on screen.
+    //
+    // The same floor applies to everything while the camera is moving quickly,
+    // because detail that arrives during the move is detail nobody can see and
+    // is usually stale before it lands.
+    const floor = Math.max(
+      section.compiled ? 0 : COLD_START_LOD_FLOOR,
+      this.motionLodFloor(),
+    )
+    return clamp(Math.max(target, Math.min(floor, lastLevel)), 0, lastLevel)
+  }
+
+  /**
+   * Coarsest level worth compiling for the speed the camera is travelling at.
+   *
+   * Hysteretic on purpose: the floor drops back the moment the camera is slow
+   * enough that the detail will still be relevant when it arrives, and the
+   * refinement path picks the sections up from there.
+   */
+  private motionLodFloor(): number {
+    const speed = this.streamer.horizontalSpeed
+    if (speed > FAST_CAMERA_METRES_PER_SECOND) return 2
+    if (speed > MOVING_CAMERA_METRES_PER_SECOND) return 1
+    return 0
   }
 
   /**
@@ -2207,15 +2268,98 @@ export class WorldTerrain {
     this.hasPendingTerrainWork = true
   }
 
-  private cancelDepartedBuilds(
-    previous: ReadonlyMap<string, StreamCandidate>,
-    next: ReadonlyMap<string, StreamCandidate>,
+  /**
+   * Decides what each section needs, newest and nearest first.
+   *
+   * Servicing every candidate every frame is what made flying expensive: at
+   * world residency that is a thousand build decisions, a thousand residency
+   * writes and a thousand renderer state pokes per frame, and all but a handful
+   * of them reach the same conclusion they reached on the previous frame. The
+   * list arrives sorted by streaming priority, so the head of it -- what is in
+   * front of the camera -- is serviced on every frame, and the tail is walked
+   * by a rotating cursor that covers the whole world within a few frames.
+   */
+  private serviceCandidates(
+    candidates: readonly StreamCandidate[],
+    input: TerrainUpdateInput,
+    now: number,
   ): void {
-    for (const id of previous.keys()) {
-      if (next.has(id)) continue
-      const previousCandidate = previous.get(id)
-      if (!previousCandidate) continue
-      const section = this.partition.get(previousCandidate.key)
+    const total = candidates.length
+    if (total === 0) return
+    const hot = Math.min(total, HOT_CANDIDATES_PER_FRAME)
+    const cold = Math.min(
+      Math.max(0, total - hot),
+      COLD_CANDIDATES_PER_FRAME,
+    )
+    for (let index = 0; index < hot; index += 1) {
+      this.serviceCandidate(candidates[index], input, now)
+    }
+    if (cold === 0) {
+      this.serviceCursor = 0
+      return
+    }
+    const span = total - hot
+    for (let step = 0; step < cold; step += 1) {
+      const index = hot + ((this.serviceCursor + step) % span)
+      this.serviceCandidate(candidates[index], input, now)
+    }
+    this.serviceCursor = (this.serviceCursor + cold) % span
+  }
+
+  private serviceCandidate(
+    candidate: StreamCandidate,
+    input: TerrainUpdateInput,
+    now: number,
+  ): void {
+    const existing = this.partition.get(candidate.key)
+    const section = existing ?? this.partition.getOrCreate(candidate.key, now)
+    if (!existing) {
+      this.streamer.touch(section.key, 'SOURCE_RESIDENT', 0, 0, now)
+    } else {
+      this.streamer.setState(
+        section.key,
+        section.residency,
+        section.compiled?.cpuBytes ?? 0,
+        this.renderer?.has(section.id) ? compiledGpuBytes(section.compiled) : 0,
+        now,
+      )
+    }
+    section.lastTouched = now
+    if (this.renderer?.has(section.id)) {
+      this.renderer.setVisible(section.id, candidate.visible)
+      section.residency = candidate.visible ? 'VISIBLE' : 'GPU_RESIDENT'
+    }
+    const minimumLod = this.minimumBuildLod(section, candidate, input)
+    section.requestedLod = minimumLod
+    this.maybeQueueBuild(section, candidate, minimumLod, now)
+    this.renderer?.setSectionState(section)
+  }
+
+  /**
+   * Presents finished compiles.
+   *
+   * Driven by a set the compiler fills rather than by scanning the candidate
+   * list, so a result lands on the frame after it arrives no matter where its
+   * section sits in the servicing rotation.
+   */
+  private scheduleReadySwaps(
+    candidateMap: ReadonlyMap<SectionId, StreamCandidate>,
+  ): void {
+    if (this.readySwaps.size === 0) return
+    for (const id of [...this.readySwaps]) {
+      const candidate = candidateMap.get(id)
+      const section = candidate ? this.partition.get(candidate.key) : undefined
+      if (!section || !section.pendingCompiled) {
+        this.readySwaps.delete(id)
+        continue
+      }
+      this.maybeScheduleSwap(section, candidate!)
+    }
+  }
+
+  private cancelDepartedBuilds(departed: readonly SectionId[]): void {
+    for (const id of departed) {
+      const section = this.partition.get(parseSectionId(id))
       if (!section || section.buildState !== 'building') continue
       this.compiler.cancel(section.key, section.buildingRevision)
       section.buildJobId = undefined
@@ -2259,6 +2403,7 @@ export class WorldTerrain {
         // The upload decides its own starting level from what the compile
         // actually produced, so the cached selection is no longer authoritative.
         this.selectedLod.delete(section.id)
+        this.lodSelectionDistance.delete(section.id)
         this.requestedRendererLod.delete(section.id)
         const visible = this.streamer.isVisible(section.key)
         this.renderer.setVisible(section.id, visible)
@@ -2286,29 +2431,57 @@ export class WorldTerrain {
     // the selection has never seen are still evaluated, so a section arriving
     // from the streamer picks up its level on the frame it lands.
     const qualityScale = this.scheduler.snapshot().qualityScale
-    const reuseSelection = this.canReuseLodSelection(input, qualityScale)
+    if (
+      this.lodSelectionQuality !== qualityScale ||
+      this.lodSelectionViewportHeight !== input.viewportHeight ||
+      this.lodSelectionFov !== input.verticalFovRadians
+    ) {
+      // Everything the cache holds was chosen against a different projection.
+      this.selectedLod.clear()
+      this.lodSelectionDistance.clear()
+      this.lodSelectionQuality = qualityScale
+      this.lodSelectionViewportHeight = input.viewportHeight
+      this.lodSelectionFov = input.verticalFovRadians
+    }
+    const editing = Boolean(this.activeStroke || this.activeDig || this.activeTunnel)
     const errorTolerancePixels =
       this.config.baseLodErrorPixels / Math.max(0.48, qualityScale)
     const lastLevel = this.config.lodResolutions.length - 1
-    const nodes: LodNeighborNode[] = []
-    let recomputed = 0
+    const nodes = this.lodNodes
+    nodes.length = 0
+    let changed = false
 
     for (const candidate of candidates) {
       const section = this.partition.get(candidate.key)
       if (!section || !section.compiled || !this.renderer.has(section.id)) continue
-      const cached = reuseSelection ? this.selectedLod.get(section.id) : undefined
+      const centerX = (section.bounds.min.x + section.bounds.max.x) * 0.5
+      const centerY =
+        (section.compiled.bounds.min.y + section.compiled.bounds.max.y) * 0.5
+      const centerZ = (section.bounds.min.z + section.bounds.max.z) * 0.5
+      const distance = Math.hypot(
+        input.camera.x - centerX,
+        input.camera.y - centerY,
+        input.camera.z - centerZ,
+      )
+      // Screen error scales with 1/distance, so what decides whether a section
+      // can keep its level is not how far the camera moved but how far it moved
+      // relative to how far away the section already was. A camera crossing the
+      // map re-selects for the ground it is passing over and leaves the horizon
+      // alone, which is where nearly all of the thousand sections are.
+      const previousDistance = this.lodSelectionDistance.get(section.id)
+      const settled =
+        !editing &&
+        previousDistance !== undefined &&
+        Math.abs(distance - previousDistance) <=
+          Math.max(
+            LOD_SELECTION_EPSILON_METRES,
+            previousDistance * LOD_SELECTION_DISTANCE_BAND,
+          )
+      const previous = this.selectedLod.get(section.id)
+      const cached = settled ? previous : undefined
       let lod = cached
       if (lod === undefined) {
-        recomputed += 1
-        const centerX = (section.bounds.min.x + section.bounds.max.x) * 0.5
-        const centerY =
-          (section.compiled.bounds.min.y + section.compiled.bounds.max.y) * 0.5
-        const centerZ = (section.bounds.min.z + section.bounds.max.z) * 0.5
-        const distance = Math.hypot(
-          input.camera.x - centerX,
-          input.camera.y - centerY,
-          input.camera.z - centerZ,
-        )
+        this.lodSelectionDistance.set(section.id, distance)
         lod = selectLod({
           lods: section.compiled.lods,
           distance,
@@ -2345,33 +2518,28 @@ export class WorldTerrain {
               this.activeDig.radius),
       )
       if (activeBrushTouchesSection || section.dirtyRegion) lod = 0
-      // An override that disagrees with the cached selection is a change like
-      // any other: the neighbour constraint has to see it.
-      if (cached !== undefined && lod !== cached) recomputed += 1
-      this.selectedLod.set(section.id, lod)
+      // What matters for the neighbour constraint is whether a level actually
+      // moved, not whether it was re-derived. Recomputing usually confirms the
+      // level a section already had, and running the relaxation for that is
+      // several hundred thousand wasted comparisons.
+      if (lod !== previous) {
+        changed = true
+        this.selectedLod.set(section.id, lod)
+      }
       section.requestedLod = lod
-      nodes.push({ id: section.id, x: section.key.x, z: section.key.z, lod })
-      this.renderer.setVisible(section.id, candidate.visible)
-      section.residency = candidate.visible ? 'VISIBLE' : 'GPU_RESIDENT'
-      this.streamer.setState(
-        section.key,
-        section.residency,
-        section.compiled.cpuBytes,
-        compiledGpuBytes(section.compiled),
-      )
+      let node = this.lodNodeRecords.get(section.id)
+      if (!node) {
+        node = { id: section.id, x: section.key.x, z: section.key.z, lod }
+        this.lodNodeRecords.set(section.id, node)
+      }
+      node.lod = lod
+      nodes.push(node)
     }
+    if (nodes.length !== this.constrainedLod.size) changed = true
 
     // The relaxation only has anything to do when a level actually moved.
-    const constrained =
-      recomputed > 0 ? constrainNeighborLods(nodes) : this.constrainedLod
-    if (recomputed > 0) {
-      this.constrainedLod = constrained
-      this.lodSelectionCamera = { ...input.camera }
-      this.lodSelectionQuality = qualityScale
-      this.lodSelectionViewportHeight = input.viewportHeight
-      this.lodSelectionFov = input.verticalFovRadians
-    }
-    for (const [id, lod] of constrained) this.requestRendererLod(id, lod)
+    if (changed) this.constrainedLod = constrainNeighborLods(nodes)
+    for (const [id, lod] of this.constrainedLod) this.requestRendererLod(id, lod)
   }
 
   /**
@@ -2393,26 +2561,6 @@ export class WorldTerrain {
       estimatedCpuMs: 0.6,
       run: () => this.renderer?.setLod(id, lod),
     })
-  }
-
-  /** True while nothing that feeds screen-space LOD selection has moved. */
-  private canReuseLodSelection(
-    input: TerrainUpdateInput,
-    qualityScale: number,
-  ): boolean {
-    const previous = this.lodSelectionCamera
-    if (!previous) return false
-    if (this.activeStroke || this.activeDig || this.activeTunnel) return false
-    if (this.lodSelectionQuality !== qualityScale) return false
-    if (this.lodSelectionViewportHeight !== input.viewportHeight) return false
-    if (this.lodSelectionFov !== input.verticalFovRadians) return false
-    return (
-      Math.hypot(
-        input.camera.x - previous.x,
-        input.camera.y - previous.y,
-        input.camera.z - previous.z,
-      ) < LOD_SELECTION_EPSILON_METRES
-    )
   }
 
   private forceEditingLod(point: Vec3Like, radius: number): void {
@@ -2464,6 +2612,8 @@ export class WorldTerrain {
           this.compiler.cancel(key)
           this.renderer?.evict(id)
           this.selectedLod.delete(id)
+          this.lodNodeRecords.delete(id)
+          this.lodSelectionDistance.delete(id)
           this.constrainedLod.delete(id)
           this.requestedRendererLod.delete(id)
           const section = this.partition.get(key)
@@ -2604,7 +2754,7 @@ export class WorldTerrain {
   private updateMetrics(
     frameMs: number,
     now: number,
-    candidates: Map<string, StreamCandidate>,
+    candidates: ReadonlyMap<SectionId, StreamCandidate>,
   ): void {
     if (now - this.lastMetricsAt < 100) return
     this.lastMetricsAt = now

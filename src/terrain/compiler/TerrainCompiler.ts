@@ -62,6 +62,16 @@ export class TerrainCompiler {
     return this.pool.cancelSection(key, beforeRevision)
   }
 
+  /** Rewrites the level set of a job that has not started yet. */
+  retarget(
+    key: SectionKey,
+    revision: number,
+    levels: readonly number[],
+    priority: number,
+  ): boolean {
+    return this.pool.retargetQueued(key, revision, levels, priority)
+  }
+
   reprioritize(key: SectionKey, revision: number, priority: number): boolean {
     return this.pool.reprioritizeSection(key, revision, priority)
   }

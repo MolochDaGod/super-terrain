@@ -175,6 +175,32 @@ describe('terrain worker pool revisions', () => {
     pool.dispose()
   })
 
+  it('coarsens a queued job in place instead of restarting it', () => {
+    const pool = new TerrainWorkerPool(1, DEFAULT_TERRAIN_CONFIG, 1)
+    pool.submit({ x: 0, z: 0 }, 1, 10, [], [0, 1, 2, 3, 4])
+    const trailing = pool.submit({ x: 9, z: 0 }, 1, 1, [], [0, 1, 2, 3, 4])
+
+    // The camera has moved on: the queued job is still wanted, but only for the
+    // levels the section's new distance justifies.
+    expect(pool.retargetQueued({ x: 9, z: 0 }, 1, [3, 4], 500)).toBe(true)
+    expect(pool.stats()).toMatchObject({ active: 1, queued: 1, cancelled: 0 })
+
+    FakeWorker.instances[0].respond(successResponse(1, { x: 0, z: 0 }))
+    expect(FakeWorker.instances[0].request).toMatchObject({
+      jobId: trailing,
+      levels: [3, 4],
+      priority: 500,
+    })
+    pool.dispose()
+  })
+
+  it('has nothing to retarget once a job is in flight', () => {
+    const pool = new TerrainWorkerPool(1, DEFAULT_TERRAIN_CONFIG, 1)
+    pool.submit({ x: 0, z: 0 }, 1, 10, [], [0, 1, 2, 3, 4])
+    expect(pool.retargetQueued({ x: 0, z: 0 }, 1, [3, 4], 5)).toBe(false)
+    pool.dispose()
+  })
+
   it('never starts a queued revision that has already been superseded', () => {
     const pool = new TerrainWorkerPool(1, DEFAULT_TERRAIN_CONFIG, 1)
     const first = pool.submit({ x: 0, z: 0 }, 1, 10, [])
