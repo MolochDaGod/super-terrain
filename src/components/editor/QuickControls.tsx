@@ -21,7 +21,8 @@ export function RenderQuickControls({ editor }: { editor: EditorStore }) {
     <div
       role="group"
       aria-label="Render quality"
-      className="pointer-events-auto absolute right-[292px] top-[46px] z-20 hidden h-9 items-center gap-2 rounded-lg border border-white/[0.09] bg-[#0b1312]/92 px-2 shadow-2xl shadow-black/30 backdrop-blur-xl xl:flex"
+      // Sit just inside the viewport, clear of the scene panel and status bar.
+      className="pointer-events-auto absolute bottom-9 left-[256px] z-20 hidden h-9 items-center gap-2 rounded-lg border border-white/[0.09] bg-[#0b1312]/92 px-2 shadow-2xl shadow-black/30 backdrop-blur-xl xl:flex"
     >
       <Gauge size={12} className="shrink-0 text-white/28" />
       <Pills

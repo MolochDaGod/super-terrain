@@ -73,10 +73,12 @@ export function Toolbar({
     <div
       role="toolbar"
       aria-label="Tools and object actions"
-      // Wraps to a second row on a narrow window rather than pushing its
-      // right-hand verbs past the screen edge. It cannot scroll instead: an
-      // overflow container would clip the hover cards that hang below it.
-      className="pointer-events-auto absolute left-1/2 top-[46px] z-20 flex min-h-9 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-0.5 rounded-lg border border-white/[0.09] bg-[#0b1312]/92 px-1 py-0.5 shadow-2xl shadow-black/30 backdrop-blur-xl"
+      // Absolutely positioned shrink-to-fit boxes use the space between
+      // `left: 50%` and the right edge before the transform is applied. That
+      // capped this bar at half the viewport and made it wrap on ordinary
+      // desktop screens. Use its intrinsic width once all controls fit; only
+      // genuinely narrow windows get the full-width wrapping layout.
+      className="pointer-events-auto absolute left-1/2 top-[46px] z-20 flex min-h-9 w-[calc(100vw-1.5rem)] -translate-x-1/2 flex-wrap items-center justify-center gap-0.5 rounded-lg border border-white/[0.09] bg-[#0b1312]/92 px-1 py-0.5 shadow-2xl shadow-black/30 backdrop-blur-xl min-[900px]:w-max min-[900px]:flex-nowrap"
     >
       {GROUPS.map((group, groupIndex) => (
         <div key={group} className="flex items-center gap-0.5">
