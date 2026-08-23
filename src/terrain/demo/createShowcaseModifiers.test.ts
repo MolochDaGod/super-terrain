@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_TERRAIN_CONFIG } from '../config'
+import { compileTerrainSection } from '../compiler/compileSection'
 import { createBrushStroke } from '../modifiers/factories'
+import { encodeModifiers } from '../workers/protocol'
 import { OUTCROP_ID_PREFIX } from './createOutcropField'
 import {
   THRUST_MODIFIER_IDS,
@@ -46,4 +49,33 @@ describe('showcase modifier migration', () => {
     const current = createShowcaseTerrainModifiers(seed)
     expect(upgradeShowcaseTerrainModifiers(current, seed)).toBeUndefined()
   })
+
+  it('compiles the showcase cells with the deepest overlapping CSG stacks', () => {
+    const modifiers = createShowcaseTerrainModifiers(seed).sort((left, right) =>
+      left.priority - right.priority || left.id.localeCompare(right.id),
+    )
+
+    for (const key of [{ x: 3, z: 0 }, { x: 3, z: 1 }]) {
+      const compiled = compileTerrainSection({
+        kind: 'compile-section',
+        jobId: key.z + 1,
+        key,
+        revision: 1,
+        priority: 1,
+        config: {
+          sectionSize: DEFAULT_TERRAIN_CONFIG.sectionSize,
+          lodResolutions: [DEFAULT_TERRAIN_CONFIG.lodResolutions[1]],
+          seed,
+          operationHalo: DEFAULT_TERRAIN_CONFIG.operationHalo,
+          worldProfile: DEFAULT_TERRAIN_CONFIG.worldProfile,
+        },
+        modifiers: encodeModifiers(modifiers),
+      })
+
+      expect(compiled.lods[0].positions.length, `${key.x}:${key.z} positions`)
+        .toBeGreaterThan(0)
+      expect(compiled.lods[0].indices.length, `${key.x}:${key.z} indices`)
+        .toBeGreaterThan(0)
+    }
+  }, 30_000)
 })

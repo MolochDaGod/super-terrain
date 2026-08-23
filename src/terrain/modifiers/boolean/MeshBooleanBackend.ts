@@ -223,6 +223,19 @@ export class BvhCsgTunnelBooleanBackend implements MeshBooleanBackend {
     const evaluator = new Evaluator()
     evaluator.attributes = ['position', 'normal']
     evaluator.useGroups = true
+    // GeometryBuilder in three-bvh-csg 0.0.18 sorts consolidated material
+    // groups before clamping them to the groups that actually emitted
+    // triangles. When a Boolean removes a group, that can put a sparse source
+    // index inside the retained prefix and make buildGeometry read an
+    // undefined group buffer. We need the groups for surface provenance, but
+    // not this consolidation: extractVisibleGeometry compacts them immediately
+    // after the operation and compares the material objects directly.
+    // The package declaration still calls this older option
+    // `consolidateMaterials`; 0.0.18's runtime property is consolidateGroups.
+    const evaluatorWithRuntimeOptions = evaluator as Evaluator & {
+      consolidateGroups: boolean
+    }
+    evaluatorWithRuntimeOptions.consolidateGroups = false
 
     let result = this.createTerrainSolid(target, sectionSize, geometries)
     for (const step of steps) {
