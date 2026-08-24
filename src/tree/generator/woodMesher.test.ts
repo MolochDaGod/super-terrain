@@ -64,6 +64,19 @@ describe('adaptive woody topology compiler', () => {
     expect(farHeight / heroHeight).toBeGreaterThan(0.9)
     expect(farWidth / heroWidth).toBeGreaterThan(0.78)
   }, 20_000)
+
+  it('keeps a six-turn fused bole closed and inside the hero budget', () => {
+    const graph = generateSemanticTree(
+      { ...TEST_PARAMETERS, boleForm: 'fused', twist: 6 },
+      DEFAULT_TREE_ENVIRONMENT,
+    )
+    const { mesh } = compileWoodyMesh(graph, 0)
+    const topology = analyzeTopology(mesh)
+    expect(mesh.indices.length / 3).toBeLessThanOrEqual(110_000)
+    expect(topology.boundaryEdges).toBe(0)
+    expect(topology.nonManifoldEdges).toBe(0)
+    expect(topology.minimumAreaSquared).toBeGreaterThan(1e-20)
+  }, 20_000)
 })
 
 function analyzeTopology(mesh: TreeMeshData) {

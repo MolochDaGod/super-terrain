@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
   Activity,
   Box,
@@ -50,7 +50,9 @@ const BOLE_FORM_OPTIONS = [
   { value: 'straight', label: 'Straight' },
   { value: 'leaning', label: 'Leaning' },
   { value: 'sinuous', label: 'Sinuous' },
-  { value: 'codominant', label: 'Twin stem' },
+  { value: 'codominant', label: 'Low fork' },
+  { value: 'multistem', label: 'Multi-bole' },
+  { value: 'fused', label: 'Fused' },
   { value: 'snapped', label: 'Broken top' },
 ] satisfies { value: TreeBoleForm; label: string }[]
 
@@ -170,22 +172,24 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             unit=" m"
             onChange={(trunkRadius) => store.patchParameters({ trunkRadius })}
           />
-          <RangeField
-            label="Maturity"
-            value={parameters.age}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(age) => store.patchParameters({ age })}
-          />
-          <RangeField
-            label="Gnarl"
-            value={parameters.gnarl}
-            min={0}
-            max={1}
-            step={0.01}
-            onChange={(gnarl) => store.patchParameters({ gnarl })}
-          />
+          <FineControls>
+            <RangeField
+              label="Maturity"
+              value={parameters.age}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={(age) => store.patchParameters({ age })}
+            />
+            <RangeField
+              label="Gnarl"
+              value={parameters.gnarl}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={(gnarl) => store.patchParameters({ gnarl })}
+            />
+          </FineControls>
         </Section>
 
         <Section icon={Waypoints} title="Bole form">
@@ -196,6 +200,7 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             columns={2}
             onChange={(boleForm) => store.patchParameters({ boleForm })}
           />
+          <FineControls>
           <RangeField
             label="Lean"
             hint="from vertical"
@@ -216,12 +221,12 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             onChange={(sinuosity) => store.patchParameters({ sinuosity })}
           />
           <RangeField
-            label="Spiral grain"
-            hint="turns over bole"
+            label={parameters.boleForm === 'fused' ? 'Stem weave' : 'Spiral grain'}
+            hint={parameters.boleForm === 'fused' ? 'turns over tree' : 'turns over bole'}
             value={parameters.twist}
-            min={-2}
-            max={2}
-            step={0.05}
+            min={-6}
+            max={6}
+            step={0.1}
             onChange={(twist) => store.patchParameters({ twist })}
           />
           <RangeField
@@ -242,6 +247,7 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             step={1}
             onChange={(lostLimbs) => store.patchParameters({ lostLimbs })}
           />
+          </FineControls>
         </Section>
 
         <Section icon={Sprout} title="Crown & root form">
@@ -259,6 +265,7 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             columns={2}
             onChange={(rootForm) => store.patchParameters({ rootForm })}
           />
+          <FineControls>
           <RangeField
             label="Root relief"
             hint="height above soil"
@@ -277,9 +284,11 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             step={1}
             onChange={(rootSurfacings) => store.patchParameters({ rootSurfacings })}
           />
+          </FineControls>
         </Section>
 
         <Section icon={GitBranch} title="Structural hierarchy">
+          <FineControls label="Counts & density">
           <RangeField
             label="Major branches"
             hint="5–15"
@@ -323,6 +332,7 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             step={0.01}
             onChange={(foliageDensity) => store.patchParameters({ foliageDensity })}
           />
+          </FineControls>
         </Section>
 
         <div className="space-y-2 p-3">
@@ -464,6 +474,25 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
         </Section>
       </aside>
     </>
+  )
+}
+
+function FineControls({
+  children,
+  label = 'Fine controls',
+}: {
+  children: ReactNode
+  label?: string
+}) {
+  return (
+    <details className="group rounded-md border border-white/[0.055] bg-black/10 px-2 py-1.5">
+      <summary className="cursor-pointer select-none text-[9px] uppercase tracking-[0.12em] text-white/32 transition-colors hover:text-white/55">
+        {label}
+      </summary>
+      <div className="mt-2 space-y-3 border-t border-white/[0.045] pt-2">
+        {children}
+      </div>
+    </details>
   )
 }
 

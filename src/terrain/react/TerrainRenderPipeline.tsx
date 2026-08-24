@@ -3,11 +3,13 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { ACESFilmicToneMapping, AgXToneMapping } from 'three/webgpu'
 import type { Camera, Renderer, Scene } from 'three/webgpu'
 import { createTerrainRenderPipeline } from '../rendering/post/createTerrainRenderPipeline'
+import type { PostLook } from '../rendering/post/createTerrainRenderPipeline'
 import type { TerrainRenderMode } from '../rendering/renderModes'
 import { currentViewUrlState } from './viewUrlState'
 
 export interface TerrainRenderPipelineProps {
   mode: TerrainRenderMode
+  look?: PostLook
   onCompilingChange?: (compiling: boolean) => void
   beforeRender?: (renderer: Renderer, scene: Scene, camera: Camera) => void
 }
@@ -29,9 +31,12 @@ export interface TerrainRenderPipelineProps {
 // bottom of its range, and at the editor's old 0.95 everything the sun missed
 // fell off the curve entirely.
 const FULL_EXPOSURE = 1.18
+/** Brighter than the old direct ACES path, but below the terrain's sunset push. */
+const TREE_EXPOSURE = 1.14
 
 export function TerrainRenderPipeline({
   mode,
+  look = 'terrain',
   onCompilingChange,
   beforeRender,
 }: TerrainRenderPipelineProps) {
@@ -45,8 +50,10 @@ export function TerrainRenderPipeline({
         scene as unknown as Scene,
         camera,
         mode,
+        true,
+        look,
       ),
-    [camera, gl, mode, scene],
+    [camera, gl, look, mode, scene],
   )
 
   useEffect(() => {
@@ -55,12 +62,13 @@ export function TerrainRenderPipeline({
     // leaving shadowed rock readable; ACES crushes both ends of that range.
     renderer.toneMapping = mode === 'full' ? AgXToneMapping : ACESFilmicToneMapping
     renderer.toneMappingExposure =
-      currentViewUrlState().exposure ?? (mode === 'full' ? FULL_EXPOSURE : 1.08)
+      currentViewUrlState().exposure ??
+        (mode === 'full' ? (look === 'tree' ? TREE_EXPOSURE : FULL_EXPOSURE) : 1.08)
     // Shadow map enablement and type are declared on the Canvas instead: R3F
     // rewrites both from its `shadows` prop after effects run, so setting them
     // here is silently undone. Preview mode has no shadow-casting lights and no
     // meshes flagged to cast, so leaving the map enabled there costs nothing.
-  }, [gl, mode])
+  }, [gl, look, mode])
 
   useEffect(() => {
     let cancelled = false

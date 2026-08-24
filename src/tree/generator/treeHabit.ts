@@ -27,6 +27,10 @@ export type BoleForm =
   | 'sinuous'
   /** Forked low into competing stems that never resolved a leader. */
   | 'codominant'
+  /** Several boles arose from one stool, with no privileged central trunk. */
+  | 'multistem'
+  /** Two or three boles grew against one another and inosculated over time. */
+  | 'fused'
   /** Lost its top; the bole ends in a broken spar carrying reiterations. */
   | 'snapped'
 
@@ -79,6 +83,10 @@ export interface TreeHabit {
   forkHeight: number
   /** How evenly a co-dominant fork divides. 0.5 is a true twin. */
   forkBalance: number
+  /** Number of trunk-scale axes above the shared basal union. */
+  stemCount: number
+  /** Turns made by fused stems around their shared load axis. */
+  stemTwist: number
   /** Fraction of full height the bole reaches before its break. 1 if intact. */
   snapHeight: number
   lostLimbs: LostLimb[]
@@ -132,7 +140,13 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
     : leanLimit * random.range(0, 0.22)
 
   const snapped = boleForm === 'snapped'
-  const codominant = boleForm === 'codominant'
+  const divided = boleForm === 'codominant' || boleForm === 'multistem' ||
+    boleForm === 'fused'
+  const weaveDirection = parameters.twist < 0
+    ? -1
+    : parameters.twist > 0
+      ? 1
+      : random.unit() < 0.5 ? -1 : 1
 
   const lostLimbCount = pine
     ? 0
@@ -177,8 +191,30 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
       0,
       1.2,
     ),
-    forkHeight: codominant ? random.range(0.28, 0.72) : 0,
-    forkBalance: codominant ? random.range(0.36, 0.5) : 0,
+    // These are deliberately low. A division hidden inside the crown is read
+    // as two branches on the same generic trunk, not as a different bole plan.
+    forkHeight: boleForm === 'codominant'
+      ? random.range(0.16, 0.38)
+      : boleForm === 'multistem'
+        ? random.range(0.035, 0.13)
+        : boleForm === 'fused'
+          ? random.range(0.025, 0.09)
+          : 0,
+    forkBalance: divided ? random.range(0.34, 0.5) : 0,
+    stemCount: boleForm === 'multistem'
+      ? 3 + Math.floor(random.unit() * 3)
+      : boleForm === 'fused'
+        ? 2 + (random.unit() < 0.42 ? 1 : 0)
+        : boleForm === 'codominant'
+          ? 2
+          : 1,
+    stemTwist: boleForm === 'fused'
+      // The same authored twist control drives the actual axes here, not just
+      // the grain. Even at zero a fused pair makes most of one slow exchange;
+      // the full range reaches exactly six turns over the tree. This stays
+      // predictable for authoring rather than hiding strength in seed noise.
+      ? (0.9 + Math.abs(parameters.twist) * 0.85) * weaveDirection
+      : 0,
     snapHeight: snapped ? random.range(0.45, 0.78) : 1,
     lostLimbs,
     deadSparCount: crownForm === 'stagheaded'
@@ -227,6 +263,8 @@ function pickBoleForm(
     // Both need age: a sapling has neither the years to fork and stay forked
     // nor a top big enough to lose.
     ['codominant', 0.2 + veteran * 0.55],
+    ['multistem', 0.08 + veteran * 0.28],
+    ['fused', 0.06 + veteran * gnarl * 0.32],
     ['snapped', veteran * 0.55],
   ])
 }

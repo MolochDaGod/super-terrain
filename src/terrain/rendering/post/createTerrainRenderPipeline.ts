@@ -14,14 +14,19 @@ import {
   pass,
   renderOutput,
   smoothstep,
+  textureSize,
   uv,
+  vec2,
   vec3,
   vec4,
 } from 'three/tsl'
 import { bloom } from 'three/addons/tsl/display/BloomNode.js'
 import { smaa } from 'three/addons/tsl/display/SMAANode.js'
 import type { TerrainRenderMode } from '../renderModes'
+import { treeAtmosphericHaze } from '../../../tree/rendering/treeAtmosphericHaze'
 import { volumetricValleyFog } from './volumetricValleyFog'
+
+export type PostLook = 'terrain' | 'tree'
 
 export interface TerrainRenderPipeline {
   pipeline: RenderPipeline
@@ -49,7 +54,7 @@ interface InternalBloomNode {
  * contrast and saturation that the curve gave up are put back after tone
  * mapping, where an S-curve cannot reintroduce scene-referred clipping.
  */
-const grade = /*@__PURE__*/ Fn(([colour]: [any]) => {
+const terrainGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   const rgb = colour.rgb
   const contrasted = mix(
     rgb.mul(rgb).mul(3).sub(rgb.mul(rgb).mul(rgb).mul(2)),
@@ -77,12 +82,70 @@ const grade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   return vec4(vignetted.clamp(0, 1), colour.a)
 })
 
+/**
+ * A restrained foliage grade. The terrain look deliberately pushes warm rock
+ * and saturated alpine greens; using it on an isolated oak made the canopy
+ * radioactive. This keeps AgX's highlight headroom, adds a photographic toe,
+ * cools open-sky shade and warms only the upper values.
+ */
+const treeGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
+  const rgb = colour.rgb
+  const curved = rgb.mul(rgb).mul(3).sub(rgb.mul(rgb).mul(rgb).mul(2))
+  const contrasted = mix(curved, rgb, float(0.47))
+  const grey = luminance(contrasted)
+  const saturated = mix(vec3(grey), contrasted, float(1.025))
+  const split = smoothstep(0.14, 0.76, grey)
+  const toned = saturated.mul(mix(
+    vec3(0.965, 0.992, 1.035),
+    vec3(1.035, 1.008, 0.965),
+    split,
+  ))
+  const lifted = toned.add(smoothstep(0.1, 0, grey).mul(0.008))
+  const lens = uv().sub(0.5)
+  const radius = lens.x.mul(lens.x)
+    .mul(0.82)
+    .add(lens.y.mul(lens.y).mul(1.08))
+  const vignette = smoothstep(0.18, 0.55, radius)
+  const vignetted = lifted.mul(mix(float(1), float(0.88), vignette))
+  return vec4(vignetted.clamp(0, 1), colour.a)
+})
+
+/**
+ * A small HDR glow folded into the final grading quad.
+ *
+ * Three's full BloomNode is excellent for the terrain hero render, but it owns
+ * a bright pass, ten blur passes and a composite. An asset editor does not need
+ * that machinery. Twelve sparse HDR taps make a restrained sun/sky halo in the
+ * same pass that already performs tone mapping and grading, so there are no
+ * extra render targets and no multi-pass bloom shader warm-up.
+ */
+const cheapTreeBloom = /*@__PURE__*/ Fn(([source]: [any]) => {
+  const centre = uv().toVar('treeBloomUv')
+  const pixel = vec2(1).div(vec2(textureSize(source) as any))
+    .toVar('treeBloomPixel')
+  const glow = vec3(0).toVar('treeBloomGlow')
+  const offsets = [
+    [-3, 0], [3, 0], [0, -3], [0, 3],
+    [-6, -6], [6, -6], [-6, 6], [6, 6],
+    [-11, 0], [11, 0], [0, -11], [0, 11],
+  ] as const
+  for (const [x, y] of offsets) {
+    const sample = source.sample(
+      centre.add(pixel.mul(vec2(x, y))).clamp(0.001, 0.999),
+    ).rgb
+    const bright = smoothstep(0.86, 1.42, luminance(sample))
+    glow.addAssign(sample.mul(bright))
+  }
+  return glow.mul(float(0.0115))
+})
+
 export function createTerrainRenderPipeline(
   renderer: Renderer,
   scene: Scene,
   camera: Camera,
   mode: TerrainRenderMode,
   effects = true,
+  look: PostLook = 'terrain',
 ): TerrainRenderPipeline {
   const scenePass = pass(scene, camera)
 
@@ -100,6 +163,23 @@ export function createTerrainRenderPipeline(
   // no 48-tap screen kernel and no denoise pass for unchanged geometry.
   const colour = scenePass.getTextureNode('output')
   const depth = scenePass.getTextureNode('depth')
+  if (look === 'tree') {
+    const hazed = treeAtmosphericHaze(colour, depth, camera)
+    const glowing = hazed.rgb.add(cheapTreeBloom(colour))
+    const graded = renderOutput(
+      vec4(glowing, hazed.a),
+      renderer.toneMapping,
+      renderer.outputColorSpace,
+    )
+    const pipeline = new RenderPipeline(renderer, treeGrade(graded))
+    pipeline.outputColorTransform = false
+    return {
+      pipeline,
+      warmup: () => warmRenderPipeline(renderer, scenePass, pipeline),
+      dispose: () => pipeline.dispose(),
+    }
+  }
+
   const fogged = volumetricValleyFog(colour, depth, camera)
   const glow = bloom(fogged, 0.21, 0.78, 1.5)
   // MSAA resolves triangle edges in the scene pass, but the tone curve,
@@ -112,7 +192,7 @@ export function createTerrainRenderPipeline(
     renderer.toneMapping,
     renderer.outputColorSpace,
   )
-  const pipeline = new RenderPipeline(renderer, grade(graded))
+  const pipeline = new RenderPipeline(renderer, terrainGrade(graded))
   pipeline.outputColorTransform = false
 
   return {

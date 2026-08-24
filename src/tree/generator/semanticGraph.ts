@@ -163,7 +163,7 @@ function createTrunk(
   // bole at full height and stacking the stems on top hid the whole division
   // inside the crown, which is the one thing it exists to show.
   const height = parameters.height * architecture.boleFraction * habit.snapHeight *
-    (habit.forkHeight > 0 ? clamp(habit.forkHeight, 0.34, 0.8) : 1)
+    (habit.forkHeight > 0 ? clamp(habit.forkHeight, 0.04, 0.48) : 1)
   const sampleCount = parameters.species === 'ancient-oak' ? 22 : 18
   const pine = parameters.species === 'windswept-pine'
   const ancient = parameters.species === 'ancient-oak'
@@ -282,16 +282,33 @@ function createCodominantStems(
   )
   const azimuth = random.range(0, Math.PI * 2)
   const stems: SemanticTreePart[] = []
-  const shares = [habit.forkBalance, 1 - habit.forkBalance]
+  const stemCount = Math.max(2, habit.stemCount)
+  const rawShares = habit.boleForm === 'codominant'
+    ? [habit.forkBalance, 1 - habit.forkBalance]
+    : Array.from({ length: stemCount }, () => random.range(0.72, 1.28))
+  const shareTotal = rawShares.reduce((sum, share) => sum + share, 0)
+  const shares = rawShares.map((share) => share / shareTotal)
+  const fused = habit.boleForm === 'fused'
+  // One shared radius keeps the axes balanced around the load line. Giving
+  // every stem its own expanding splay was the bug that made "fused" a Y-fork.
+  const sharedOrbitRadius = union.radius * random.range(0.38, 0.56)
 
   for (const [index, share] of shares.entries()) {
-    const heading = azimuth + index * Math.PI + random.range(-0.35, 0.35)
+    const heading = azimuth + index * (Math.PI * 2 / stemCount) +
+      random.range(fused ? -0.035 : -0.28, fused ? 0.035 : 0.28)
     const outward = vec3(Math.cos(heading), 0, Math.sin(heading))
     // The heavier stem stands nearer to vertical and the lighter one leans off
     // it, which is how the pair resolve their shared load.
-    const splay = lerpNumber(0.34, 0.14, share) * random.range(0.75, 1.3)
-    const length = remaining * lerpNumber(0.8, 1.05, share)
-    const sampleCount = 14
+    const splay = (habit.boleForm === 'multistem'
+        ? random.range(0.16, 0.3)
+        : lerpNumber(0.34, 0.14, share) * random.range(0.75, 1.3))
+    const length = remaining * lerpNumber(0.82, 1.12, clamp(share * stemCount, 0, 1))
+    // Preserve roughly twelve authored stations per turn. Six turns sampled at
+    // the old fixed 26 points alias into angular chords and look kinked rather
+    // than like a slow continuous braid.
+    const sampleCount = fused
+      ? Math.max(26, Math.ceil(Math.abs(habit.stemTwist) * 12) + 1)
+      : 14
     // Area conservation across the union: two stems of a given girth need a
     // bole below them thick enough to carry both.
     const baseRadius = union.radius * Math.sqrt(share) * 0.96
@@ -301,12 +318,40 @@ function createCodominantStems(
     for (let step = 0; step < sampleCount; step += 1) {
       const t = step / (sampleCount - 1)
       const meander = Math.sin(t * Math.PI * 1.6 + phase) *
-        baseRadius * habit.sinuosity * 0.9 * smoothstep(0, 0.3, t)
+        baseRadius * habit.sinuosity * (fused ? 0.2 : 0.9) *
+        smoothstep(0, 0.3, t)
+      // Fused stems orbit a shared load axis; they do not splay away from it.
+      // More than one turn makes each axis exchange front/back order several
+      // times, while a pulsing bounded radius lets the boles press together and
+      // part again like old stems that repeatedly inosculated.
+      const orbitAngle = heading + habit.stemTwist * Math.PI * 2 * t
+      const orbitDirection = fused
+        ? vec3(Math.cos(orbitAngle), 0, Math.sin(orbitAngle))
+        : outward
+      const fusionPulse = fused
+        ? 0.68 + Math.cos(t * Math.PI * 6 + 0.4) * 0.24
+        : 1
+      // Leave the shared stool decisively, then carry on with a much gentler
+      // splay. A linear offset gives the child an almost vertical starting
+      // tangent; the collar solver then has to travel metres before it reaches
+      // the parent's side, making secondary boles appear to start in mid-air.
+      const earlySeparation = (1 - Math.exp(-t * 9)) / (1 - Math.exp(-9))
+      const separation = lerpNumber(t, earlySeparation, 0.52)
+      const fusedRadius = sharedOrbitRadius * smoothstep(0, 0.11, t)
+      // Release a little into the crown only after the braid has done its work.
+      // This gives each axis room to carry scaffolds without turning the lower
+      // two thirds back into a fork.
+      const crownRelease = fused
+        ? length * 0.035 * smoothstep(0.76, 1, t)
+        : 0
+      const radialOffset = fused
+        ? fusedRadius * fusionPulse + crownRelease
+        : length * splay * separation
       const position = add(
         union.position,
         add(
           add(
-            multiply(outward, length * splay * t),
+            multiply(orbitDirection, radialOffset),
             vec3(0, length * t, 0),
           ),
           multiply(meanderSide, meander),
@@ -342,7 +387,7 @@ function createCodominantStems(
       branchOrder: 0,
       age: parameters.age * random.range(0.9, 1),
       vigor: 0.8 + share * 0.2,
-      dominance: share,
+      dominance: clamp(share * stemCount, 0.35, 1),
       attachment: 1,
       // One stem carries the bole's flow through; the other is the division.
       junctionType: index === 0 ? 'continuation' : 'bifurcation',
@@ -934,9 +979,9 @@ function createStructuralRoot(
   // and the ground came out as a huge flat sheet.
   const climbMetres = parameters.trunkRadius * (
     habit.rootForm === 'buttressed'
-      ? random.range(0.45, 1.05) * (0.6 + habit.fluting)
+      ? random.range(0.9, 1.8) * (0.72 + habit.fluting)
       : habit.rootForm === 'stilted'
-        ? random.range(0.3, 0.7)
+        ? random.range(0.55, 1.05)
         : random.range(0.05, 0.3)
   )
   const boleHeight = Math.max(0.5, trunk.spine.at(-1)!.position.y)
@@ -953,7 +998,7 @@ function createStructuralRoot(
   // as "suddenly starting" at the base.
   const flareRadius = Math.max(source.radius, parameters.trunkRadius)
   const baseRadius = flareRadius * (
-    dominantButtress ? random.range(0.3, 0.42) : random.range(0.2, 0.29)
+    dominantButtress ? random.range(0.34, 0.48) : random.range(0.22, 0.31)
   ) * lerpNumber(0.86, 1.24, structuralLoad)
 
   const phase = random.range(0, Math.PI * 2)
@@ -974,7 +1019,11 @@ function createStructuralRoot(
   // Long on a buttressed or stilted individual, barely present on a sunken one.
   const plateEnd = habit.rootForm === 'sunken'
     ? random.range(0.06, 0.14)
-    : random.range(0.24, 0.46) * lerpNumber(0.7, 1.25, clamp(habit.fluting, 0, 1))
+    : habit.rootForm === 'buttressed'
+      ? random.range(0.4, 0.62) * lerpNumber(0.82, 1.16, clamp(habit.fluting, 0, 1))
+      : habit.rootForm === 'stilted'
+        ? random.range(0.3, 0.5)
+        : random.range(0.18, 0.38)
   // Where along its run the root gives up on the surface for good.
   const commitAt = Math.max(plateEnd + 0.2, random.range(0.55, 0.9))
 
@@ -1006,12 +1055,14 @@ function createStructuralRoot(
     const strap = smoothstep(0.06, 0.34, t) * smoothstep(1, plateEnd + 0.3, t)
     // Kept mild. Pushed hard the strap becomes a flat plank with a visible
     // faceted edge, which is worse than a slightly too-round root.
+    const strapWidth = habit.rootForm === 'buttressed' ? 1.44 : 1.32
+    const buttressWidth = habit.rootForm === 'buttressed' ? 0.8 : 0.7
     const radiusX = radius *
-      lerpNumber(1, lerpNumber(1, 1.26, strap), 1 - buttress) *
-      lerpNumber(1, 0.62, buttress)
+      lerpNumber(1, lerpNumber(1, strapWidth, strap), 1 - buttress) *
+      lerpNumber(1, buttressWidth, buttress)
     const radiusZ = radius *
       lerpNumber(1, lerpNumber(1, 0.86, strap), 1 - buttress) *
-      lerpNumber(1, 1.65, buttress)
+      lerpNumber(1, habit.rootForm === 'buttressed' ? 1.9 : 1.65, buttress)
     const ground = groundHeightAt(
       horizontal.x,
       horizontal.z,
@@ -1268,9 +1319,12 @@ function raiseButtresses(
   )
   if (roots.length === 0) return
   const boleHeight = Math.max(0.5, trunk.spine.at(-1)!.position.y)
-  // Ribs die out well before the crown; on a heavily buttressed individual they
-  // climb higher, which is most of what "buttressed" looks like from a distance.
-  const reach = boleHeight * lerpNumber(0.16, 0.42, clamp(habit.fluting, 0, 1))
+  // Expressed in bole radii rather than as a fraction of height. A multi-bole
+  // stool may be only half a metre tall, but the buttress load still continues
+  // up the first couple of metres of every axis that rises from it.
+  const desiredReach = parameters.trunkRadius *
+    lerpNumber(1.45, 3.8, clamp(habit.fluting, 0, 1)) *
+    (habit.rootForm === 'buttressed' ? 1.18 : 1)
 
   interface RootFin {
     direction: TreeVec3
@@ -1295,23 +1349,38 @@ function raiseButtresses(
       // A major root's rib carries most of the bole's local girth; a minor one
       // barely registers. Scaling by the root's own share is what gives a base
       // two or three dominant plates rather than a uniform fluted collar.
-      strength: share * lerpNumber(1.1, 2.2, clamp(habit.fluting, 0, 1)),
+      strength: share * lerpNumber(0.5, 1.05, clamp(habit.fluting, 0, 1)),
       width: lerpNumber(0.95, 0.55, share),
     })
   }
 
-  for (const sample of trunk.spine) {
-    const fade = smoothstep(reach, 0, sample.position.y)
-    if (fade <= 0.001) continue
-    sample.crossSection = {
-      ...sample.crossSection,
-      // Sharper near the ground and softening upward, so the ribs taper out of
-      // the column instead of stopping at a hard ring.
-      fins: rootFins.map((fin) => ({
-        direction: fin.direction,
-        strength: fin.strength * Math.pow(fade, 1.5),
-        width: fin.width * lerpNumber(1.5, 1, fade),
-      })),
+  const basalAxes = [
+    trunk,
+    ...parts.filter(
+      (part) => part.type === 'trunk' && part.parentId === trunk.id,
+    ),
+  ]
+  for (const axis of basalAxes) {
+    const baseY = axis.spine[0]!.position.y
+    const axisHeight = Math.max(0.05, axis.spine.at(-1)!.position.y - baseY)
+    const reach = Math.min(
+      axisHeight,
+      axis === trunk ? Math.min(boleHeight, desiredReach) : desiredReach * 0.72,
+    )
+    const axisStrength = axis === trunk ? 1 : 0.48
+    for (const sample of axis.spine) {
+      const fade = smoothstep(reach, 0, sample.position.y - baseY)
+      if (fade <= 0.001) continue
+      sample.crossSection = {
+        ...sample.crossSection,
+        // Sharper near the ground and softening upward, so the ribs taper out
+        // of the column instead of stopping at a hard ring.
+        fins: rootFins.map((fin) => ({
+          direction: fin.direction,
+          strength: fin.strength * axisStrength * Math.pow(fade, 1.5),
+          width: fin.width * lerpNumber(1.5, 1, fade),
+        })),
+      }
     }
   }
 

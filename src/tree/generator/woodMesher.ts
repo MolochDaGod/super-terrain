@@ -68,6 +68,7 @@ interface AttachmentFrame {
   z: TreeVec3
   radiusX: number
   radiusZ: number
+  fins?: readonly TreeButtressFin[]
 }
 
 interface MeshBuilder {
@@ -310,7 +311,7 @@ function compilePart(
       previous = ring
     }
     finalRing = previous
-  } else if (parent && paths.has(parent.id)) {
+  } else if (parent && paths.has(parent.id) && part.type !== 'trunk') {
     const attachment = attachmentFrame(paths.get(parent.id)!, part.attachment)
     const collar = collarStations(samples, frames, attachment)
     const rootCollar = part.type === 'root'
@@ -334,7 +335,10 @@ function compilePart(
       collar.surface.frame,
       settings,
       rootCollar ? 1.12 : 1.02,
-      attachment,
+      // Projecting an entire root ring around the parent's circumference makes
+      // a skirt, not a union. Its inner cap is already buried in the parent and
+      // its broad shoulder overlaps the shared wood.
+      rootCollar ? undefined : attachment,
     )
     connectRings(builder, previous, footprint)
     previous = footprint
@@ -516,6 +520,7 @@ function attachmentFrame(path: CompiledPath, attachment: number): AttachmentFram
     z: normalize(add(multiply(frame.x, -sine), multiply(frame.z, cosine)), frame.z),
     radiusX: sample.crossSection.radiusX,
     radiusZ: sample.crossSection.radiusZ,
+    fins: sample.crossSection.fins,
   }
 }
 
@@ -694,7 +699,29 @@ function interpolateCrossSection(
     rotation: lerpNumber(a.rotation, b.rotation, amount),
     lobeCount: amount < 0.5 ? a.lobeCount : b.lobeCount,
     lobeStrength: lerpNumber(a.lobeStrength, b.lobeStrength, amount),
+    fins: interpolateButtressFins(a.fins, b.fins, amount),
   }
+}
+
+function interpolateButtressFins(
+  a: readonly TreeButtressFin[] | undefined,
+  b: readonly TreeButtressFin[] | undefined,
+  amount: number,
+): readonly TreeButtressFin[] | undefined {
+  if (!a && !b) return undefined
+  const count = Math.max(a?.length ?? 0, b?.length ?? 0)
+  const fins: TreeButtressFin[] = []
+  for (let index = 0; index < count; index += 1) {
+    const left = a?.[index] ?? b?.[index]
+    const right = b?.[index] ?? a?.[index]
+    if (!left || !right) continue
+    fins.push({
+      direction: normalize(lerp(left.direction, right.direction, amount), left.direction),
+      strength: lerpNumber(a?.[index]?.strength ?? 0, b?.[index]?.strength ?? 0, amount),
+      width: lerpNumber(left.width, right.width, amount),
+    })
+  }
+  return fins
 }
 
 function parallelTransportFrames(samples: readonly CurveSample[]): SweepFrame[] {
@@ -967,6 +994,13 @@ function projectOntoParentSurface(
     x /= ellipseLength
     z /= ellipseLength
   }
+  // The ellipse is only the bole under the buttress ribs. Projecting a root's
+  // collar onto that hidden inner cylinder makes it tunnel through the fin and
+  // pop out as a separate tube. Use the same directional swell as the actual
+  // parent ring so the collar lands on the visible rib it continues.
+  const swell = finSwell(parent.fins, radial)
+  x *= swell
+  z *= swell
   return add(
     add(parent.center, multiply(parent.tangent, axialDistance)),
     add(multiply(parent.x, x), multiply(parent.z, z)),

@@ -24,6 +24,8 @@ export type TreeBoleForm =
   | 'leaning'
   | 'sinuous'
   | 'codominant'
+  | 'multistem'
+  | 'fused'
   | 'snapped'
 export type TreeCrownForm =
   | 'auto'
@@ -303,7 +305,7 @@ export function normalizeTreeParameters(
     rootForm: oneOf(input?.rootForm, ROOT_FORMS, fallback.rootForm),
     lean: finiteInRange(input?.lean, fallback.lean, 0, 35),
     sinuosity: finiteInRange(input?.sinuosity, fallback.sinuosity, 0, 3),
-    twist: finiteInRange(input?.twist, fallback.twist, -2, 2),
+    twist: finiteInRange(input?.twist, fallback.twist, -6, 6),
     fluting: finiteInRange(input?.fluting, fallback.fluting, 0, 1),
     rootRelief: finiteInRange(input?.rootRelief, fallback.rootRelief, 0, 3),
     rootSurfacings: integerInRange(input?.rootSurfacings, fallback.rootSurfacings, 0, 5),
@@ -327,7 +329,8 @@ export function normalizeTreeParameters(
 }
 
 const BOLE_FORMS = [
-  'auto', 'straight', 'leaning', 'sinuous', 'codominant', 'snapped',
+  'auto', 'straight', 'leaning', 'sinuous', 'codominant', 'multistem', 'fused',
+  'snapped',
 ] as const satisfies readonly TreeBoleForm[]
 const CROWN_FORMS = [
   'auto', 'full', 'stagheaded', 'lopsided', 'reiterated',

@@ -1,12 +1,14 @@
-import { useEffect, useLayoutEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { OrbitControls } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
-import { Euler, MathUtils, Vector3 } from 'three/webgpu'
+import { Euler, MathUtils, MeshBasicNodeMaterial, Vector3 } from 'three/webgpu'
+import { float, smoothstep, uv } from 'three/tsl'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { WorldTerrain } from '../terrain/WorldTerrain'
 import type { EditorStore } from '../terrain/editor/EditorStore'
 import { useEditorSnapshot } from '../terrain/react/hooks'
 import { TerrainEnvironment } from '../terrain/react/TerrainEnvironment'
+import { TerrainRenderPipeline } from '../terrain/react/TerrainRenderPipeline'
 import { TreeAssetView } from './TreeAssetView'
 import type { TreeEditorStore } from './TreeEditorStore'
 import { DEFAULT_TREE_ENVIRONMENT } from './generator/types'
@@ -54,19 +56,64 @@ export function TreeScene({
       <TerrainEnvironment mode="full" config={terrain.config} updatePriority={0} />
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
         <planeGeometry args={[GROUND_SIZE, GROUND_SIZE, 1, 1]} />
-        <meshStandardMaterial color={0x5c6437} roughness={0.95} metalness={0} />
+        <meshStandardMaterial color={0x3d422f} roughness={0.97} metalness={0} />
       </mesh>
       {snapshot.asset && (
-        <TreeAssetView
-          asset={snapshot.asset}
-          lodLevel={snapshot.lod}
-          debugMode={snapshot.debugMode}
-          showFoliage={snapshot.showFoliage}
-        />
+        <>
+          <TreeGroundingShadow height={snapshot.parameters.height} />
+          <TreeAssetView
+            asset={snapshot.asset}
+            lodLevel={snapshot.lod}
+            debugMode={snapshot.debugMode}
+            showFoliage={snapshot.showFoliage}
+          />
+        </>
       )}
       <TreeCamera editor={editor} targetY={snapshot.parameters.height * 0.3} />
       <TreeDevHandle store={store} />
+      <TerrainRenderPipeline mode="full" look="tree" />
     </>
+  )
+}
+
+/**
+ * Tight, art-directed grounding under the root plate.
+ *
+ * The sun still supplies the real directional and canopy shadows. This single
+ * translucent disc only restores the high-frequency contact term that a wide
+ * cascaded shadow map tends to soften away. It is one tiny mesh and one cheap
+ * unlit fragment expression, rather than a screen-space AO pass over the frame.
+ */
+function TreeGroundingShadow({ height }: { height: number }) {
+  const material = useMemo(() => {
+    const created = new MeshBasicNodeMaterial({
+      name: 'tree root contact shadow',
+      color: 0x020302,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      toneMapped: false,
+    })
+    const local = uv().sub(0.5).mul(2)
+    const radiusSquared = local.x.mul(local.x).add(local.y.mul(local.y))
+    created.opacityNode = smoothstep(1, 0, radiusSquared)
+      .pow(1.65)
+      .mul(float(0.24))
+    return created
+  }, [])
+  useEffect(() => () => material.dispose(), [material])
+  const radius = Math.max(1.15, height * 0.058)
+  return (
+    <mesh
+      name="root-contact-shadow"
+      material={material}
+      position={[0, -0.012, 0]}
+      rotation={[-Math.PI / 2, 0, 0]}
+      scale={[radius * 1.45, radius, 1]}
+      renderOrder={1}
+    >
+      <circleGeometry args={[1, 48]} />
+    </mesh>
   )
 }
 

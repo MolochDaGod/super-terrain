@@ -6,6 +6,7 @@ import {
   DEFAULT_TREE_PARAMETERS,
   normalizeTreeParameters,
   type SemanticTreePart,
+  type TreeBoleForm,
 } from './types'
 
 describe('semantic tree graph', () => {
@@ -162,6 +163,122 @@ describe('semantic tree graph', () => {
       expect(habit.forkHeight).toBeGreaterThan(0)
     }
   })
+
+  it('uses the authored twist to control fused-stem weave and handedness', () => {
+    const gentle = deriveTreeHabit(normalizeTreeParameters({
+      ...DEFAULT_TREE_PARAMETERS,
+      seed: 9917,
+      boleForm: 'fused',
+      twist: 0.2,
+    }))
+    const strong = deriveTreeHabit(normalizeTreeParameters({
+      ...DEFAULT_TREE_PARAMETERS,
+      seed: 9917,
+      boleForm: 'fused',
+      twist: 6,
+    }))
+    const reverse = deriveTreeHabit(normalizeTreeParameters({
+      ...DEFAULT_TREE_PARAMETERS,
+      seed: 9917,
+      boleForm: 'fused',
+      twist: -6,
+    }))
+    expect(Math.abs(strong.stemTwist)).toBeGreaterThan(Math.abs(gentle.stemTwist) * 2)
+    expect(strong.stemTwist).toBe(6)
+    expect(strong.stemTwist).toBeGreaterThan(0)
+    expect(reverse.stemTwist).toBe(-6)
+  })
+
+  it('builds low divided boles as trunk-scale axes rather than crown branches', () => {
+    const expected = [
+      ['codominant', 2],
+      ['multistem', 3],
+      ['fused', 2],
+    ] as const satisfies readonly (readonly [TreeBoleForm, number])[]
+    for (const [boleForm, minimumCount] of expected) {
+      const graph = generateSemanticTree(
+        { ...DEFAULT_TREE_PARAMETERS, seed: 84721, boleForm },
+        DEFAULT_TREE_ENVIRONMENT,
+      )
+      const trunk = graph.parts.find((part) => part.id === 'trunk')!
+      const stems = graph.parts.filter(
+        (part) => part.type === 'trunk' && part.parentId === trunk.id,
+      )
+      expect(stems.length).toBeGreaterThanOrEqual(minimumCount)
+      expect(trunk.spine.at(-1)!.position.y).toBeLessThan(
+        DEFAULT_TREE_PARAMETERS.height * 0.2,
+      )
+      expect(stems.every((stem) => stem.branchOrder === 0)).toBe(true)
+      if (boleForm === 'fused') {
+        const union = trunk.spine.at(-1)!.position
+        const turns = stems.map((stem) => {
+          let accumulated = 0
+          let previous = Math.atan2(
+            stem.spine[1]!.position.z - union.z,
+            stem.spine[1]!.position.x - union.x,
+          )
+          for (const sample of stem.spine.slice(2)) {
+            const angle = Math.atan2(
+              sample.position.z - union.z,
+              sample.position.x - union.x,
+            )
+            accumulated += Math.abs(Math.atan2(
+              Math.sin(angle - previous),
+              Math.cos(angle - previous),
+            ))
+            previous = angle
+          }
+          return accumulated
+        })
+        expect(Math.min(...turns)).toBeGreaterThan(Math.PI * 2.2)
+
+        const first = stems[0]!
+        const second = stems[1]!
+        let nearContacts = 0
+        for (let index = 1; index < first.spine.length; index += 1) {
+          const a = first.spine[index]!
+          const b = second.spine[index]!
+          const separation = Math.hypot(
+            a.position.x - b.position.x,
+            a.position.y - b.position.y,
+            a.position.z - b.position.z,
+          )
+          if (separation < (a.radius + b.radius) * 1.08) nearContacts += 1
+        }
+        expect(nearContacts).toBeGreaterThan(5)
+      }
+    }
+  }, 20_000)
+
+  it('carries buttress fins up the basal axes and broad plates along the soil', () => {
+    const graph = generateSemanticTree(
+      {
+        ...DEFAULT_TREE_PARAMETERS,
+        boleForm: 'multistem',
+        rootForm: 'buttressed',
+      },
+      DEFAULT_TREE_ENVIRONMENT,
+    )
+    const axes = graph.parts.filter((part) => part.type === 'trunk')
+    expect(axes.every((axis) => axis.spine[0]!.crossSection.fins?.length)).toBeTruthy()
+
+    const roots = graph.parts.filter(
+      (part) => part.type === 'root' && part.branchOrder === 1,
+    )
+    for (const root of roots) {
+      const plate = root.spine.slice(
+        Math.floor(root.spine.length * 0.18),
+        Math.ceil(root.spine.length * 0.5),
+      )
+      expect(Math.max(...plate.map(
+        (sample) => sample.crossSection.radiusX / sample.radius,
+      ))).toBeGreaterThan(1.2)
+      expect(Math.max(...plate.map(
+        (sample) => (sample.position.y + sample.crossSection.radiusZ) /
+          sample.crossSection.radiusZ,
+      ))).toBeGreaterThan(-0.15)
+    }
+  }, 20_000)
 
   it('keeps structural contacts separate from the parent-child graph', () => {
     const graph = generateSemanticTree(
