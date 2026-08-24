@@ -24,9 +24,16 @@ const CINEMATIC_SKY_URL = new URL(
 export function TerrainEnvironment({
   mode,
   config,
+  updatePriority = 0.5,
 }: {
   mode: TerrainRenderMode
   config: TerrainConfig
+  /**
+   * The terrain post stack owns rendering at priority 1, so its environment
+   * update runs just ahead of it. Standalone workspaces use priority 0 to keep
+   * R3F's automatic frame submission alive.
+   */
+  updatePriority?: number
 }) {
   const { scene } = useThree()
   const skyTexture = useLoader(TextureLoader, CINEMATIC_SKY_URL)
@@ -55,7 +62,7 @@ export function TerrainEnvironment({
   // at priority 1. Refresh camera-dependent shadows between those two phases.
   useFrame((state) => {
     environment.update(state.camera)
-  }, 0.5)
+  }, updatePriority)
 
   return <primitive object={environment.group} />
 }

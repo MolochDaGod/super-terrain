@@ -29,12 +29,22 @@ import { WebGpuCanvas } from './terrain/react/WebGpuCanvas'
 import { useEditorSnapshot } from './terrain/react/hooks'
 import { currentViewUrlState } from './terrain/react/viewUrlState'
 import { TreeMenuBar } from './tree/TreeMenuBar'
+import { TreeEditorStore } from './tree/TreeEditorStore'
 import { TreeScene } from './tree/TreeScene'
+import { TreeWorkspacePanels } from './tree/TreeWorkspacePanels'
 
 function App() {
   const editor = useMemo(() => new EditorStore(), [])
+  const treeEditor = useMemo(() => new TreeEditorStore(), [])
   const view = useMemo(() => currentViewUrlState(), [])
-  const [workspace, setWorkspace] = useState<Workspace>('terrain')
+  const [workspace, setWorkspace] = useState<Workspace>(() => view.editor ?? 'terrain')
+  const changeWorkspace = useCallback((next: Workspace) => {
+    setWorkspace(next)
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    url.searchParams.set('editor', next)
+    window.history.replaceState(window.history.state, '', url)
+  }, [])
   // The recipe is state because generating a world means building a different
   // WorldTerrain: seed, landform model and authored content are all fixed at
   // construction, and pretending otherwise would leave half the streaming
@@ -132,12 +142,12 @@ function App() {
           <WebGpuCanvas
             key={workspace}
             dpr={dprForMode(editorSnapshot.dprMode)}
-            cameraPosition={terrainWorkspace ? undefined : [120, 86, 120]}
+            cameraPosition={terrainWorkspace ? undefined : view.position ?? [45, 13, 48]}
           >
             {terrainWorkspace ? (
               <TerrainScene key={worldGeneration} terrain={terrain} editor={editor} />
             ) : (
-              <TreeScene editor={editor} />
+              <TreeScene editor={editor} store={treeEditor} terrain={terrain} />
             )}
           </WebGpuCanvas>
         </div>
@@ -153,15 +163,18 @@ function App() {
           terrain={terrain}
           editor={editor}
           workspace={workspace}
-          onWorkspaceChange={setWorkspace}
+          onWorkspaceChange={changeWorkspace}
         />
       )}
       {!terrainWorkspace && !view.hideUi && (
-        <TreeMenuBar
-          editor={editor}
-          workspace={workspace}
-          onWorkspaceChange={setWorkspace}
-        />
+        <>
+          <TreeMenuBar
+            editor={editor}
+            workspace={workspace}
+            onWorkspaceChange={changeWorkspace}
+          />
+          <TreeWorkspacePanels store={treeEditor} />
+        </>
       )}
       {editorUiVisible && (
         <>

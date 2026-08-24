@@ -57,6 +57,10 @@ async function createWebGpuRenderer(canvas: HTMLCanvasElement, dpr: number) {
   const parameters: WebGPURendererParameters = {
     canvas,
     antialias: true,
+    // Stated explicitly, because alpha-to-coverage is only a smoothing tool at
+    // all when there are samples to dither across. Foliage cutouts fall back to
+    // hard binary edges the moment the sample count drops to one.
+    samples: 4,
     alpha: false,
     powerPreference: 'high-performance',
   }

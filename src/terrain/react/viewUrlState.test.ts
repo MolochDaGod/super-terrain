@@ -12,6 +12,9 @@ describe('readViewUrlState', () => {
     expect(readViewUrlState('?debug=nonsense').debug).toBeUndefined()
     expect(state.hideUi).toBe(true)
     expect(readViewUrlState('?reset=1').reset).toBe(true)
+    expect(readViewUrlState('?editor=tree').editor).toBe('tree')
+    expect(readViewUrlState('?editor=terrain').editor).toBe('terrain')
+    expect(readViewUrlState('?editor=rock').editor).toBeUndefined()
   })
 
   it('ignores malformed vectors rather than throwing', () => {
@@ -23,6 +26,7 @@ describe('readViewUrlState', () => {
 
   it('defaults to the editor view', () => {
     expect(readViewUrlState('')).toEqual({
+      editor: undefined,
       position: undefined,
       target: undefined,
       fov: undefined,

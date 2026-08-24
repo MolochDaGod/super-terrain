@@ -13,6 +13,8 @@ import type { TerrainRenderMode } from '../rendering/renderModes'
  *   ?cam=x,y,z&target=x,y,z&fov=40&quality=full&ui=off
  */
 export interface ViewUrlState {
+  /** Selects the editor workspace on load. */
+  editor?: 'terrain' | 'tree'
   position?: [number, number, number]
   target?: [number, number, number]
   fov?: number
@@ -39,6 +41,7 @@ export function readViewUrlState(search: string): ViewUrlState {
   const quality = params.get('quality')
   const debug = params.get('debug')
   return {
+    editor: parseEditor(params.get('editor')),
     position: parseVector(params.get('cam')),
     target: parseVector(params.get('target')),
     fov: parseNumber(params.get('fov')),
@@ -48,6 +51,10 @@ export function readViewUrlState(search: string): ViewUrlState {
     hideUi: params.get('ui') === 'off',
     reset: params.get('reset') === '1',
   }
+}
+
+function parseEditor(value: string | null): 'terrain' | 'tree' | undefined {
+  return value === 'terrain' || value === 'tree' ? value : undefined
 }
 
 const DEBUG_VIEWS = new Set<string>([

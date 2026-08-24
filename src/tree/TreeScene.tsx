@@ -1,52 +1,76 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { OrbitControls } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
-import { Color, Euler, GridHelper, MathUtils, Vector3 } from 'three/webgpu'
+import { Euler, MathUtils, Vector3 } from 'three/webgpu'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
+import type { WorldTerrain } from '../terrain/WorldTerrain'
 import type { EditorStore } from '../terrain/editor/EditorStore'
 import { useEditorSnapshot } from '../terrain/react/hooks'
+import { TerrainEnvironment } from '../terrain/react/TerrainEnvironment'
+import { TreeAssetView } from './TreeAssetView'
+import type { TreeEditorStore } from './TreeEditorStore'
+import { DEFAULT_TREE_ENVIRONMENT } from './generator/types'
+import { generateTreeAsset } from './treeGeneratorClient'
+import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 
-const GRID_SIZE = 2_000
-const GRID_DIVISIONS = 100
-const FLY_SPEED = 24
-const FLY_BOOST_SPEED = 140
+const GROUND_SIZE = 400
+const FLY_SPEED = 12
+const FLY_BOOST_SPEED = 80
 
-/** A blank tree-authoring viewport: only a ground reference and camera controls. */
-export function TreeScene({ editor }: { editor: EditorStore }) {
-  const grid = useMemo(
-    () =>
-      new GridHelper(
-        GRID_SIZE,
-        GRID_DIVISIONS,
-        new Color('#547c70'),
-        new Color('#1a2b27'),
-      ),
-    [],
-  )
-
-  useEffect(
-    () => () => {
-      grid.geometry.dispose()
-      if (Array.isArray(grid.material)) {
-        grid.material.forEach((material) => material.dispose())
-      } else {
-        grid.material.dispose()
-      }
-    },
-    [grid],
-  )
+/** The renderer only consumes compiled assets; generation remains worker-owned. */
+export function TreeScene({
+  editor,
+  store,
+  terrain,
+}: {
+  editor: EditorStore
+  store: TreeEditorStore
+  terrain: WorldTerrain
+}) {
+  const snapshot = useTreeEditorSnapshot(store)
+  useEffect(() => {
+    const revision = snapshot.buildRevision
+    if (snapshot.compiledRevision === revision) return
+    const abort = new AbortController()
+    if (!store.beginBuild(revision)) return
+    void generateTreeAsset(snapshot.parameters, DEFAULT_TREE_ENVIRONMENT, {
+      signal: abort.signal,
+      onProgress: (status, amount) => store.reportProgress(revision, status, amount),
+    }).then(
+      (asset) => store.finishBuild(revision, asset),
+      (error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        store.failBuild(revision, error)
+      },
+    )
+    return () => abort.abort()
+  }, [snapshot.buildRevision, snapshot.compiledRevision, snapshot.parameters, store])
 
   return (
     <>
-      <color attach="background" args={['#080e0d']} />
-      <fog attach="fog" args={['#080e0d', 500, 1_450]} />
-      <primitive object={grid} />
-      <TreeCamera editor={editor} />
+      {/* Same physical daylight, sky dome and cascaded shadows the terrain
+          editor renders with. A tree judged under a different rig is judged
+          against a look the game will never show. */}
+      <TerrainEnvironment mode="full" config={terrain.config} updatePriority={0} />
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
+        <planeGeometry args={[GROUND_SIZE, GROUND_SIZE, 1, 1]} />
+        <meshStandardMaterial color={0x5c6437} roughness={0.95} metalness={0} />
+      </mesh>
+      {snapshot.asset && (
+        <TreeAssetView
+          asset={snapshot.asset}
+          lodLevel={snapshot.lod}
+          debugMode={snapshot.debugMode}
+          showFoliage={snapshot.showFoliage}
+        />
+      )}
+      <TreeCamera editor={editor} targetY={snapshot.parameters.height * 0.3} />
+      <TreeDevHandle store={store} />
     </>
   )
 }
 
-function TreeCamera({ editor }: { editor: EditorStore }) {
+function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number }) {
   const controls = useRef<OrbitControlsImpl>(null)
   const camera = useThree((state) => state.camera)
   const canvas = useThree((state) => state.gl.domElement)
@@ -54,18 +78,35 @@ function TreeCamera({ editor }: { editor: EditorStore }) {
   const keys = useRef(new Set<string>())
   const pointerLocked = useRef(false)
   const hasFlown = useRef(false)
-  const orbitDistance = useRef(180)
+  const orbitDistance = useRef(48)
   const rotation = useRef(new Euler(0, 0, 0, 'YXZ'))
   const forward = useRef(new Vector3())
   const right = useRef(new Vector3())
   const movement = useRef(new Vector3())
 
+  // The review harness moves the camera directly, but orbit controls re-aim it
+  // at their own target on the very next frame — so every close-up came back
+  // pointing at the middle of the crown. Publishing the controller lets a
+  // capture move the target with the camera.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const globals = globalThis as Record<string, unknown>
+    const handle = globals.__meshtree as Record<string, unknown> | undefined
+    if (handle) handle.controls = controls.current
+  })
+
   useLayoutEffect(() => {
+    // The WebGPU canvas resolves asynchronously. On a cold load the controls
+    // ref can still be empty during this layout effect, but the camera itself
+    // already exists. Aim it explicitly so the first submitted frame cannot
+    // inherit Three's default straight-ahead quaternion and miss the asset.
+    camera.lookAt(0, targetY, 0)
+    camera.updateMatrixWorld()
     const controller = controls.current
     if (!controller) return
-    controller.target.set(0, 0, 0)
+    controller.target.set(0, targetY, 0)
     controller.update()
-  }, [])
+  }, [camera, targetY])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -197,14 +238,14 @@ function TreeCamera({ editor }: { editor: EditorStore }) {
       makeDefault
       domElement={canvas}
       enabled={cameraMode === 'orbit'}
-      target={[0, 0, 0]}
+      target={[0, targetY, 0]}
       enableDamping
       dampingFactor={0.075}
       rotateSpeed={0.65}
       zoomSpeed={0.6}
       panSpeed={0.72}
       minDistance={4}
-      maxDistance={4_000}
+      maxDistance={400}
       maxPolarAngle={Math.PI * 0.495}
       screenSpacePanning
     />
@@ -224,3 +265,23 @@ const FLY_KEYS = new Set([
   'ShiftLeft',
   'ShiftRight',
 ])
+
+/**
+ * Publishes the tree workspace on `window.__meshtree` in development. The
+ * review harness drives parameters through the store and reads `ready` to know
+ * a frame shows the compiled asset rather than the previous build.
+ */
+function TreeDevHandle({ store }: { store: TreeEditorStore }) {
+  const gl = useThree((state) => state.gl)
+  const scene = useThree((state) => state.scene)
+  const camera = useThree((state) => state.camera)
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const globals = globalThis as Record<string, unknown>
+    globals.__meshtree = { store, gl, scene, camera }
+    return () => {
+      delete globals.__meshtree
+    }
+  }, [camera, gl, scene, store])
+  return null
+}
