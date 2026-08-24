@@ -2,6 +2,7 @@ import { QuadMesh, RenderPipeline } from 'three/webgpu'
 import type {
   Camera,
   Material,
+  Object3D,
   RenderTarget,
   Renderer,
   Scene,
@@ -32,6 +33,8 @@ export interface TerrainRenderPipeline {
   pipeline: RenderPipeline
   /** Prepares the scene and every internal fullscreen pipeline asynchronously. */
   warmup(): Promise<void>
+  /** Compiles a staged object against this pass's real attachments and scene lights. */
+  warmupObject(object: Object3D): Promise<void>
   dispose(): void
 }
 
@@ -93,11 +96,14 @@ const treeGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   const curved = rgb.mul(rgb).mul(3).sub(rgb.mul(rgb).mul(rgb).mul(2))
   const contrasted = mix(curved, rgb, float(0.47))
   const grey = luminance(contrasted)
-  const saturated = mix(vec3(grey), contrasted, float(1.025))
+  // Restore a little healthy daylight chroma after AgX without returning to
+  // the original electric-green foliage. Source albedo remains responsible
+  // for the palette; this is only a gentle display-referred recovery.
+  const saturated = mix(vec3(grey), contrasted, float(1.065))
   const split = smoothstep(0.14, 0.76, grey)
   const toned = saturated.mul(mix(
-    vec3(0.965, 0.992, 1.035),
-    vec3(1.035, 1.008, 0.965),
+    vec3(0.982, 0.998, 1.018),
+    vec3(1.04, 1.012, 0.972),
     split,
   ))
   const lifted = toned.add(smoothstep(0.1, 0, grey).mul(0.008))
@@ -151,9 +157,16 @@ export function createTerrainRenderPipeline(
 
   if (mode !== 'full' || !effects) {
     const pipeline = new RenderPipeline(renderer, scenePass)
+    const warmup = memoizeWarmup(
+      () => warmRenderPipeline(renderer, scenePass, pipeline),
+    )
     return {
       pipeline,
-      warmup: () => warmRenderPipeline(renderer, scenePass, pipeline),
+      warmup,
+      warmupObject: async (object) => {
+        await warmup()
+        await warmSceneObject(renderer, scenePass, object, scene, camera)
+      },
       dispose: () => pipeline.dispose(),
     }
   }
@@ -173,9 +186,16 @@ export function createTerrainRenderPipeline(
     )
     const pipeline = new RenderPipeline(renderer, treeGrade(graded))
     pipeline.outputColorTransform = false
+    const warmup = memoizeWarmup(
+      () => warmRenderPipeline(renderer, scenePass, pipeline),
+    )
     return {
       pipeline,
-      warmup: () => warmRenderPipeline(renderer, scenePass, pipeline),
+      warmup,
+      warmupObject: async (object) => {
+        await warmup()
+        await warmSceneObject(renderer, scenePass, object, scene, camera)
+      },
       dispose: () => pipeline.dispose(),
     }
   }
@@ -194,16 +214,62 @@ export function createTerrainRenderPipeline(
   )
   const pipeline = new RenderPipeline(renderer, terrainGrade(graded))
   pipeline.outputColorTransform = false
+  const warmup = memoizeWarmup(
+    () => warmRenderPipeline(renderer, scenePass, pipeline, glow),
+  )
 
   return {
     pipeline,
-    warmup: () => warmRenderPipeline(renderer, scenePass, pipeline, glow),
+    warmup,
+    warmupObject: async (object) => {
+      await warmup()
+      await warmSceneObject(renderer, scenePass, object, scene, camera)
+    },
     dispose() {
       pipeline.dispose()
       ;(glow as unknown as InternalBloomNode).dispose()
       ;(antialiased as unknown as { dispose(): void }).dispose()
     },
   }
+}
+
+function memoizeWarmup(warm: () => Promise<void>): () => Promise<void> {
+  let pending: Promise<void> | undefined
+  return () => {
+    pending ??= warm().catch((error: unknown) => {
+      // A transient device/pipeline failure must remain retryable.
+      pending = undefined
+      throw error
+    })
+    return pending
+  }
+}
+
+async function warmSceneObject(
+  renderer: Renderer,
+  scenePass: any,
+  object: Object3D,
+  scene: Scene,
+  camera: Camera,
+): Promise<void> {
+  const previousTarget = renderer.getRenderTarget()
+  const previousMrt = renderer.getMRT()
+  let compiling: Promise<unknown>
+  try {
+    // Match the exact half-float, multisampled attachment used by the scene
+    // pass. Compiling against the swap chain can produce a different pipeline
+    // key and simply move the hitch to the first visible post-processed frame.
+    renderer.setRenderTarget(scenePass.renderTarget)
+    renderer.setMRT(scenePass.getMRT())
+    compiling = renderer.compileAsync(object, camera, scene)
+  } finally {
+    // compileAsync captures the render context and work list synchronously,
+    // then yields while node graphs and GPU pipelines build. Restore the live
+    // renderer immediately so the previous stable frame can keep rendering.
+    renderer.setRenderTarget(previousTarget)
+    renderer.setMRT(previousMrt)
+  }
+  await compiling
 }
 
 async function warmRenderPipeline(

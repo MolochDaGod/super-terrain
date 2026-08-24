@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { ACESFilmicToneMapping, AgXToneMapping } from 'three/webgpu'
-import type { Camera, Renderer, Scene } from 'three/webgpu'
+import type { Camera, Object3D, Renderer, Scene } from 'three/webgpu'
 import { createTerrainRenderPipeline } from '../rendering/post/createTerrainRenderPipeline'
 import type { PostLook } from '../rendering/post/createTerrainRenderPipeline'
 import type { TerrainRenderMode } from '../rendering/renderModes'
@@ -12,6 +12,10 @@ export interface TerrainRenderPipelineProps {
   look?: PostLook
   onCompilingChange?: (compiling: boolean) => void
   beforeRender?: (renderer: Renderer, scene: Scene, camera: Camera) => void
+  prewarmObject?: Object3D | null
+  prewarmKey?: string
+  onPrewarmComplete?: (key: string) => void
+  onPrewarmError?: (key: string, error: unknown) => void
 }
 
 /**
@@ -32,13 +36,17 @@ export interface TerrainRenderPipelineProps {
 // fell off the curve entirely.
 const FULL_EXPOSURE = 1.18
 /** Brighter than the old direct ACES path, but below the terrain's sunset push. */
-const TREE_EXPOSURE = 1.14
+const TREE_EXPOSURE = 1.17
 
 export function TerrainRenderPipeline({
   mode,
   look = 'terrain',
   onCompilingChange,
   beforeRender,
+  prewarmObject,
+  prewarmKey,
+  onPrewarmComplete,
+  onPrewarmError,
 }: TerrainRenderPipelineProps) {
   const { gl, scene, camera, size } = useThree()
   const [readyMode, setReadyMode] = useState<TerrainRenderMode | null>(null)
@@ -92,6 +100,25 @@ export function TerrainRenderPipeline({
   }, [mode, onCompilingChange, rendering])
 
   useEffect(() => () => rendering.dispose(), [rendering])
+
+  useEffect(() => {
+    if (!prewarmObject || prewarmKey === undefined) return
+    let cancelled = false
+    void rendering.warmupObject(prewarmObject).then(
+      () => {
+        if (!cancelled) onPrewarmComplete?.(prewarmKey)
+      },
+      (error: unknown) => {
+        if (!cancelled) onPrewarmError?.(prewarmKey, error)
+      },
+    )
+    return () => {
+      // WebGPU pipeline creation itself is not abortable. Ignoring completion
+      // prevents a superseded asset from becoming visible or overwriting the
+      // status of the newer generation; React then disposes its staged data.
+      cancelled = true
+    }
+  }, [onPrewarmComplete, onPrewarmError, prewarmKey, prewarmObject, rendering])
 
   useEffect(() => {
     rendering.pipeline.needsUpdate = true

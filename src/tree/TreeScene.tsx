@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { OrbitControls } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Euler, MathUtils, MeshBasicNodeMaterial, Vector3 } from 'three/webgpu'
+import type { Group } from 'three/webgpu'
 import { float, smoothstep, uv } from 'three/tsl'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { WorldTerrain } from '../terrain/WorldTerrain'
@@ -10,8 +11,12 @@ import { useEditorSnapshot } from '../terrain/react/hooks'
 import { TerrainEnvironment } from '../terrain/react/TerrainEnvironment'
 import { TerrainRenderPipeline } from '../terrain/react/TerrainRenderPipeline'
 import { TreeAssetView } from './TreeAssetView'
-import type { TreeEditorStore } from './TreeEditorStore'
-import { DEFAULT_TREE_ENVIRONMENT } from './generator/types'
+import type { TreeDebugMode, TreeEditorStore } from './TreeEditorStore'
+import {
+  DEFAULT_TREE_ENVIRONMENT,
+  type ProceduralTreeAsset,
+  type TreeLodLevel,
+} from './generator/types'
 import { generateTreeAsset } from './treeGeneratorClient'
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 
@@ -30,6 +35,8 @@ export function TreeScene({
   terrain: WorldTerrain
 }) {
   const snapshot = useTreeEditorSnapshot(store)
+  const [presented, setPresented] = useState<PreparedTree | null>(null)
+  const [prewarmObject, setPrewarmObject] = useState<Group | null>(null)
   useEffect(() => {
     const revision = snapshot.buildRevision
     if (snapshot.compiledRevision === revision) return
@@ -48,31 +55,141 @@ export function TreeScene({
     return () => abort.abort()
   }, [snapshot.buildRevision, snapshot.compiledRevision, snapshot.parameters, store])
 
+  // A generated asset is only a candidate until its actual material variants
+  // have been compiled against the post pipeline's multisampled scene target.
+  // Keep the previous asset mounted and visible while that asynchronous work
+  // proceeds; on the first build the stable fallback is simply sky + ground.
+  const candidateRevision =
+    snapshot.asset && snapshot.compiledRevision === snapshot.buildRevision &&
+      snapshot.compiledRevision !== presented?.revision
+      ? snapshot.compiledRevision
+      : undefined
+  const candidateAsset = candidateRevision === undefined ? undefined : snapshot.asset
+  const prewarmKey = candidateRevision === undefined
+    ? undefined
+    : [
+        candidateRevision,
+        snapshot.lod,
+        snapshot.debugMode,
+        snapshot.showFoliage ? 1 : 0,
+      ].join(':')
+  const finishPrewarm = useCallback((key: string) => {
+    if (
+      candidateRevision === undefined ||
+      !candidateAsset ||
+      key !== prewarmKey
+    ) {
+      return
+    }
+    const current = store.getSnapshot()
+    if (
+      current.buildRevision !== candidateRevision ||
+      current.compiledRevision !== candidateRevision ||
+      current.asset !== candidateAsset
+    ) {
+      return
+    }
+    setPresented({ revision: candidateRevision, asset: candidateAsset })
+    store.finishMaterialWarmup(candidateRevision)
+  }, [candidateAsset, candidateRevision, prewarmKey, store])
+  const failPrewarm = useCallback((key: string, error: unknown) => {
+    if (candidateRevision === undefined || key !== prewarmKey) return
+    store.failMaterialWarmup(candidateRevision, error)
+  }, [candidateRevision, prewarmKey, store])
+  const failRenderResources = useCallback((error: unknown) => {
+    if (prewarmKey !== undefined) failPrewarm(prewarmKey, error)
+  }, [failPrewarm, prewarmKey])
+
+  const preparedTrees: PreparedTree[] = []
+  if (presented) preparedTrees.push(presented)
+  if (candidateRevision !== undefined && candidateAsset) {
+    preparedTrees.push({ revision: candidateRevision, asset: candidateAsset })
+  }
+
   return (
     <>
       {/* Same physical daylight, sky dome and cascaded shadows the terrain
           editor renders with. A tree judged under a different rig is judged
           against a look the game will never show. */}
       <TerrainEnvironment mode="full" config={terrain.config} updatePriority={0} />
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.52, 0]} receiveShadow>
         <planeGeometry args={[GROUND_SIZE, GROUND_SIZE, 1, 1]} />
         <meshStandardMaterial color={0x3d422f} roughness={0.97} metalness={0} />
       </mesh>
-      {snapshot.asset && (
-        <>
-          <TreeGroundingShadow height={snapshot.parameters.height} />
-          <TreeAssetView
-            asset={snapshot.asset}
-            lodLevel={snapshot.lod}
-            debugMode={snapshot.debugMode}
-            showFoliage={snapshot.showFoliage}
-          />
-        </>
-      )}
+      {preparedTrees.map((entry) => (
+        <PreparedTreeView
+          key={entry.revision}
+          entry={entry}
+          active={entry.revision === presented?.revision}
+          lodLevel={snapshot.lod}
+          debugMode={snapshot.debugMode}
+          showFoliage={snapshot.showFoliage}
+          prewarmRef={entry.revision === candidateRevision ? setPrewarmObject : undefined}
+          onResourceError={
+            entry.revision === candidateRevision ? failRenderResources : undefined
+          }
+        />
+      ))}
       <TreeCamera editor={editor} targetY={snapshot.parameters.height * 0.3} />
       <TreeDevHandle store={store} />
-      <TerrainRenderPipeline mode="full" look="tree" />
+      <TerrainRenderPipeline
+        mode="full"
+        look="tree"
+        prewarmObject={candidateRevision === undefined ? null : prewarmObject}
+        prewarmKey={prewarmKey}
+        onPrewarmComplete={finishPrewarm}
+        onPrewarmError={failPrewarm}
+      />
     </>
+  )
+}
+
+interface PreparedTree {
+  revision: number
+  asset: ProceduralTreeAsset
+}
+
+function PreparedTreeView({
+  entry,
+  active,
+  lodLevel,
+  debugMode,
+  showFoliage,
+  prewarmRef,
+  onResourceError,
+}: {
+  entry: PreparedTree
+  active: boolean
+  lodLevel: TreeLodLevel
+  debugMode: TreeDebugMode
+  showFoliage: boolean
+  prewarmRef?: (object: Group | null) => void
+  onResourceError?: (error: unknown) => void
+}) {
+  const stagedObject = useRef<Group>(null)
+  const publishForWarmup = useCallback(() => {
+    if (stagedObject.current) prewarmRef?.(stagedObject.current)
+  }, [prewarmRef])
+  useEffect(() => () => prewarmRef?.(null), [prewarmRef])
+
+  return (
+    // The outer group keeps the staged asset out of normal scene traversal.
+    // compileAsync receives the visible inner group directly, so it still sees
+    // every relevant tree and contact-shadow material without ever presenting
+    // them to the user before the pipelines are ready.
+    <group visible={active}>
+      <group ref={stagedObject}>
+        <TreeGroundingShadow height={entry.asset.parameters.height} />
+        <TreeAssetView
+          asset={entry.asset}
+          lodLevel={lodLevel}
+          debugMode={debugMode}
+          showFoliage={showFoliage}
+          onRenderResourcesReady={prewarmRef ? publishForWarmup : undefined}
+          onRenderResourcesError={onResourceError}
+        />
+      </group>
+    </group>
   )
 }
 

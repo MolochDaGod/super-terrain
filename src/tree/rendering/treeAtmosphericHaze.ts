@@ -65,10 +65,10 @@ export function treeAtmosphericHaze(
     // denser near the ground, while the crown receives only a thin aerial veil.
     const travelled = distance.sub(14).max(0)
     const altitude = smoothstep(1, 32, meanHeight)
-    const density = mix(float(0.0038), float(0.001), altitude)
+    const density = mix(float(0.0033), float(0.00085), altitude)
     const amount = exp(travelled.mul(density).negate())
       .oneMinus()
-      .min(0.18)
+      .min(0.14)
       .toVar('treeHazeAmount')
 
     // Water droplets shift from cool slate to warm cream toward the sun. A

@@ -67,7 +67,15 @@ describe('adaptive woody topology compiler', () => {
 
   it('keeps a six-turn fused bole closed and inside the hero budget', () => {
     const graph = generateSemanticTree(
-      { ...TEST_PARAMETERS, boleForm: 'fused', twist: 6 },
+      {
+        ...TEST_PARAMETERS,
+        bolePlan: 'fused',
+        axisForm: 'sinuous',
+        trunkDamage: 'snapped',
+        crownForm: 'full',
+        lostLimbs: 0,
+        twist: 6,
+      },
       DEFAULT_TREE_ENVIRONMENT,
     )
     const { mesh } = compileWoodyMesh(graph, 0)

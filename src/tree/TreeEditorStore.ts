@@ -27,6 +27,7 @@ export interface TreeEditorSnapshot {
   debugMode: TreeDebugMode
   showFoliage: boolean
   building: boolean
+  warmingMaterials: boolean
   dirty: boolean
   buildRevision: number
   compiledRevision?: number
@@ -42,6 +43,7 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       debugMode: 'surface',
       showFoliage: true,
       building: false,
+      warmingMaterials: false,
       dirty: false,
       buildRevision: 1,
       buildProgress: 0,
@@ -70,6 +72,7 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       parameters,
       dirty: false,
       buildRevision: current.buildRevision + 1,
+      warmingMaterials: false,
       status: `Generating ${species.replaceAll('-', ' ')}…`,
     }))
   }
@@ -81,6 +84,7 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       ...current,
       dirty: false,
       buildRevision: current.buildRevision + 1,
+      warmingMaterials: false,
       status: 'Regenerating tree…',
     }))
   }
@@ -97,13 +101,19 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       parameters,
       dirty: false,
       buildRevision: current.buildRevision + 1,
+      warmingMaterials: false,
       status: `Generating seed ${seed}…`,
     }))
   }
 
   beginBuild(revision: number): boolean {
     if (revision !== this.getSnapshot().buildRevision) return false
-    this.patch({ building: true, buildProgress: 0, status: 'Preparing tree worker…' })
+    this.patch({
+      building: true,
+      warmingMaterials: false,
+      buildProgress: 0,
+      status: 'Preparing tree worker…',
+    })
     return true
   }
 
@@ -118,8 +128,30 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       asset,
       compiledRevision: revision,
       building: false,
+      warmingMaterials: true,
+      buildProgress: 0.96,
+      status: 'Geometry ready · preparing WebGPU materials…',
+    })
+  }
+
+  finishMaterialWarmup(revision: number): void {
+    const snapshot = this.getSnapshot()
+    if (revision !== snapshot.buildRevision || revision !== snapshot.compiledRevision) return
+    this.patch({
+      warmingMaterials: false,
       buildProgress: 1,
-      status: `Tree ready · ${(asset.stats.generationMs / 1000).toFixed(1)} s`,
+      status: `Tree ready · ${((snapshot.asset?.stats.generationMs ?? 0) / 1000).toFixed(1)} s`,
+    })
+  }
+
+  failMaterialWarmup(revision: number, error: unknown): void {
+    const snapshot = this.getSnapshot()
+    if (revision !== snapshot.buildRevision || revision !== snapshot.compiledRevision) return
+    this.patch({
+      warmingMaterials: false,
+      status: `WebGPU material preparation failed · ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     })
   }
 
@@ -127,6 +159,7 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
     if (revision !== this.getSnapshot().buildRevision) return
     this.patch({
       building: false,
+      warmingMaterials: false,
       status: `Tree generation failed · ${error instanceof Error ? error.message : String(error)}`,
     })
   }

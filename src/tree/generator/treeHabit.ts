@@ -18,21 +18,9 @@ import type { TreeParameters } from './types'
  * instanced with jitter.
  */
 
-export type BoleForm =
-  /** One clean column. The field-grown, open-position oak. */
-  | 'straight'
-  /** Grew away from competition or into prevailing wind, and stayed there. */
-  | 'leaning'
-  /** A heavy S through the bole, usually with the crown recovering over it. */
-  | 'sinuous'
-  /** Forked low into competing stems that never resolved a leader. */
-  | 'codominant'
-  /** Several boles arose from one stool, with no privileged central trunk. */
-  | 'multistem'
-  /** Two or three boles grew against one another and inosculated over time. */
-  | 'fused'
-  /** Lost its top; the bole ends in a broken spar carrying reiterations. */
-  | 'snapped'
+export type BolePlan = 'single' | 'codominant' | 'multistem' | 'fused'
+export type AxisForm = 'straight' | 'leaning' | 'sinuous'
+export type TrunkDamage = 'intact' | 'snapped'
 
 export type CrownForm =
   /** A complete, roughly even crown. */
@@ -66,7 +54,9 @@ export interface LostLimb {
 }
 
 export interface TreeHabit {
-  boleForm: BoleForm
+  bolePlan: BolePlan
+  axisForm: AxisForm
+  trunkDamage: TrunkDamage
   crownForm: CrownForm
   rootForm: RootForm
   /** Radians of lean from vertical, and the direction it leans. */
@@ -117,12 +107,17 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
   // lose a top or retrench a crown.
   const veteran = ancient ? clamp(0.5 + age * 0.5, 0, 1) : age * 0.7
 
-  // An authored form pins the individual; `auto` lets the seed choose. The two
-  // have to coexist: a forest wants the seed to decide, and a hero tree in a
-  // specific spot wants a person to.
-  const boleForm = parameters.boleForm === 'auto'
-    ? pickBoleForm(random, veteran, gnarl, pine)
-    : parameters.boleForm
+  // Independent choices compose. A fused plan may still be sinuous and
+  // snapped; none of those traits has to consume the slot of another.
+  const bolePlan = parameters.bolePlan === 'auto'
+    ? pickBolePlan(random, veteran, gnarl, pine)
+    : parameters.bolePlan
+  const axisForm = parameters.axisForm === 'auto'
+    ? pickAxisForm(random, gnarl, pine)
+    : parameters.axisForm
+  const trunkDamage = parameters.trunkDamage === 'auto'
+    ? pickTrunkDamage(random, veteran, pine)
+    : parameters.trunkDamage
   const crownForm = parameters.crownForm === 'auto'
     ? pickCrownForm(random, veteran, pine)
     : parameters.crownForm
@@ -135,13 +130,12 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
   // whether this individual actually took it. A "straight" bole still carries a
   // degree or two, because nothing grown outdoors is plumb.
   const leanLimit = (parameters.lean * Math.PI) / 180
-  const lean = boleForm === 'leaning'
+  const lean = axisForm === 'leaning'
     ? leanLimit * random.range(0.62, 1) * (0.7 + gnarl * 0.45)
     : leanLimit * random.range(0, 0.22)
 
-  const snapped = boleForm === 'snapped'
-  const divided = boleForm === 'codominant' || boleForm === 'multistem' ||
-    boleForm === 'fused'
+  const snapped = trunkDamage === 'snapped'
+  const divided = bolePlan !== 'single'
   const weaveDirection = parameters.twist < 0
     ? -1
     : parameters.twist > 0
@@ -169,15 +163,17 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
   }
 
   return {
-    boleForm,
+    bolePlan,
+    axisForm,
+    trunkDamage,
     crownForm,
     rootForm,
     lean,
     leanAzimuth,
-    sinuosity: parameters.sinuosity * (boleForm === 'sinuous'
+    sinuosity: parameters.sinuosity * (axisForm === 'sinuous'
       ? random.range(0.8, 1.35) * (0.6 + gnarl * 0.6)
       : random.range(0.08, 0.34) * (0.5 + gnarl * 0.8)),
-    sinuosityTurns: boleForm === 'sinuous'
+    sinuosityTurns: axisForm === 'sinuous'
       ? random.range(1.3, 2.4)
       : random.range(0.6, 1.4),
     // In turns over the whole bole, and it commits to a handedness: a trunk
@@ -193,22 +189,22 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
     ),
     // These are deliberately low. A division hidden inside the crown is read
     // as two branches on the same generic trunk, not as a different bole plan.
-    forkHeight: boleForm === 'codominant'
+    forkHeight: bolePlan === 'codominant'
       ? random.range(0.16, 0.38)
-      : boleForm === 'multistem'
+      : bolePlan === 'multistem'
         ? random.range(0.035, 0.13)
-        : boleForm === 'fused'
+        : bolePlan === 'fused'
           ? random.range(0.025, 0.09)
           : 0,
     forkBalance: divided ? random.range(0.34, 0.5) : 0,
-    stemCount: boleForm === 'multistem'
+    stemCount: bolePlan === 'multistem'
       ? 3 + Math.floor(random.unit() * 3)
-      : boleForm === 'fused'
+      : bolePlan === 'fused'
         ? 2 + (random.unit() < 0.42 ? 1 : 0)
-        : boleForm === 'codominant'
+        : bolePlan === 'codominant'
           ? 2
           : 1,
-    stemTwist: boleForm === 'fused'
+    stemTwist: bolePlan === 'fused'
       // The same authored twist control drives the actual axes here, not just
       // the grain. Even at zero a fused pair makes most of one slow exchange;
       // the full range reaches exactly six turns over the tree. This stays
@@ -224,7 +220,7 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
     crownBias: crownForm === 'lopsided'
       ? random.range(0.3, 0.52)
       : random.range(0.06, 0.2),
-    crownBiasAzimuth: boleForm === 'leaning'
+    crownBiasAzimuth: axisForm === 'leaning'
       // A leaning tree throws its crown back over its own base or it falls
       // over, so the two directions are related rather than independent.
       ? leanAzimuth + Math.PI + random.range(-0.7, 0.7)
@@ -249,22 +245,38 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
   }
 }
 
-function pickBoleForm(
+function pickBolePlan(
   random: TreeRandom,
   veteran: number,
   gnarl: number,
   pine: boolean,
-): BoleForm {
-  if (pine) return random.unit() < 0.7 ? 'leaning' : 'sinuous'
+): BolePlan {
+  if (pine) return random.unit() < 0.9 ? 'single' : 'codominant'
   return weighted(random, [
-    ['straight', 1.1 - veteran * 0.55],
-    ['leaning', 0.45 + gnarl * 0.3],
-    ['sinuous', 0.35 + gnarl * 0.75],
-    // Both need age: a sapling has neither the years to fork and stay forked
-    // nor a top big enough to lose.
+    ['single', 1.15 - veteran * 0.4],
     ['codominant', 0.2 + veteran * 0.55],
     ['multistem', 0.08 + veteran * 0.28],
     ['fused', 0.06 + veteran * gnarl * 0.32],
+  ])
+}
+
+function pickAxisForm(random: TreeRandom, gnarl: number, pine: boolean): AxisForm {
+  if (pine) return random.unit() < 0.7 ? 'leaning' : 'sinuous'
+  return weighted(random, [
+    ['straight', 0.9 - gnarl * 0.35],
+    ['leaning', 0.45 + gnarl * 0.3],
+    ['sinuous', 0.35 + gnarl * 0.75],
+  ])
+}
+
+function pickTrunkDamage(
+  random: TreeRandom,
+  veteran: number,
+  pine: boolean,
+): TrunkDamage {
+  if (pine) return 'intact'
+  return weighted(random, [
+    ['intact', 1.25 - veteran * 0.25],
     ['snapped', veteran * 0.55],
   ])
 }

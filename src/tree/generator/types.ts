@@ -13,20 +13,15 @@ export type TreeJunctionType =
   | 'bifurcation'
   | 'terminal'
 
-/**
- * Structural forms an individual can take. `auto` lets the seed decide, which
- * is what a whole forest wants; naming one pins it, which is what authoring a
- * specific hero tree wants.
- */
-export type TreeBoleForm =
+/** Independent structural traits; any plan, axis and damage state can compose. */
+export type TreeBolePlan =
   | 'auto'
-  | 'straight'
-  | 'leaning'
-  | 'sinuous'
+  | 'single'
   | 'codominant'
   | 'multistem'
   | 'fused'
-  | 'snapped'
+export type TreeAxisForm = 'auto' | 'straight' | 'leaning' | 'sinuous'
+export type TreeTrunkDamage = 'auto' | 'intact' | 'snapped'
 export type TreeCrownForm =
   | 'auto'
   | 'full'
@@ -43,15 +38,17 @@ export type TreeRootForm =
 export interface TreeParameters {
   seed: number
   species: TreeSpecies
-  /** Which structural forms this individual takes. `auto` defers to the seed. */
-  boleForm: TreeBoleForm
+  /** Independent structural traits. `auto` defers that trait to the seed. */
+  bolePlan: TreeBolePlan
+  axisForm: TreeAxisForm
+  trunkDamage: TreeTrunkDamage
   crownForm: TreeCrownForm
   rootForm: TreeRootForm
   /** How far the bole leans from vertical, in degrees. */
   lean: number
   /** Depth of the bole's own S-curve, in trunk radii. */
   sinuosity: number
-  /** Spiral grain: how far the cross section turns over the bole, in turns. */
+  /** Grain turns, or whole-axis weave turns when the bole plan is fused. */
   twist: number
   /** Depth of the vertical flutes between buttress ribs. */
   fluting: number
@@ -72,6 +69,14 @@ export interface TreeParameters {
   rootExposure: number
   foliageDensity: number
 }
+
+/**
+ * Authoring range for crown density. Values above 1 are deliberately allowed:
+ * hero foliage now uses smaller, more believable sprays, and the upper half of
+ * the range trades more instances for the dense crown the old oversized cards
+ * achieved through sheer coverage.
+ */
+export const MAX_FOLIAGE_DENSITY = 2
 
 export interface TreeEnvironment {
   /** A compact plane used by worker jobs. Runtime terrain can provide this fit per tree. */
@@ -234,7 +239,9 @@ export const DEFAULT_TREE_ENVIRONMENT: TreeEnvironment = {
 export const DEFAULT_TREE_PARAMETERS: TreeParameters = {
   seed: 84721,
   species: 'ancient-oak',
-  boleForm: 'auto',
+  bolePlan: 'auto',
+  axisForm: 'auto',
+  trunkDamage: 'auto',
   crownForm: 'auto',
   rootForm: 'auto',
   lean: 6,
@@ -300,7 +307,9 @@ export function normalizeTreeParameters(
   return {
     seed: integerInRange(input?.seed, fallback.seed, 1, 0x7fffffff),
     species,
-    boleForm: oneOf(input?.boleForm, BOLE_FORMS, fallback.boleForm),
+    bolePlan: oneOf(input?.bolePlan, BOLE_PLANS, fallback.bolePlan),
+    axisForm: oneOf(input?.axisForm, AXIS_FORMS, fallback.axisForm),
+    trunkDamage: oneOf(input?.trunkDamage, TRUNK_DAMAGE, fallback.trunkDamage),
     crownForm: oneOf(input?.crownForm, CROWN_FORMS, fallback.crownForm),
     rootForm: oneOf(input?.rootForm, ROOT_FORMS, fallback.rootForm),
     lean: finiteInRange(input?.lean, fallback.lean, 0, 35),
@@ -312,7 +321,7 @@ export function normalizeTreeParameters(
     lostLimbs: integerInRange(input?.lostLimbs, fallback.lostLimbs, 0, 8),
     height: finiteInRange(input?.height, fallback.height, 10, 45),
     crownRadius: finiteInRange(input?.crownRadius, fallback.crownRadius, 3, 20),
-    trunkRadius: finiteInRange(input?.trunkRadius, fallback.trunkRadius, 0.18, 1.6),
+    trunkRadius: finiteInRange(input?.trunkRadius, fallback.trunkRadius, 0.18, 2.2),
     age: finiteInRange(input?.age, fallback.age, 0, 1),
     gnarl: finiteInRange(input?.gnarl, fallback.gnarl, 0, 1),
     branchCount: integerInRange(input?.branchCount, fallback.branchCount, 5, 15),
@@ -323,15 +332,20 @@ export function normalizeTreeParameters(
       input?.foliageDensity,
       fallback.foliageDensity,
       0,
-      1,
+      MAX_FOLIAGE_DENSITY,
     ),
   }
 }
 
-const BOLE_FORMS = [
-  'auto', 'straight', 'leaning', 'sinuous', 'codominant', 'multistem', 'fused',
-  'snapped',
-] as const satisfies readonly TreeBoleForm[]
+const BOLE_PLANS = [
+  'auto', 'single', 'codominant', 'multistem', 'fused',
+] as const satisfies readonly TreeBolePlan[]
+const AXIS_FORMS = [
+  'auto', 'straight', 'leaning', 'sinuous',
+] as const satisfies readonly TreeAxisForm[]
+const TRUNK_DAMAGE = [
+  'auto', 'intact', 'snapped',
+] as const satisfies readonly TreeTrunkDamage[]
 const CROWN_FORMS = [
   'auto', 'full', 'stagheaded', 'lopsided', 'reiterated',
 ] as const satisfies readonly TreeCrownForm[]

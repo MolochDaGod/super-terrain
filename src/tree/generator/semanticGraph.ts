@@ -2,6 +2,7 @@ import {
   add,
   clamp,
   cross,
+  dot,
   emptyBounds,
   groundHeightAt,
   includeInBounds,
@@ -162,8 +163,11 @@ function createTrunk(
   // union, because everything above that belongs to the stems — leaving the
   // bole at full height and stacking the stems on top hid the whole division
   // inside the crown, which is the one thing it exists to show.
+  const divisionHeight = habit.forkHeight > 0
+    ? clamp(habit.forkHeight, 0.04, 0.48)
+    : 1
   const height = parameters.height * architecture.boleFraction * habit.snapHeight *
-    (habit.forkHeight > 0 ? clamp(habit.forkHeight, 0.04, 0.48) : 1)
+    divisionHeight
   const sampleCount = parameters.species === 'ancient-oak' ? 22 : 18
   const pine = parameters.species === 'windswept-pine'
   const ancient = parameters.species === 'ancient-oak'
@@ -180,7 +184,13 @@ function createTrunk(
   const spine: TreeSpineSample[] = []
   for (let index = 0; index < sampleCount; index += 1) {
     const t = index / (sampleCount - 1)
-    const oldWood = parameters.age * smoothstep(0, 0.55, 1 - t)
+    // A low stool is only the first few percent of a full bole, not an entire
+    // trunk squeezed into a metre. Evaluating taper against its real height is
+    // essential for divided and fused trees: tapering this short base all the
+    // way to the terminal radius, then tapering every child again, made even a
+    // maximum-radius braid look implausibly thin.
+    const boleT = t * divisionHeight
+    const oldWood = parameters.age * smoothstep(0, 0.55, 1 - boleT)
     // Lean accumulates with height rather than tilting the whole column off its
     // base, because a tree that leans grew that way rather than being pushed.
     const leanOffset = t * t * height * Math.tan(habit.lean)
@@ -197,7 +207,7 @@ function createTrunk(
       lerpNumber(-buriedButt, height, t),
       leanZ * leanOffset + meanderZ * meander,
     )
-    const taper = Math.pow(1 - t, ancient ? 0.62 : 0.72)
+    const taper = Math.pow(1 - boleT, ancient ? 0.62 : 0.72)
     // Two flares superposed: a wide, shallow one for the whole butt and a tight
     // one right at the ground where the buttress roots merge in. One smooth
     // curve gives the traffic-cone base that reads as procedural immediately.
@@ -205,8 +215,10 @@ function createTrunk(
     // whole, so the base reads as one moulded elephant foot with nothing
     // emerging from it; the roots are supposed to carry that silhouette.
     const baseFlare = 1 +
-      smoothstep(0.34, 0, t) * (ancient ? 0.16 + parameters.age * 0.12 : 0.14) +
-      smoothstep(0.09, 0, t) * (ancient ? 0.2 + parameters.age * 0.16 : 0.16)
+      smoothstep(0.34, 0, boleT) *
+        (ancient ? 0.16 + parameters.age * 0.12 : 0.14) +
+      smoothstep(0.09, 0, boleT) *
+        (ancient ? 0.2 + parameters.age * 0.16 : 0.16)
     const terminalFraction = ancient ? 0.52 : pine ? 0.28 : 0.42
     // A broken bole does not taper to a point: it stays thick and stops.
     const snapSwell = habit.snapHeight < 1
@@ -216,7 +228,7 @@ function createTrunk(
     // has lost things rather than smoothly conical.
     let woundSwell = 1
     for (const wound of habit.lostLimbs) {
-      woundSwell += smoothstep(0.16, 0, Math.abs(t - wound.height)) *
+      woundSwell += smoothstep(0.16, 0, Math.abs(boleT - wound.height)) *
         wound.scale * 0.28
     }
     const radius = parameters.trunkRadius *
@@ -236,7 +248,7 @@ function createTrunk(
         // turned the trunk into a fluted column; real swelling is a handful of
         // broad ribs that die out a metre or two above the roots.
         lobeCount: clamp(Math.round(parameters.rootCount * 0.6), 3, 5),
-        lobeStrength: smoothstep(0.42, 0, t) * habit.fluting *
+        lobeStrength: smoothstep(0.42, 0, boleT) * habit.fluting *
           (0.06 + parameters.age * (ancient ? 0.2 : 0.12)),
       },
     })
@@ -283,26 +295,40 @@ function createCodominantStems(
   const azimuth = random.range(0, Math.PI * 2)
   const stems: SemanticTreePart[] = []
   const stemCount = Math.max(2, habit.stemCount)
-  const rawShares = habit.boleForm === 'codominant'
+  const rawShares = habit.bolePlan === 'codominant'
     ? [habit.forkBalance, 1 - habit.forkBalance]
     : Array.from({ length: stemCount }, () => random.range(0.72, 1.28))
   const shareTotal = rawShares.reduce((sum, share) => sum + share, 0)
   const shares = rawShares.map((share) => share / shareTotal)
-  const fused = habit.boleForm === 'fused'
-  // One shared radius keeps the axes balanced around the load line. Giving
-  // every stem its own expanding splay was the bug that made "fused" a Y-fork.
-  const sharedOrbitRadius = union.radius * random.range(0.38, 0.56)
+  const fused = habit.bolePlan === 'fused'
+  const baseRadii = shares.map((share) => union.radius * Math.sqrt(share) *
+    // Fused children start within the parent's area budget so the later radius
+    // inheritance pass does not shrink their wood without also shrinking the
+    // already-authored orbit. That mismatch was responsible for the thin
+    // strands floating around an oversized invisible braid.
+    (fused ? Math.sqrt(0.82) : 0.96))
+  const meanBaseRadius = baseRadii.reduce((sum, radius) => sum + radius, 0) /
+    baseRadii.length
+  // Express orbit size in strand radii, not parent radii. This keeps two- and
+  // three-stem braids equally legible and maintains the same degree of contact
+  // when Trunk radius changes.
+  const sharedOrbitRadius = fused
+    ? meanBaseRadius / Math.sin(Math.PI / stemCount) * random.range(0.86, 0.94)
+    : union.radius * random.range(0.38, 0.56)
+  const loadAxisPhase = random.range(0, Math.PI * 2)
+  const loadAxisAzimuth = random.range(0, Math.PI * 2)
 
   for (const [index, share] of shares.entries()) {
     const heading = azimuth + index * (Math.PI * 2 / stemCount) +
       random.range(fused ? -0.035 : -0.28, fused ? 0.035 : 0.28)
-    const outward = vec3(Math.cos(heading), 0, Math.sin(heading))
     // The heavier stem stands nearer to vertical and the lighter one leans off
     // it, which is how the pair resolve their shared load.
-    const splay = (habit.boleForm === 'multistem'
+    const splay = (habit.bolePlan === 'multistem'
         ? random.range(0.16, 0.3)
         : lerpNumber(0.34, 0.14, share) * random.range(0.75, 1.3))
-    const length = remaining * lerpNumber(0.82, 1.12, clamp(share * stemCount, 0, 1))
+    const length = fused
+      ? remaining
+      : remaining * lerpNumber(0.82, 1.12, clamp(share * stemCount, 0, 1))
     // Preserve roughly twelve authored stations per turn. Six turns sampled at
     // the old fixed 26 points alias into angular chords and look kinked rather
     // than like a slow continuous braid.
@@ -311,12 +337,22 @@ function createCodominantStems(
       : 14
     // Area conservation across the union: two stems of a given girth need a
     // bole below them thick enough to carry both.
-    const baseRadius = union.radius * Math.sqrt(share) * 0.96
+    const baseRadius = baseRadii[index]!
     const phase = random.range(0, Math.PI * 2)
-    const meanderSide = normalize(cross(outward, vec3(0, 1, 0)), vec3(1, 0, 0))
+    const loadAxis = createCompositeLoadAxis(
+      union.position,
+      length,
+      sampleCount,
+      habit,
+      parameters.trunkRadius,
+      loadAxisPhase,
+      loadAxisAzimuth,
+    )
+    const loadFrames = transportedLoadFrames(loadAxis)
     const spine: TreeSpineSample[] = []
     for (let step = 0; step < sampleCount; step += 1) {
       const t = step / (sampleCount - 1)
+      const frame = loadFrames[step]!
       const meander = Math.sin(t * Math.PI * 1.6 + phase) *
         baseRadius * habit.sinuosity * (fused ? 0.2 : 0.9) *
         smoothstep(0, 0.3, t)
@@ -325,11 +361,16 @@ function createCodominantStems(
       // times, while a pulsing bounded radius lets the boles press together and
       // part again like old stems that repeatedly inosculated.
       const orbitAngle = heading + habit.stemTwist * Math.PI * 2 * t
-      const orbitDirection = fused
-        ? vec3(Math.cos(orbitAngle), 0, Math.sin(orbitAngle))
-        : outward
+      const orbitDirection = normalize(add(
+        multiply(frame.x, Math.cos(orbitAngle)),
+        multiply(frame.z, Math.sin(orbitAngle)),
+      ))
+      const meanderDirection = normalize(add(
+        multiply(frame.x, Math.cos(heading + Math.PI * 0.5)),
+        multiply(frame.z, Math.sin(heading + Math.PI * 0.5)),
+      ))
       const fusionPulse = fused
-        ? 0.68 + Math.cos(t * Math.PI * 6 + 0.4) * 0.24
+        ? 0.84 + Math.cos(t * Math.PI * 6 + 0.4) * 0.12
         : 1
       // Leave the shared stool decisively, then carry on with a much gentler
       // splay. A linear offset gives the child an almost vertical starting
@@ -337,7 +378,13 @@ function createCodominantStems(
       // the parent's side, making secondary boles appear to start in mid-air.
       const earlySeparation = (1 - Math.exp(-t * 9)) / (1 - Math.exp(-9))
       const separation = lerpNumber(t, earlySeparation, 0.52)
-      const fusedRadius = sharedOrbitRadius * smoothstep(0, 0.11, t)
+      // The orbit tapers with the wood. A fixed-width helix makes the shrinking
+      // upper stems drift farther and farther apart; scaling both together
+      // keeps them intertwined through the full structural axis.
+      const stemTaper = (fused ? 0.55 : 0.42) +
+        Math.pow(1 - t, 0.7) * (fused ? 0.45 : 0.58)
+      const fusedRadius = sharedOrbitRadius * stemTaper *
+        smoothstep(0, 0.11, t)
       // Release a little into the crown only after the braid has done its work.
       // This gives each axis room to carry scaffolds without turning the lower
       // two thirds back into a fork.
@@ -348,21 +395,24 @@ function createCodominantStems(
         ? fusedRadius * fusionPulse + crownRelease
         : length * splay * separation
       const position = add(
-        union.position,
+        loadAxis[step]!,
         add(
-          add(
-            multiply(orbitDirection, radialOffset),
-            vec3(0, length * t, 0),
-          ),
-          multiply(meanderSide, meander),
+          multiply(orbitDirection, radialOffset),
+          multiply(meanderDirection, meander),
         ),
       )
       // Swollen at the union and tapering hard: the buttress of wood a fork
       // grows to hold itself together is one of its most recognisable features.
-      const unionSwell = 1 + smoothstep(0.22, 0, t) * (0.28 + parameters.age * 0.22)
+      const unionSwell = fused
+        // Start inside the parent area budget, then form a short shoulder just
+        // above the union. Keeping the first station unswollen prevents the
+        // inheritance solver from scaling the entire strand down.
+        ? 1 + smoothstep(0, 0.045, t) * smoothstep(0.24, 0.045, t) *
+          (0.12 + parameters.age * 0.1)
+        : 1 + smoothstep(0.22, 0, t) * (0.28 + parameters.age * 0.22)
       const radius = Math.max(
         0.05,
-        baseRadius * (0.42 + Math.pow(1 - t, 0.7) * 0.58) * unionSwell,
+        baseRadius * stemTaper * unionSwell,
       )
       spine.push({
         position,
@@ -389,12 +439,95 @@ function createCodominantStems(
       vigor: 0.8 + share * 0.2,
       dominance: clamp(share * stemCount, 0.35, 1),
       attachment: 1,
-      // One stem carries the bole's flow through; the other is the division.
-      junctionType: index === 0 ? 'continuation' : 'bifurcation',
+      // A braided union cannot share one parent ring with a centreline that
+      // immediately orbits away from it: at high turn counts that creates a
+      // non-manifold fan at the shared ring. Each fused axis is therefore its
+      // own closed shell, overlapped inside the common stool. Ordinary forks
+      // still carry one true topological continuation.
+      junctionType: index === 0 && !fused ? 'continuation' : 'bifurcation',
       spine,
     })
   }
   return stems
+}
+
+interface LoadFrame {
+  x: TreeVec3
+  z: TreeVec3
+}
+
+/**
+ * Builds the shared structural axis before any fork, multi-bole splay or fused
+ * weave is applied. This is the composition point: a sinuous/leaning axis is
+ * one curve, and every stem offset lives in that curve's transported frame.
+ */
+function createCompositeLoadAxis(
+  origin: TreeVec3,
+  height: number,
+  sampleCount: number,
+  habit: TreeHabit,
+  trunkRadius: number,
+  phase: number,
+  azimuth: number,
+): TreeVec3[] {
+  const leanDirection = vec3(
+    Math.cos(habit.leanAzimuth),
+    0,
+    Math.sin(habit.leanAzimuth),
+  )
+  const sinuousDirection = vec3(Math.cos(azimuth), 0, Math.sin(azimuth))
+  const secondaryDirection = vec3(-sinuousDirection.z, 0, sinuousDirection.x)
+  const amplitude = trunkRadius * habit.sinuosity
+  const result: TreeVec3[] = []
+  for (let step = 0; step < sampleCount; step += 1) {
+    const t = step / Math.max(1, sampleCount - 1)
+    const envelope = smoothstep(0, 0.16, t) * (1 - t * 0.12)
+    const primary = Math.sin(
+      t * Math.PI * 2 * habit.sinuosityTurns + phase,
+    ) * amplitude * envelope
+    const secondary = Math.sin(
+      t * Math.PI * 2 * habit.sinuosityTurns * 0.53 + phase * 0.71,
+    ) * amplitude * 0.28 * envelope
+    const leanOffset = height * t * t * Math.tan(habit.lean)
+    result.push(add(
+      origin,
+      add(
+        vec3(0, height * t, 0),
+        add(
+          multiply(leanDirection, leanOffset),
+          add(
+            multiply(sinuousDirection, primary),
+            multiply(secondaryDirection, secondary),
+          ),
+        ),
+      ),
+    ))
+  }
+  return result
+}
+
+/** Rotation-minimising frames for offsets around a curved load axis. */
+function transportedLoadFrames(axis: readonly TreeVec3[]): LoadFrame[] {
+  const tangents = axis.map((_, index) => normalize(
+    subtract(
+      axis[Math.min(axis.length - 1, index + 1)]!,
+      axis[Math.max(0, index - 1)]!,
+    ),
+    vec3(0, 1, 0),
+  ))
+  const first = tangents[0]!
+  const reference = Math.abs(first.y) < 0.82 ? vec3(0, 1, 0) : vec3(0, 0, 1)
+  let x = normalize(cross(reference, first), vec3(1, 0, 0))
+  const frames: LoadFrame[] = []
+  for (const tangent of tangents) {
+    x = normalize(
+      subtract(x, multiply(tangent, dot(x, tangent))),
+      vec3(1, 0, 0),
+    )
+    const z = normalize(cross(x, tangent), vec3(0, 0, 1))
+    frames.push({ x, z })
+  }
+  return frames
 }
 
 function growCrownParts(
@@ -445,7 +578,7 @@ function growCrownParts(
     2,
     // A snapped bole rebuilds its crown from a rack of shoots off the break,
     // so it carries more, steeper leaders than an intact tree of the same size.
-    architecture.scaffoldCount + (habit.boleForm === 'snapped' ? 2 : 0),
+    architecture.scaffoldCount + (habit.trunkDamage === 'snapped' ? 2 : 0),
   )
   // Golden-angle phyllotaxy with real jitter: evenly spaced scaffolds around a
   // bole is the single most recognisable procedural tell.
@@ -521,7 +654,14 @@ function growCrownParts(
     influenceRadius: segmentLength * 5.6,
     killRadius: segmentLength * 1.85,
     attractorCount: Math.round(
-      architecture.attractorCount * lerpNumber(0.55, 1.15, parameters.foliageDensity),
+      // Foliage density is a rendering-density control, not a growth control.
+      // Above 1 we repeat smaller card stations on the existing carrier twigs;
+      // changing attractor count here would also change the branch geometry.
+      architecture.attractorCount * lerpNumber(
+        0.55,
+        1.15,
+        clamp(parameters.foliageDensity, 0, 1),
+      ),
     ),
     upTropism: architecture.upTropism,
     sag: architecture.sag,
@@ -594,6 +734,7 @@ function growCrownParts(
 
   const byId = new Map<string, SemanticTreePart>(parts.map((part) => [part.id, part]))
   byId.set(trunk.id, trunk)
+  for (const bole of boles) byId.set(bole.id, bole)
   for (const part of parts) {
     const parent = byId.get(part.parentId!)
     if (!parent) continue
@@ -1590,18 +1731,20 @@ function createFoliageClusters(
   if (carriers.length === 0) return []
 
   // Subsampling to a target rather than taking every twig keeps the card count
-  // — and so the fill cost — stable across recipes that ramify very
-  // differently. The target is deliberately low and the cards correspondingly
-  // large: closing a crown with a few big sprays is far cheaper to shade than
-  // closing the same volume with many small ones, and overdraw on alpha-tested
-  // foliage is where a tree's frame budget actually goes.
-  const target = Math.round(
-    lerpNumber(420, 1_500, clamp(parameters.foliageDensity, 0, 1)),
-  )
-  const stride = Math.max(1, carriers.length / target)
+  // stable across recipes that ramify very differently. Density above 1 is a
+  // deliberate hero-quality region: it spends instances on smaller sprays,
+  // while the hard 5k station ceiling keeps LOD0 below 15k cards and LOD2 still
+  // collapses to its existing ~120 cluster budget.
+  const target = foliageStationTarget(parameters.foliageDensity)
   const clusters: FoliageCluster[] = []
-  for (let cursor = 0; cursor < carriers.length; cursor += stride) {
-    const index = carriers[Math.floor(cursor)]!
+  // Sampling by output index makes the count exact. Above density 1 there may
+  // be more stations than carrier twigs; in that case each carrier receives a
+  // small deterministic clump with independent scale, seed and card jitter.
+  // That is preferable to silently saturating at one station per twig, which
+  // made the upper half of the density control visually inert.
+  for (let station = 0; station < target; station += 1) {
+    const carrier = Math.floor(station * carriers.length / target)
+    const index = carriers[carrier]!
     const node = nodes[index]!
     const parent = nodes[node.parent]!
     const axis = normalize(subtract(node.position, parent.position), node.direction)
@@ -1619,6 +1762,14 @@ function createFoliageClusters(
     })
   }
   return clusters
+}
+
+/** Stable station budget shared by generation and focused budget tests. */
+export function foliageStationTarget(density: number): number {
+  const value = clamp(density, 0, 2)
+  return Math.round(value <= 1
+    ? lerpNumber(420, 1_500, value)
+    : lerpNumber(1_500, 5_000, value - 1))
 }
 
 function graphBounds(graph: SemanticTreeGraph) {

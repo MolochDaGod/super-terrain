@@ -11,6 +11,7 @@ import {
 import type { TreeSpecies } from '../generator/types'
 import { LEAF_CARD_VARIANTS } from '../generator/foliageCompiler'
 import { bakeLeafSpray } from './leafSprayAtlas'
+import type { LeafSprayMaps } from './leafSprayAtlas'
 import {
   byte,
   cellularBorder,
@@ -68,6 +69,18 @@ export interface ProceduralTreeTextures {
   dispose(): void
 }
 
+/**
+ * Renderer-independent output of the expensive procedural bake.
+ *
+ * Keeping the byte arrays separate from Three textures lets the viewport do
+ * the multi-million-pixel noise work in a worker, transfer ownership once,
+ * and create the lightweight GPU resource wrappers on the main thread.
+ */
+export interface ProceduralTreeTextureData {
+  bark: ReturnType<typeof bakeBarkMaps>
+  leafCards: LeafSprayMaps[]
+}
+
 const BARK_WIDTH = 1024
 const BARK_HEIGHT = 2048
 const LEAF_CARD_SIZE = 512
@@ -90,29 +103,55 @@ export function bakeProceduralTreeTextures(
   species: TreeSpecies,
   seed: number,
 ): ProceduralTreeTextures {
+  return createProceduralTreeTextures(bakeProceduralTreeTextureData(species, seed))
+}
+
+/** CPU-only half of the bake. Safe to call inside a dedicated worker. */
+export function bakeProceduralTreeTextureData(
+  species: TreeSpecies,
+  seed: number,
+): ProceduralTreeTextureData {
   const bark = bakeBarkMaps(seed, species)
-  const leafCards: LeafCardTextures[] = []
+  const leafCards: LeafSprayMaps[] = []
   for (let variant = 0; variant < LEAF_CARD_VARIANTS; variant += 1) {
-    const spray = bakeLeafSpray(seed ^ 0x5f3759df, species, variant, LEAF_CARD_SIZE)
+    leafCards.push(
+      bakeLeafSpray(seed ^ 0x5f3759df, species, variant, LEAF_CARD_SIZE),
+    )
+  }
+  return { bark, leafCards }
+}
+
+/** Main-thread-only, cheap half of the bake: wraps transferred bytes for Three. */
+export function createProceduralTreeTextures(
+  data: ProceduralTreeTextureData,
+): ProceduralTreeTextures {
+  const leafCards: LeafCardTextures[] = []
+  for (const [variant, spray] of data.leafCards.entries()) {
     leafCards.push({
       map: makeTexture(
-        spray.albedo, LEAF_CARD_SIZE, LEAF_CARD_SIZE,
+        spray.albedo, spray.size, spray.size,
         `leaf spray ${variant} albedo`, true, false,
       ),
       normalMap: makeTexture(
-        spray.normal, LEAF_CARD_SIZE, LEAF_CARD_SIZE,
+        spray.normal, spray.size, spray.size,
         `leaf spray ${variant} normal`, false, false,
       ),
       surfaceMap: makeTexture(
-        spray.roughness, LEAF_CARD_SIZE, LEAF_CARD_SIZE,
+        spray.roughness, spray.size, spray.size,
         `leaf spray ${variant} roughness + translucency`, false, false,
       ),
     })
   }
   const textures: ProceduralTreeTextures = {
-    barkMap: makeTexture(bark.albedo, BARK_WIDTH, BARK_HEIGHT, 'bark albedo', true, true),
-    barkNormalMap: makeTexture(bark.normal, BARK_WIDTH, BARK_HEIGHT, 'bark tangent normal', false, true),
-    barkRoughnessMap: makeTexture(bark.roughness, BARK_WIDTH, BARK_HEIGHT, 'bark roughness', false, true),
+    barkMap: makeTexture(
+      data.bark.albedo, data.bark.width, data.bark.height, 'bark albedo', true, true,
+    ),
+    barkNormalMap: makeTexture(
+      data.bark.normal, data.bark.width, data.bark.height, 'bark tangent normal', false, true,
+    ),
+    barkRoughnessMap: makeTexture(
+      data.bark.roughness, data.bark.width, data.bark.height, 'bark roughness', false, true,
+    ),
     leafCards,
     dispose() {
       for (const texture of textureValues(textures)) texture.dispose()
@@ -227,18 +266,16 @@ export function bakeBarkMaps(
       )
       // Plate faces crown slightly and carry their own corky grain, which is
       // what catches a raking sun.
-      // Plate-to-plate value variation, keyed to the column so a whole ridge
-      // weathers together. Neighbouring plates age at different rates, and a
-      // uniform field of them reads as one printed sheet.
-      const plateShade = 0.78 +
-        hash2(column.cell, 19, seed + 307) * 0.28 +
-        fbmTiled(u, v, 18, 6, seed + 311, 2) * 0.2
       const plate = fbmTiled(u, v, 13, pine ? 22 : 8, seed + 173, 4)
       const grain = fbmTiled(u, v, 34, 46, seed + 211, 4)
       const micro = fbmTiled(u, v, 120, 164, seed + 233, 2)
       const height = clamp01(
         0.26 + crown * 0.34 + plate * 0.22 + grain * 0.14 + micro * 0.07 -
-          furrow * 0.88,
+          // Keep a real meso-scale step between plate crowns and furrow floors,
+          // but do not turn every crack into a near-vertical normal-map wall.
+          // The old 0.88 cut combined with a very strong normal bake produced
+          // black engraved lines under almost any light direction.
+          furrow * 0.66,
       )
       heights[index] = height
 
@@ -248,44 +285,78 @@ export function bakeBarkMaps(
       ) * (1 - furrow)
       heights[index] = clamp01(heights[index]! + lenticel * 0.12)
 
-      const moisture = noise(u, v, 4, 4, seed + 151)
+      // Colour is built independently of the height field. A bark base-colour
+      // map must not contain fake key lighting, normal-facing gradients, or AO:
+      // those are supplied by the renderer and the roughness/normal maps. What
+      // belongs here is slow weathering, material differences between plates,
+      // fine cork grain, and biological growth.
+      const macroWeather = fbmTiled(u, v, 2, 3, seed + 137, 4)
+      const macroWarmth = fbmTiled(u, v, 3, 2, seed + 143, 3)
+      const moisture = fbmTiled(u, v, 3, 5, seed + 151, 4)
+      const mesoWeather = fbmTiled(u, v, 9, 7, seed + 307, 3)
+      const fineTone = (grain - 0.5) * 0.038 + (micro - 0.5) * 0.018
       const mossNoise = fbmTiled(u, v, 3, 6, seed + 179, 4)
-      const lichenNoise = fbmTiled(u, v, 9, 9, seed + 191, 3)
+      const lichenCoverage = fbmTiled(u, v, 4, 5, seed + 191, 3)
+      const lichenSpeckle = fbmTiled(u, v, 18, 20, seed + 197, 3)
       // Moss colonises the damp side and the furrow floors; lichen takes the
       // dry exposed ridges. Putting both in the same places is a common tell.
       const moss = pine
-        ? smooth01((mossNoise - 0.74) * 4.4) * 0.16
-        : smooth01((mossNoise - 0.58) * 3.4) * mix(0.25, 1, furrow) * 0.4
-      const lichen = smooth01((lichenNoise - 0.62) * 4.6) *
-        (1 - furrow) * (pine ? 0.14 : 0.26)
+        ? smooth01((mossNoise + moisture * 0.28 - 0.88) * 4.2) * 0.14
+        : smooth01((mossNoise + moisture * 0.32 - 0.76) * 3.8) *
+          mix(0.38, 1, furrow) * 0.34
+      const lichen = smooth01((lichenCoverage - 0.55) * 4.2) *
+        smooth01((lichenSpeckle - 0.48) * 5) *
+        (1 - furrow * 0.82) * (pine ? 0.12 : 0.25)
 
-      // Cavity occlusion. Bark albedo is nearly uniform in reality; almost all
-      // of its apparent contrast is dirt and shadow packed into the furrows.
-      // The range stays well clear of black — a furrow floor is dim, not unlit,
-      // and crushing it is what turned the whole trunk into a silhouette.
-      // A shallower curve than a physical AO would give. The furrows are the
-      // deepest thing in the map, and squaring them off drops the trunk's
-      // darkest values below anything a sunlit surface should reach.
+      // Used only by the surface map. Keeping it out of base colour avoids
+      // double shading while still allowing dusty furrow floors and worn ridge
+      // crowns to respond differently to highlights.
       const cavity = Math.pow(clamp01(height * 1.3), 0.95)
-      const light = (0.4 + cavity * 0.72 + (grain - 0.5) * 0.1 +
-        (micro - 0.5) * 0.06) * plateShade
 
-      // Grey-brown, not chocolate. Weathered oak bark is a desaturated stone
-      // grey with a warm cast; the saturated brown it is usually painted as
-      // only exists on bark that is freshly wet.
-      const barkRed = (pine ? 0.42 : 0.335) + moisture * (pine ? 0.07 : 0.04)
-      const barkGreen = (pine ? 0.27 : 0.312) + moisture * 0.034
-      const barkBlue = (pine ? 0.16 : 0.272) + moisture * 0.028
-      const lichenValue = 0.56 + lichenNoise * 0.16
+      // Three distinct colour scales keep the material from reading as a
+      // repeated brown stripe: broad cool/bleached weather fronts, irregular
+      // meso plate variation, then restrained cork grain. Pine retains a warmer
+      // resinous cast; old oak stays mostly stone-grey and olive-taupe.
+      const broad = macroWeather - 0.5
+      const warm = macroWarmth - 0.5
+      const meso = mesoWeather - 0.5
+      const damp = smooth01((moisture - 0.54) * 3.2)
+      const barkRed = pine
+        ? 0.365 + broad * 0.07 + warm * 0.085 + meso * 0.06 + fineTone
+        : 0.355 + broad * 0.09 + warm * 0.055 + meso * 0.065 + fineTone
+      const barkGreen = pine
+        ? 0.305 + broad * 0.064 + warm * 0.025 + meso * 0.052 + fineTone * 0.82
+        : 0.345 + broad * 0.096 + warm * 0.006 + meso * 0.055 + fineTone * 0.82
+      const barkBlue = pine
+        ? 0.245 + broad * 0.06 - warm * 0.035 + meso * 0.045 + fineTone * 0.68
+        : 0.315 + broad * 0.105 - warm * 0.035 + meso * 0.05 + fineTone * 0.72
+
+      // Damp bark is a material colour shift, not painted-in darkness. Its
+      // value changes only slightly while moving cooler/greener. That lets real
+      // direct light and shadow remain in charge of perceived depth.
+      const dampAmount = damp * (pine ? 0.08 : 0.13)
+      const dampened = (base: number, dampValue: number) =>
+        mix(base, dampValue, dampAmount)
+      const lichenValue = 0.49 + lichenSpeckle * 0.14
       const mossed = (base: number, mossValue: number) =>
-        mix(base * light, mossValue * light, moss)
+        mix(base, mossValue, moss)
       const offset = index * 4
-      albedo[offset] = byte(mix(mossed(barkRed, 0.19), lichenValue * light, lichen))
+      albedo[offset] = byte(
+        mix(mossed(dampened(barkRed, pine ? 0.31 : 0.29), 0.19), lichenValue, lichen),
+      )
       albedo[offset + 1] = byte(
-        mix(mossed(barkGreen, 0.33), lichenValue * 0.99 * light, lichen),
+        mix(
+          mossed(dampened(barkGreen, pine ? 0.31 : 0.32), 0.31),
+          lichenValue * 1.01,
+          lichen,
+        ),
       )
       albedo[offset + 2] = byte(
-        mix(mossed(barkBlue, 0.15), lichenValue * 0.86 * light, lichen),
+        mix(
+          mossed(dampened(barkBlue, pine ? 0.27 : 0.29), 0.16),
+          lichenValue * 0.84,
+          lichen,
+        ),
       )
       albedo[offset + 3] = 255
 
@@ -302,7 +373,10 @@ export function bakeBarkMaps(
     }
   }
 
-  heightToNormal(heights, normal, BARK_WIDTH, BARK_HEIGHT, pine ? 16 : 14, true)
+  // A moderate bake preserves broad plate roll and cork texture without making
+  // each fissure a vertical normal-map wall. The material should use a normal
+  // scale around 0.85; large bark depth remains geometry's responsibility.
+  heightToNormal(heights, normal, BARK_WIDTH, BARK_HEIGHT, pine ? 6.5 : 6, true, true)
   return { albedo, normal, roughness, width: BARK_WIDTH, height: BARK_HEIGHT }
 }
 
@@ -313,10 +387,11 @@ function heightToNormal(
   height: number,
   strength: number,
   wrapX: boolean,
+  wrapY: boolean,
 ): void {
   for (let y = 0; y < height; y += 1) {
-    const previousY = Math.max(0, y - 1)
-    const nextY = Math.min(height - 1, y + 1)
+    const previousY = wrapY ? (y - 1 + height) % height : Math.max(0, y - 1)
+    const nextY = wrapY ? (y + 1) % height : Math.min(height - 1, y + 1)
     for (let x = 0; x < width; x += 1) {
       const previousX = wrapX ? (x - 1 + width) % width : Math.max(0, x - 1)
       const nextX = wrapX ? (x + 1) % width : Math.min(width - 1, x + 1)

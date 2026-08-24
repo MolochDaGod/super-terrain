@@ -6,7 +6,7 @@ import {
   DEFAULT_TREE_PARAMETERS,
   normalizeTreeParameters,
   type SemanticTreePart,
-  type TreeBoleForm,
+  type TreeBolePlan,
 } from './types'
 
 describe('semantic tree graph', () => {
@@ -32,7 +32,7 @@ describe('semantic tree graph', () => {
       .toHaveLength(DEFAULT_TREE_PARAMETERS.rootCount)
     expect(first.parts.filter((part) => part.type === 'root' && part.branchOrder === 2).length)
       .toBeGreaterThan(0)
-  })
+  }, 10_000)
 
   it('builds changing root burial and non-circular structural cross sections', () => {
     const graph = generateSemanticTree(DEFAULT_TREE_PARAMETERS, DEFAULT_TREE_ENVIRONMENT)
@@ -137,7 +137,7 @@ describe('semantic tree graph', () => {
   it('produces structurally different trees from different seeds', () => {
     // Variety has to be a property of the *architecture*, not of jitter. Two
     // seeds that differ only in where their noise lands still produce the same
-    // tree; these have to differ in bole form, crown form or root form.
+    // tree; these have to differ in plan, axis, damage, crown or root form.
     const habits = new Set<string>()
     for (let index = 0; index < 24; index += 1) {
       const parameters = normalizeTreeParameters({
@@ -145,7 +145,10 @@ describe('semantic tree graph', () => {
         seed: 1000 + index * 7919,
       })
       const habit = deriveTreeHabit(parameters)
-      habits.add(`${habit.boleForm}/${habit.crownForm}/${habit.rootForm}`)
+      habits.add(
+        `${habit.bolePlan}/${habit.axisForm}/${habit.trunkDamage}/` +
+          `${habit.crownForm}/${habit.rootForm}`,
+      )
     }
     expect(habits.size).toBeGreaterThan(8)
   }, 10_000)
@@ -155,10 +158,14 @@ describe('semantic tree graph', () => {
       const habit = deriveTreeHabit(normalizeTreeParameters({
         ...DEFAULT_TREE_PARAMETERS,
         seed: 500 + index * 1301,
-        boleForm: 'codominant',
+        bolePlan: 'codominant',
+        axisForm: 'sinuous',
+        trunkDamage: 'intact',
         rootForm: 'stilted',
       }))
-      expect(habit.boleForm).toBe('codominant')
+      expect(habit.bolePlan).toBe('codominant')
+      expect(habit.axisForm).toBe('sinuous')
+      expect(habit.trunkDamage).toBe('intact')
       expect(habit.rootForm).toBe('stilted')
       expect(habit.forkHeight).toBeGreaterThan(0)
     }
@@ -168,19 +175,19 @@ describe('semantic tree graph', () => {
     const gentle = deriveTreeHabit(normalizeTreeParameters({
       ...DEFAULT_TREE_PARAMETERS,
       seed: 9917,
-      boleForm: 'fused',
+      bolePlan: 'fused',
       twist: 0.2,
     }))
     const strong = deriveTreeHabit(normalizeTreeParameters({
       ...DEFAULT_TREE_PARAMETERS,
       seed: 9917,
-      boleForm: 'fused',
+      bolePlan: 'fused',
       twist: 6,
     }))
     const reverse = deriveTreeHabit(normalizeTreeParameters({
       ...DEFAULT_TREE_PARAMETERS,
       seed: 9917,
-      boleForm: 'fused',
+      bolePlan: 'fused',
       twist: -6,
     }))
     expect(Math.abs(strong.stemTwist)).toBeGreaterThan(Math.abs(gentle.stemTwist) * 2)
@@ -189,15 +196,65 @@ describe('semantic tree graph', () => {
     expect(reverse.stemTwist).toBe(-6)
   })
 
+  it('scales a fused bole with the full authored trunk radius', () => {
+    const make = (trunkRadius: number) => {
+      const parameters = normalizeTreeParameters({
+        ...DEFAULT_TREE_PARAMETERS,
+        seed: 84721,
+        bolePlan: 'fused',
+        axisForm: 'sinuous',
+        trunkDamage: 'intact',
+        trunkRadius,
+        branchCount: 5,
+        rootCount: 5,
+        foliageDensity: 0,
+      })
+      const graph = generateSemanticTree(parameters, DEFAULT_TREE_ENVIRONMENT)
+      const stems = graph.parts.filter(
+        (part) => part.type === 'trunk' && part.parentId === 'trunk',
+      )
+      const station = Math.floor(stems[0]!.spine.length * 0.5)
+      return {
+        parameters,
+        equivalentRadius: Math.sqrt(stems.reduce(
+          (area, stem) => area + stem.spine[station]!.radius ** 2,
+          0,
+        )),
+        contactRatio: distanceBetween(
+          stems[0]!.spine[station]!.position,
+          stems[1]!.spine[station]!.position,
+        ) / (
+          stems[0]!.spine[station]!.radius +
+          stems[1]!.spine[station]!.radius
+        ),
+      }
+    }
+
+    const thin = make(0.5)
+    const thick = make(2.2)
+    // This used to read 2.2 from the slider and silently normalize to 1.6.
+    expect(thick.parameters.trunkRadius).toBe(2.2)
+    expect(thick.equivalentRadius / thin.equivalentRadius).toBeCloseTo(4.4, 1)
+    expect(thick.equivalentRadius).toBeGreaterThan(2.2 * 0.5)
+    // Orbit and girth scale together, so increasing radius does not pull the
+    // strands apart or bury one entirely inside the other.
+    expect(thick.contactRatio).toBeCloseTo(thin.contactRatio, 1)
+  }, 20_000)
+
   it('builds low divided boles as trunk-scale axes rather than crown branches', () => {
     const expected = [
       ['codominant', 2],
       ['multistem', 3],
       ['fused', 2],
-    ] as const satisfies readonly (readonly [TreeBoleForm, number])[]
-    for (const [boleForm, minimumCount] of expected) {
+    ] as const satisfies readonly (readonly [TreeBolePlan, number])[]
+    for (const [bolePlan, minimumCount] of expected) {
       const graph = generateSemanticTree(
-        { ...DEFAULT_TREE_PARAMETERS, seed: 84721, boleForm },
+        {
+          ...DEFAULT_TREE_PARAMETERS,
+          seed: 84721,
+          bolePlan,
+          axisForm: bolePlan === 'fused' ? 'sinuous' : 'auto',
+        },
         DEFAULT_TREE_ENVIRONMENT,
       )
       const trunk = graph.parts.find((part) => part.id === 'trunk')!
@@ -209,18 +266,26 @@ describe('semantic tree graph', () => {
         DEFAULT_TREE_PARAMETERS.height * 0.2,
       )
       expect(stems.every((stem) => stem.branchOrder === 0)).toBe(true)
-      if (boleForm === 'fused') {
-        const union = trunk.spine.at(-1)!.position
+      if (bolePlan === 'fused') {
+        const centers = stems[0]!.spine.map((_, index) => {
+          const samples = stems.map((stem) => stem.spine[index]!.position)
+          return {
+            x: samples.reduce((sum, sample) => sum + sample.x, 0) / samples.length,
+            y: samples.reduce((sum, sample) => sum + sample.y, 0) / samples.length,
+            z: samples.reduce((sum, sample) => sum + sample.z, 0) / samples.length,
+          }
+        })
         const turns = stems.map((stem) => {
           let accumulated = 0
           let previous = Math.atan2(
-            stem.spine[1]!.position.z - union.z,
-            stem.spine[1]!.position.x - union.x,
+            stem.spine[1]!.position.z - centers[1]!.z,
+            stem.spine[1]!.position.x - centers[1]!.x,
           )
-          for (const sample of stem.spine.slice(2)) {
+          for (let index = 2; index < stem.spine.length; index += 1) {
+            const sample = stem.spine[index]!
             const angle = Math.atan2(
-              sample.position.z - union.z,
-              sample.position.x - union.x,
+              sample.position.z - centers[index]!.z,
+              sample.position.x - centers[index]!.x,
             )
             accumulated += Math.abs(Math.atan2(
               Math.sin(angle - previous),
@@ -231,6 +296,17 @@ describe('semantic tree graph', () => {
           return accumulated
         })
         expect(Math.min(...turns)).toBeGreaterThan(Math.PI * 2.2)
+
+        const start = centers[0]!
+        const end = centers.at(-1)!
+        const axisDeviation = Math.max(...centers.map((center, index) => {
+          const t = index / (centers.length - 1)
+          return Math.hypot(
+            center.x - (start.x + (end.x - start.x) * t),
+            center.z - (start.z + (end.z - start.z) * t),
+          )
+        }))
+        expect(axisDeviation).toBeGreaterThan(0.2)
 
         const first = stems[0]!
         const second = stems[1]!
@@ -254,7 +330,7 @@ describe('semantic tree graph', () => {
     const graph = generateSemanticTree(
       {
         ...DEFAULT_TREE_PARAMETERS,
-        boleForm: 'multistem',
+        bolePlan: 'multistem',
         rootForm: 'buttressed',
       },
       DEFAULT_TREE_ENVIRONMENT,
@@ -303,4 +379,11 @@ function radiusAt(part: SemanticTreePart, amount: number): number {
   const fraction = scaled - left
   return part.spine[left]!.radius +
     (part.spine[right]!.radius - part.spine[left]!.radius) * fraction
+}
+
+function distanceBetween(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+): number {
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)
 }

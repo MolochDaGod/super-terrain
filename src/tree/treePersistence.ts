@@ -3,8 +3,8 @@ import {
   type TreeParameters,
 } from './generator/types'
 
-const DRAFT_KEY = 'meshterrain.tree-draft.v1'
-const LIBRARY_KEY = 'meshterrain.tree-library.v1'
+const DRAFT_KEY = 'meshterrain.tree-draft.v2'
+const LIBRARY_KEY = 'meshterrain.tree-library.v2'
 
 export interface SavedTreeRecipe {
   id: string

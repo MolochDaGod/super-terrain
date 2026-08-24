@@ -45,13 +45,14 @@ export interface SpeciesArchitecture {
   /**
    * Leaf card half-size in metres, before per-instance jitter.
    *
-   * Bigger is cheaper. A crown closed with a few large cards costs a fraction
-   * of the fill and the draw calls of one closed with many small ones, and at
-   * canopy densities the difference is not subtle — so the card is sized as
-   * large as the leaf art will carry before individual sprays start reading as
-   * individual sprays.
+   * Smaller cards preserve branchlet-scale parallax and stop a whole metre of
+   * foliage from lighting as one sheet. Density is budgeted separately, so an
+   * author can spend more instances on a closed hero crown without making each
+   * spray implausibly large.
    */
   cardSize: number
+  /** Far-LOD blob half-size; preserves crown mass after hero cards shrink. */
+  farClusterSize: number
   /** Cards placed per foliage station. */
   cardsPerStation: number
   /** Instance-tint multiplier on the atlas albedo, deep in the crown. */
@@ -107,10 +108,10 @@ function oak(
     segmentFraction: 0.05,
     attractorCount: 4400,
     meshedTipRadius: 0.026,
-    // A card has to be big enough that a few thousand of them close the crown.
-    // Undersized cards leave the branch structure showing through, which is
-    // what makes a canopy read as a bare winter tree with leaves stuck on.
-    cardSize: 1.34,
+    // Branchlet-sized rather than crown-clump-sized. The expanded density range
+    // can restore the old projected coverage with more independent sprays.
+    cardSize: 0.72,
+    farClusterSize: 1.34,
     cardsPerStation: 3,
     shadeValue: 0.58,
     sunValue: 1.12,
@@ -138,7 +139,8 @@ function pine(parameters: TreeParameters, age: number): SpeciesArchitecture {
     segmentFraction: 0.062,
     attractorCount: 2600,
     meshedTipRadius: 0.024,
-    cardSize: 1.05,
+    cardSize: 0.6,
+    farClusterSize: 1.05,
     cardsPerStation: 3,
     shadeValue: 0.52,
     sunValue: 1.02,

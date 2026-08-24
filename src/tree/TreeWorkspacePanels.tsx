@@ -25,11 +25,14 @@ import { Section } from '../components/editor/ui/Section'
 import { Segmented } from '../components/editor/ui/Segmented'
 import { downloadTreeGlb } from './exportTreeGlb'
 import {
-  type TreeBoleForm,
+  MAX_FOLIAGE_DENSITY,
+  type TreeAxisForm,
+  type TreeBolePlan,
   type TreeCrownForm,
   type TreeLodLevel,
   type TreeRootForm,
   type TreeSpecies,
+  type TreeTrunkDamage,
 } from './generator/types'
 import type { TreeDebugMode, TreeEditorStore } from './TreeEditorStore'
 import { saveTreeToLibrary } from './treePersistence'
@@ -41,20 +44,28 @@ const SPECIES_OPTIONS = [
   { value: 'windswept-pine', label: 'Pine' },
 ] satisfies { value: TreeSpecies; label: string }[]
 
-// Structural forms, not style presets: each picks a different growth history
-// and therefore a different skeleton. `Auto` hands the choice to the seed,
-// which is what a whole stand wants; naming one pins this individual, which is
-// what authoring a specific hero tree wants.
-const BOLE_FORM_OPTIONS = [
+// Orthogonal traits, not one mutually-exclusive style preset. A tree may be a
+// sinuous fused pair with a broken top, or a straight intact multi-bole.
+const BOLE_PLAN_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'single', label: 'Single' },
+  { value: 'codominant', label: 'Low fork' },
+  { value: 'multistem', label: 'Multi-bole' },
+  { value: 'fused', label: 'Fused' },
+] satisfies { value: TreeBolePlan; label: string }[]
+
+const AXIS_FORM_OPTIONS = [
   { value: 'auto', label: 'Auto' },
   { value: 'straight', label: 'Straight' },
   { value: 'leaning', label: 'Leaning' },
   { value: 'sinuous', label: 'Sinuous' },
-  { value: 'codominant', label: 'Low fork' },
-  { value: 'multistem', label: 'Multi-bole' },
-  { value: 'fused', label: 'Fused' },
+] satisfies { value: TreeAxisForm; label: string }[]
+
+const TRUNK_DAMAGE_OPTIONS = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'intact', label: 'Intact' },
   { value: 'snapped', label: 'Broken top' },
-] satisfies { value: TreeBoleForm; label: string }[]
+] satisfies { value: TreeTrunkDamage; label: string }[]
 
 const CROWN_FORM_OPTIONS = [
   { value: 'auto', label: 'Auto' },
@@ -192,13 +203,36 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
           </FineControls>
         </Section>
 
-        <Section icon={Waypoints} title="Bole form">
+        <Section icon={Waypoints} title="Trunk structure">
+          <p className="text-[9px] uppercase tracking-[0.12em] text-white/32">
+            Bole plan
+          </p>
           <Segmented
-            ariaLabel="Bole form"
-            value={parameters.boleForm}
-            options={BOLE_FORM_OPTIONS}
+            ariaLabel="Bole plan"
+            value={parameters.bolePlan}
+            options={BOLE_PLAN_OPTIONS}
             columns={2}
-            onChange={(boleForm) => store.patchParameters({ boleForm })}
+            onChange={(bolePlan) => store.patchParameters({ bolePlan })}
+          />
+          <p className="text-[9px] uppercase tracking-[0.12em] text-white/32">
+            Axis shape
+          </p>
+          <Segmented
+            ariaLabel="Axis form"
+            value={parameters.axisForm}
+            options={AXIS_FORM_OPTIONS}
+            columns={2}
+            onChange={(axisForm) => store.patchParameters({ axisForm })}
+          />
+          <p className="text-[9px] uppercase tracking-[0.12em] text-white/32">
+            Crown history
+          </p>
+          <Segmented
+            ariaLabel="Trunk damage"
+            value={parameters.trunkDamage}
+            options={TRUNK_DAMAGE_OPTIONS}
+            columns={3}
+            onChange={(trunkDamage) => store.patchParameters({ trunkDamage })}
           />
           <FineControls>
           <RangeField
@@ -221,8 +255,8 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             onChange={(sinuosity) => store.patchParameters({ sinuosity })}
           />
           <RangeField
-            label={parameters.boleForm === 'fused' ? 'Stem weave' : 'Spiral grain'}
-            hint={parameters.boleForm === 'fused' ? 'turns over tree' : 'turns over bole'}
+            label={parameters.bolePlan === 'fused' ? 'Stem weave' : 'Spiral grain'}
+            hint={parameters.bolePlan === 'fused' ? 'turns over tree' : 'turns over bole'}
             value={parameters.twist}
             min={-6}
             max={6}
@@ -326,9 +360,10 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
           />
           <RangeField
             label="Foliage density"
+            hint="1–2 spends more hero cards"
             value={parameters.foliageDensity}
             min={0}
-            max={1}
+            max={MAX_FOLIAGE_DENSITY}
             step={0.01}
             onChange={(foliageDensity) => store.patchParameters({ foliageDensity })}
           />
@@ -343,14 +378,19 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
             disabled={snapshot.building}
             onClick={() => store.regenerate()}
           >
-            <RefreshCw size={12} className={snapshot.building ? 'animate-spin' : ''} />
+            <RefreshCw
+              size={12}
+              className={snapshot.building || snapshot.warmingMaterials ? 'animate-spin' : ''}
+            />
             {snapshot.building
               ? 'Compiling tree…'
-              : snapshot.dirty
-                ? 'Apply & regenerate'
-                : 'Regenerate'}
+              : snapshot.warmingMaterials
+                ? 'Preparing materials…'
+                : snapshot.dirty
+                  ? 'Apply & regenerate'
+                  : 'Regenerate'}
           </button>
-          {snapshot.building && (
+          {(snapshot.building || snapshot.warmingMaterials) && (
             <div className="h-1 overflow-hidden rounded-full bg-white/[0.06]">
               <div
                 className="h-full rounded-full bg-[#77e8be]/70 transition-[width] duration-300"

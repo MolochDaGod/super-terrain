@@ -137,7 +137,12 @@ function compileClusterInstances(
   const stride = Math.max(1, Math.round(clusters.length / 120))
   for (let index = 0; index < clusters.length; index += stride) {
     const cluster = clusters[index]!
-    const scale = cluster.radius * 2.6
+    // Hero sprays were reduced to branchlet scale, but far clusters still need
+    // the original broad footprint or the capped ~120 blobs turn the crown to
+    // lace. Preserve each station's authored size jitter while restoring that
+    // species-specific far silhouette.
+    const scale = cluster.radius / architecture.cardSize *
+      architecture.farClusterSize * 2.6
     appendMatrix(
       matrices,
       vec3(1, 0, 0),

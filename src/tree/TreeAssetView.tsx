@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   BufferAttribute,
   BufferGeometry,
@@ -11,7 +11,7 @@ import {
   MeshStandardNodeMaterial,
   Vector2,
 } from 'three/webgpu'
-import { cameraPosition, normalWorld, positionWorld, texture, vec3 } from 'three/tsl'
+import { texture } from 'three/tsl'
 import type {
   ProceduralTreeAsset,
   SemanticTreeGraph,
@@ -23,40 +23,84 @@ import type {
 } from './generator/types'
 import type { TreeDebugMode } from './TreeEditorStore'
 import {
-  bakeProceduralTreeTextures,
   type LeafCardTextures,
   type ProceduralTreeTextures,
 } from './materials/proceduralTreeTextures'
+import { bakeProceduralTreeTexturesAsync } from './materials/proceduralTreeTextureClient'
 import { createLeafCardGeometry, splitFoliageByVariant } from './materials/leafCardGeometry'
-import { DEFAULT_SUN } from '../terrain/rendering/environment/sunPosition'
 
-/** How much light a lit blade passes through when the sun is behind it. */
-const LEAF_TRANSMISSION = 0.6
-/** Floor the shaded hemisphere is lifted to, so the far side is not a slab. */
-const LEAF_AMBIENT_WRAP = 0.34
-const SUN_DIRECTION: [number, number, number] = [
-  DEFAULT_SUN.direction.x,
-  DEFAULT_SUN.direction.y,
-  DEFAULT_SUN.direction.z,
-]
+export interface TreeAssetViewProps {
+  asset: ProceduralTreeAsset
+  lodLevel: TreeLodLevel
+  debugMode: TreeDebugMode
+  showFoliage: boolean
+  /** Fires after textures, materials, meshes and instance buffers are committed. */
+  onRenderResourcesReady?: () => void
+  onRenderResourcesError?: (error: unknown) => void
+}
 
 export function TreeAssetView({
   asset,
   lodLevel,
   debugMode,
   showFoliage,
-}: {
-  asset: ProceduralTreeAsset
-  lodLevel: TreeLodLevel
-  debugMode: TreeDebugMode
-  showFoliage: boolean
+  onRenderResourcesReady,
+  onRenderResourcesError,
+}: TreeAssetViewProps) {
+  const [textures, setTextures] = useState<ProceduralTreeTextures>()
+  const errorHandler = useRef(onRenderResourcesError)
+  errorHandler.current = onRenderResourcesError
+
+  useEffect(() => {
+    const abort = new AbortController()
+    setTextures(undefined)
+    void bakeProceduralTreeTexturesAsync(
+      asset.parameters.species,
+      asset.parameters.seed,
+      { signal: abort.signal },
+    ).then(
+      (created) => {
+        if (abort.signal.aborted) {
+          created.dispose()
+          return
+        }
+        setTextures(created)
+      },
+      (error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        errorHandler.current?.(error)
+      },
+    )
+    return () => abort.abort()
+  }, [asset.parameters.seed, asset.parameters.species])
+
+  useEffect(() => () => textures?.dispose(), [textures])
+
+  if (!textures) return null
+  return (
+    <ReadyTreeAssetView
+      asset={asset}
+      lodLevel={lodLevel}
+      debugMode={debugMode}
+      showFoliage={showFoliage}
+      textures={textures}
+      onRenderResourcesReady={onRenderResourcesReady}
+    />
+  )
+}
+
+function ReadyTreeAssetView({
+  asset,
+  lodLevel,
+  debugMode,
+  showFoliage,
+  textures,
+  onRenderResourcesReady,
+}: TreeAssetViewProps & {
+  textures: ProceduralTreeTextures
 }) {
   const lod = asset.lods[lodLevel]
   const woodGeometry = useTreeGeometry(lod.wood)
-  const textures = useMemo(
-    () => bakeProceduralTreeTextures(asset.parameters.species, asset.parameters.seed),
-    [asset.parameters.seed, asset.parameters.species],
-  )
   const woodMaterial = useMemo(
     () =>
       new MeshStandardNodeMaterial({
@@ -64,10 +108,10 @@ export function TreeAssetView({
         vertexColors: true,
         map: textures.barkMap,
         normalMap: textures.barkNormalMap,
-        // Bark relief lives entirely in this map — the sweep only carries the
-        // member's macro shape — so it has to be pushed past unity or the
-        // furrows read as paint rather than as centimetres of depth.
-        normalScale: new Vector2(2.1, 2.1),
+        // The mesh already carries the trunk's macro fluting. The normal map
+        // supplies bark plates and grain only; pushing it beyond unity made
+        // every fissure an ink-black engraved line with no matching silhouette.
+        normalScale: new Vector2(0.85, 0.85),
         roughnessMap: textures.barkRoughnessMap,
         roughness: 1,
         metalness: 0,
@@ -110,8 +154,29 @@ export function TreeAssetView({
     },
     [debugMaterial, topologyMaterial, woodMaterial],
   )
-  useEffect(() => () => textures.dispose(), [textures])
   useEffect(() => () => debugGeometry.dispose(), [debugGeometry])
+  useEffect(() => {
+    let cancelled = false
+    // Instance transforms are populated in child passive effects. Publishing
+    // in a microtask puts the warm-up after the entire committed effect tree,
+    // rather than merely after the worker promise resolves.
+    queueMicrotask(() => {
+      if (!cancelled) onRenderResourcesReady?.()
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    debugGeometry,
+    debugMaterial,
+    lod,
+    onRenderResourcesReady,
+    showFoliage,
+    textures,
+    topologyMaterial,
+    woodGeometry,
+    woodMaterial,
+  ])
 
   return (
     <group name="procedural-tree-asset">
@@ -275,10 +340,9 @@ function createFoliageMaterial(card: LeafCardTextures | undefined) {
     vertexColors: true,
     map: card.map,
     normalMap: card.normalMap,
-    // Light. The card's own bowed geometry already fans the normals across the
-    // spray; stacking a strong per-leaf tangent normal on top of that turns
-    // every blade into its own hard-lit facet and the crown into glitter.
-    normalScale: new Vector2(0.4, 0.4),
+    // Enough tangent relief to separate the blades within a spray, while the
+    // bowed card still provides the branchlet-scale change in orientation.
+    normalScale: new Vector2(0.42, 0.42),
     roughness: 1,
     metalness: 0,
     side: DoubleSide,
@@ -289,35 +353,17 @@ function createFoliageMaterial(card: LeafCardTextures | undefined) {
     alphaToCoverage: true,
     depthWrite: true,
   })
-  const sun = vec3(...SUN_DIRECTION)
   // Roughness in R, blade translucency in G. Reading roughness from a channel
   // rather than a whole second texture keeps the leaf atlas to three maps.
-  // Floored high. Leaves have a waxy cuticle, not a varnish, and a low floor
-  // put a hard specular sheen on every blade that read as wet plastic.
-  material.roughnessNode = texture(card.surfaceMap).r.mul(0.34).add(0.62)
+  // Use the authored cuticle response directly. The previous remap forced
+  // every value into 0.8–0.95 and made living leaves read as dry construction
+  // paper. Clamping only guards corrupt/legacy atlases.
+  material.roughnessNode = texture(card.surfaceMap).r.clamp(0.38, 0.76)
 
-  // Leaves are thin and they transmit. A standard opaque BRDF gives the side of
-  // the crown facing away from the sun nothing but the ambient term, which is
-  // why the back of the tree came out as a flat, intensely dark green slab —
-  // physically the correct answer for a rock, and completely wrong for a
-  // hundred thousand translucent blades stacked a few centimetres apart.
-  //
-  // Two terms fix it, and both are cheap. A wrapped diffuse lifts the shaded
-  // hemisphere instead of letting it fall to zero at the terminator, and a
-  // view-dependent transmission adds the green glow you get looking through a
-  // canopy toward the sun. Together they keep the shaded side coloured and
-  // luminous rather than black.
-  const albedo = texture(card.map).rgb
-  const transmission = texture(card.surfaceMap).g
-  const facing = normalWorld.dot(sun)
-  const wrapped = facing.mul(0.5).add(0.5).pow(1.4)
-  const throughLeaf = positionWorld.sub(cameraPosition).normalize().dot(sun)
-    .max(0).pow(2.2)
-  material.emissiveNode = albedo.mul(
-    wrapped.mul(LEAF_AMBIENT_WRAP).add(
-      transmission.mul(throughLeaf).mul(LEAF_TRANSMISSION),
-    ),
-  )
+  // Deliberately no emissive foliage term. The old wrapped-light/transmission
+  // approximation ignored sun visibility, so leaves continued to glow inside
+  // the shadowed crown. Until transmission can consume the actual direct-light
+  // shadow factor, ordinary lit double-sided foliage is the honest result.
   return material
 }
 

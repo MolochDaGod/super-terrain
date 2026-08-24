@@ -40,6 +40,7 @@ export function bakeLeafSpray(
   const height = new Float32Array(pixels)
   const alpha = new Float32Array(pixels)
   const tint = new Float32Array(pixels * 3)
+  const surfaceRoughness = new Float32Array(pixels)
   const translucency = new Float32Array(pixels)
   const pine = species === 'windswept-pine'
 
@@ -47,9 +48,28 @@ export function bakeLeafSpray(
   // rather than on whichever happens to have the taller surface relief.
   const depthBuffer = new Float32Array(pixels)
   const { leaves, shoots } = layoutSpray(seed + variant * 7717, variant, pine)
-  drawShoots(shoots, alpha, height, tint, translucency, depthBuffer, size)
+  drawShoots(
+    shoots,
+    alpha,
+    height,
+    tint,
+    surfaceRoughness,
+    translucency,
+    depthBuffer,
+    size,
+  )
   for (const leaf of leaves) {
-    drawLeaf(leaf, alpha, height, tint, translucency, depthBuffer, size, pine)
+    drawLeaf(
+      leaf,
+      alpha,
+      height,
+      tint,
+      surfaceRoughness,
+      translucency,
+      depthBuffer,
+      size,
+      pine,
+    )
   }
 
   // Push every channel outward into the transparent texels before anything is
@@ -61,6 +81,7 @@ export function bakeLeafSpray(
   // game-foliage atlas from across a field.
   dilate(tint, alpha, size, 8)
   dilateChannel(height, alpha, size, 8)
+  dilateChannel(surfaceRoughness, alpha, size, 8)
   dilateChannel(translucency, alpha, size, 8)
 
   for (let index = 0; index < pixels; index += 1) {
@@ -71,9 +92,10 @@ export function bakeLeafSpray(
     albedo[offset + 1] = toByte(tint[index * 3 + 1]!)
     albedo[offset + 2] = toByte(tint[index * 3 + 2]!)
     albedo[offset + 3] = byteAlpha
-    // Waxy cuticle on the lit face, matte where the blade is thin and veined.
-    const rough = clamp01(0.52 + (1 - height[index]!) * 0.3)
-    roughness[offset] = toByte(rough)
+    // This is a material property, not another height-derived shadow. The
+    // blade rasteriser writes a restrained waxy-leaf range and lets veins and
+    // dry margins become only slightly more matte.
+    roughness[offset] = toByte(surfaceRoughness[index]!)
     roughness[offset + 1] = toByte(translucency[index]!)
     roughness[offset + 2] = 0
     roughness[offset + 3] = byteAlpha
@@ -92,9 +114,11 @@ interface LeafPlacement {
   width: number
   /** Foreshortening from the leaf's own tilt out of the card plane. */
   squash: number
-  shade: number
-  hue: number
-  /** Higher is nearer the viewer; decides overdraw and how shaded a blade is. */
+  /** Per-leaf chlorophyll density: restrained biological, not light, variation. */
+  pigment: number
+  /** Stable variation shared by outline, maturity, and local pigment noise. */
+  variation: number
+  /** Higher is nearer the viewer and decides overdraw only. */
   depth: number
   curl: number
 }
@@ -288,8 +312,8 @@ function layoutSpray(
         // a span of a few texels and turned the whole outline into fine teeth.
         width: scale * (pine ? 0.06 : 0.29 + random() * 0.05),
         squash: 0.62 + random() * 0.38,
-        shade: 0.82 + random() * 0.3,
-        hue: random(),
+        pigment: 0.93 + random() * 0.13,
+        variation: random(),
         depth: random(),
         curl: (random() - 0.5) * 1.5,
       })
@@ -306,6 +330,7 @@ function drawShoots(
   alpha: Float32Array,
   height: Float32Array,
   tint: Float32Array,
+  surfaceRoughness: Float32Array,
   translucency: Float32Array,
   depthBuffer: Float32Array,
   size: number,
@@ -328,14 +353,16 @@ function drawShoots(
           if (coverage <= 0.02) continue
           const index = y * size + x
           if (depthBuffer[index]! > 0.5) continue
-          const shading = 0.55 + 0.45 * Math.sqrt(Math.max(0, 1 - distance * distance))
           alpha[index] = Math.max(alpha[index]!, coverage)
           height[index] = Math.max(height[index]!, coverage * 0.8)
           depthBuffer[index] = 0.5
+          surfaceRoughness[index] = 0.72
           translucency[index] = 0
-          tint[index * 3] = 0.29 * shading
-          tint[index * 3 + 1] = 0.23 * shading
-          tint[index * 3 + 2] = 0.15 * shading
+          // The cylindrical relief belongs in the normal map. Baking its light
+          // side and dark side into albedo would double-light every twig.
+          tint[index * 3] = 0.235
+          tint[index * 3 + 1] = 0.195
+          tint[index * 3 + 2] = 0.125
         }
       }
     }
@@ -351,6 +378,7 @@ function drawLeaf(
   alpha: Float32Array,
   height: Float32Array,
   tint: Float32Array,
+  surfaceRoughness: Float32Array,
   translucency: Float32Array,
   depthBuffer: Float32Array,
   size: number,
@@ -365,9 +393,10 @@ function drawLeaf(
   const maxX = Math.min(size - 1, Math.ceil(originX + reach * 1.1))
   const minY = Math.max(0, Math.floor(originY - reach * 1.1))
   const maxY = Math.min(size - 1, Math.ceil(originY + reach * 1.1))
-  // Depth decides both overdraw order and how much the blade is shaded by the
-  // leaves in front of it.
-  const depthShade = mix(0.46, 1, leaf.depth)
+  // Albedo is calibrated as the leaf's front-face reflectance proxy. Lighting,
+  // card overlap, and crown occlusion must happen at render time; multiplying
+  // colour by atlas depth here was permanent double-shading.
+  const baseColour = leafBaseColour(pine, leaf.variation, leaf.pigment)
 
   for (let y = minY; y <= maxY; y += 1) {
     for (let x = minX; x <= maxX; x += 1) {
@@ -378,7 +407,9 @@ function drawLeaf(
       const v = (-dx * sine + dy * cosine) / (reach * leaf.width / leaf.length) *
         (1 / Math.max(0.3, leaf.squash))
       if (u < 0 || u > 1) continue
-      const halfWidth = pine ? pineBlade(u) : oakBlade(u, leaf.hue, Math.sign(v) || 1)
+      const halfWidth = pine
+        ? pineBlade(u)
+        : oakBlade(u, leaf.variation, Math.sign(v) || 1)
       if (halfWidth <= 0) continue
       const edge = (halfWidth - Math.abs(v)) * reach * 0.5
       // A two-and-a-half-texel ramp rather than a one-texel one. A near-1-bit
@@ -402,35 +433,77 @@ function drawLeaf(
       if (depth < depthBuffer[index]! - 0.02) continue
       depthBuffer[index] = depth
 
-      const flush = valueNoise(u * 3.2 + leaf.hue * 9, across * 2.4, 977) - 0.5
-      // Autumn-ready base: a green oak leaf still carries carotenoid warmth at
-      // the margins and along the veins, and a flat green never looks alive.
+      const flush = valueNoise(u * 3.2 + leaf.variation * 9, across * 2.4, 977) - 0.5
+      // Pigment varies at several biological scales without pretending to be
+      // light: maturity changes the whole blade, this low-frequency field
+      // breaks up chlorophyll locally, and margins/veins shift by a few percent.
       const margin = smooth01((across - 0.62) * 3.4)
-      // The vein network has to exist in the *albedo*, not only in the height
-      // field: veins are visibly paler and yellower than the blade between
-      // them, and without that break a leaf is a flat fill that no lighting
-      // model can rescue.
-      const veinLight = midrib * 0.16 + lateral * 0.09
-      const shading = leaf.shade * depthShade *
-        (0.86 + 0.14 * Math.sqrt(Math.max(0, 1 - across * across)))
-      const red = (pine ? 0.2 : 0.3 + margin * 0.15 + flush * 0.07 + veinLight) *
-        shading
-      const green = (pine ? 0.36 : 0.5 - margin * 0.05 + flush * 0.05 +
-        veinLight * 0.72) * shading
-      const blue = (pine ? 0.22 : 0.14 + flush * 0.03 + veinLight * 0.3) * shading
+      const veinMask = pine
+        ? midrib * 0.42
+        : clamp01(midrib * 0.72 + lateral * 0.34)
+      const mottle = flush * 0.055
+      const marginWarmth = pine ? margin * 0.002 : margin * 0.009
+      const red = baseColour[0] * (1 + mottle * 0.3) +
+        marginWarmth + veinMask * (pine ? 0.008 : 0.022)
+      const green = baseColour[1] * (1 + mottle) -
+        marginWarmth * 0.45 + veinMask * (pine ? 0.012 : 0.027)
+      const blue = baseColour[2] * (1 + mottle * 0.25) -
+        marginWarmth * 0.2 + veinMask * (pine ? 0.006 : 0.01)
+
+      // Dry margins and raised veins scatter a little more broadly than the
+      // waxy blade. Keep the interval narrow: very low reads as wet plastic,
+      // while the old height-derived 0.52..0.82 range read chalky.
+      const cuticleNoise = (valueNoise(u * 5.7, across * 4.1, 1481) - 0.5) * 0.035
+      const localRoughness = clamp01(
+        (pine ? 0.47 : 0.52) + veinMask * 0.075 + margin * 0.035 + cuticleNoise,
+      )
 
       alpha[index] = Math.max(alpha[index]!, coverage)
       height[index] = blade * coverage
-      tint[index * 3] = mix(tint[index * 3]!, red, coverage)
-      tint[index * 3 + 1] = mix(tint[index * 3 + 1]!, green, coverage)
-      tint[index * 3 + 2] = mix(tint[index * 3 + 2]!, blue, coverage)
+      // Albedo and surface properties are straight-alpha values. Premultiplying
+      // them by coverage makes every antialiased contour dark and glossy after
+      // mip filtering — precisely the black fringe cutout foliage is prone to.
+      tint[index * 3] = red
+      tint[index * 3 + 1] = green
+      tint[index * 3 + 2] = blue
+      surfaceRoughness[index] = localRoughness
       // Thin between the veins, opaque along them: that contrast is what makes
       // a backlit canopy glow in a lace pattern rather than as a flat panel.
       translucency[index] = clamp01(
-        (1 - midrib * 0.85 - lateral * 0.35) * mix(0.55, 1, leaf.depth),
-      ) * coverage
+        (pine ? 0.72 : 0.88) - midrib * 0.58 - lateral * (pine ? 0.08 : 0.25),
+      )
     }
   }
+}
+
+/**
+ * Dry, front-face foliage reflectance encoded for the sRGB albedo texture.
+ *
+ * The palette stays in healthy daylight olive territory. Saturated lime is a
+ * lighting event produced by sun transmission, not the intrinsic colour of a
+ * mature leaf. `variation` gives a small population of brighter young and warm
+ * weathered blades, while `pigment` supplies restrained chlorophyll variation.
+ */
+function leafBaseColour(
+  pine: boolean,
+  variation: number,
+  pigment: number,
+): readonly [number, number, number] {
+  if (pine) {
+    const young = smooth01((0.18 - variation) / 0.18)
+    const weathered = smooth01((variation - 0.82) / 0.18)
+    const red = mix(mix(0.18, 0.21, young), 0.205, weathered) * pigment
+    const green = mix(mix(0.295, 0.345, young), 0.265, weathered) * pigment
+    const blue = mix(mix(0.205, 0.225, young), 0.19, weathered) * pigment
+    return [red, green, blue]
+  }
+
+  const young = smooth01((0.16 - variation) / 0.16)
+  const weathered = smooth01((variation - 0.8) / 0.2)
+  const red = mix(mix(0.225, 0.27, young), 0.275, weathered) * pigment
+  const green = mix(mix(0.355, 0.435, young), 0.33, weathered) * pigment
+  const blue = mix(mix(0.125, 0.155, young), 0.115, weathered) * pigment
+  return [red, green, blue]
 }
 
 /**
@@ -620,6 +693,7 @@ export function bakeSingleBlade(
 ): Uint8Array {
   const rgba = new Uint8Array(size * size * 4)
   const pine = species === 'windswept-pine'
+  const bladeColour = leafBaseColour(pine, variation, 1)
   for (let y = 0; y < size; y += 1) {
     const u = 1 - (y + 0.5) / size
     for (let x = 0; x < size; x += 1) {
@@ -627,9 +701,9 @@ export function bakeSingleBlade(
       const halfWidth = pine ? pineBlade(u) : oakBlade(u, variation, Math.sign(across) || 1)
       const inside = Math.abs(across) <= halfWidth
       const offset = (y * size + x) * 4
-      rgba[offset] = inside ? 60 : 150
-      rgba[offset + 1] = inside ? 120 : 150
-      rgba[offset + 2] = inside ? 40 : 150
+      rgba[offset] = inside ? toByte(bladeColour[0]) : 150
+      rgba[offset + 1] = inside ? toByte(bladeColour[1]) : 150
+      rgba[offset + 2] = inside ? toByte(bladeColour[2]) : 150
       rgba[offset + 3] = 255
     }
   }
