@@ -10,9 +10,10 @@ import { currentViewUrlState } from './viewUrlState'
 
 interface WebGpuCanvasProps extends PropsWithChildren {
   dpr: number
+  cameraPosition?: [number, number, number]
 }
 
-export function WebGpuCanvas({ children, dpr }: WebGpuCanvasProps) {
+export function WebGpuCanvas({ children, dpr, cameraPosition }: WebGpuCanvasProps) {
   const rendererPromise = useRef<Promise<WebGPURenderer> | null>(null)
   const initialDpr = useRef(dpr)
   const view = useRef(currentViewUrlState())
@@ -30,7 +31,7 @@ export function WebGpuCanvas({ children, dpr }: WebGpuCanvasProps) {
         createRenderer(defaults.canvas as HTMLCanvasElement)
       }
       camera={{
-        position: view.current.position ?? [0, 175, -170],
+        position: cameraPosition ?? view.current.position ?? [0, 175, -170],
         fov: view.current.fov ?? 50,
         near: 0.5,
         far: 80_000,

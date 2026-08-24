@@ -56,6 +56,7 @@ import {
   saveWorld,
   toggleSelectionVisible,
 } from './editorActions'
+import { WorkspaceToggle, type Workspace } from './WorkspaceToggle'
 
 const TRANSFORM_LABELS: {
   value: TransformMode
@@ -77,6 +78,8 @@ const BENCHMARKS: { id: BenchmarkScenario; label: string }[] = [
 interface EditorMenuBarProps {
   terrain: WorldTerrain
   editor: EditorStore
+  workspace: Workspace
+  onWorkspaceChange: (workspace: Workspace) => void
 }
 
 /**
@@ -85,7 +88,12 @@ interface EditorMenuBarProps {
  * right as icon-and-number chips, since a menu bar is a place for verbs and a
  * readout only needs to be legible at a glance.
  */
-export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
+export function EditorMenuBar({
+  terrain,
+  editor,
+  workspace,
+  onWorkspaceChange,
+}: EditorMenuBarProps) {
   const [exportingGodot, setExportingGodot] = useState(false)
   const snapshot = useEditorSnapshot(editor)
   const selection = currentSelection(terrain, snapshot)
@@ -446,6 +454,7 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
         </Menu>
       </MenuBar>
 
+      <WorkspaceToggle workspace={workspace} onChange={onWorkspaceChange} />
       <TelemetryChips terrain={terrain} editor={editor} />
     </header>
   )
@@ -458,7 +467,7 @@ export function EditorMenuBar({ terrain, editor }: EditorMenuBarProps) {
 const TelemetryChips = memo(function TelemetryChips({
   terrain,
   editor,
-}: EditorMenuBarProps) {
+}: Pick<EditorMenuBarProps, 'terrain' | 'editor'>) {
   const metrics = useTerrainMetrics(terrain)
   const snapshot = useEditorSnapshot(editor)
   const targetFrameMs = 1000 / terrain.config.targetFps

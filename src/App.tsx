@@ -15,6 +15,7 @@ import { StatusBar } from './components/editor/StatusBar'
 import { Toolbar } from './components/editor/Toolbar'
 import { WelcomeSplash } from './components/editor/WelcomeSplash'
 import { hasSeenWelcome } from './components/editor/welcomeSeen'
+import type { Workspace } from './components/editor/WorkspaceToggle'
 import { WorldTerrain } from './terrain/WorldTerrain'
 import {
   loadWorldRecipe,
@@ -27,10 +28,13 @@ import { TerrainScene } from './terrain/react/TerrainScene'
 import { WebGpuCanvas } from './terrain/react/WebGpuCanvas'
 import { useEditorSnapshot } from './terrain/react/hooks'
 import { currentViewUrlState } from './terrain/react/viewUrlState'
+import { TreeMenuBar } from './tree/TreeMenuBar'
+import { TreeScene } from './tree/TreeScene'
 
 function App() {
   const editor = useMemo(() => new EditorStore(), [])
   const view = useMemo(() => currentViewUrlState(), [])
+  const [workspace, setWorkspace] = useState<Workspace>('terrain')
   // The recipe is state because generating a world means building a different
   // WorldTerrain: seed, landform model and authored content are all fixed at
   // construction, and pretending otherwise would leave half the streaming
@@ -61,7 +65,9 @@ function App() {
     [editor],
   )
   const editorSnapshot = useEditorSnapshot(editor)
-  const editorUiVisible = editorSnapshot.uiViewMode === 'editor' && !view.hideUi
+  const terrainWorkspace = workspace === 'terrain'
+  const editorUiVisible =
+    terrainWorkspace && editorSnapshot.uiViewMode === 'editor' && !view.hideUi
   const webGpuAvailable = typeof navigator !== 'undefined' && Boolean(navigator.gpu)
 
   // A URL viewpoint is how the browser review harness reproduces a frame, and
@@ -123,8 +129,16 @@ function App() {
     <main className="relative h-svh w-full overflow-hidden bg-[#07100f] text-white">
       {webGpuAvailable ? (
         <div className="absolute inset-0">
-          <WebGpuCanvas dpr={dprForMode(editorSnapshot.dprMode)}>
-            <TerrainScene key={worldGeneration} terrain={terrain} editor={editor} />
+          <WebGpuCanvas
+            key={workspace}
+            dpr={dprForMode(editorSnapshot.dprMode)}
+            cameraPosition={terrainWorkspace ? undefined : [120, 86, 120]}
+          >
+            {terrainWorkspace ? (
+              <TerrainScene key={worldGeneration} terrain={terrain} editor={editor} />
+            ) : (
+              <TreeScene editor={editor} />
+            )}
           </WebGpuCanvas>
         </div>
       ) : (
@@ -134,7 +148,21 @@ function App() {
       {editorUiVisible && (
         <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_35%,transparent_35%,rgba(2,8,7,0.34)_100%)]" />
       )}
-      {editorUiVisible && <EditorMenuBar terrain={terrain} editor={editor} />}
+      {editorUiVisible && (
+        <EditorMenuBar
+          terrain={terrain}
+          editor={editor}
+          workspace={workspace}
+          onWorkspaceChange={setWorkspace}
+        />
+      )}
+      {!terrainWorkspace && !view.hideUi && (
+        <TreeMenuBar
+          editor={editor}
+          workspace={workspace}
+          onWorkspaceChange={setWorkspace}
+        />
+      )}
       {editorUiVisible && (
         <>
           <Toolbar terrain={terrain} editor={editor} />
@@ -151,8 +179,10 @@ function App() {
       )}
       {/* Shortcuts stay bound in clean mode: Esc and the eye button are how
           the editor comes back once every panel is hidden. */}
-      {!view.hideUi && <EditorShortcuts terrain={terrain} editor={editor} />}
-      {!view.hideUi && editorSnapshot.uiViewMode === 'clean' && (
+      {!view.hideUi && terrainWorkspace && (
+        <EditorShortcuts terrain={terrain} editor={editor} />
+      )}
+      {!view.hideUi && terrainWorkspace && editorSnapshot.uiViewMode === 'clean' && (
         <RestoreUiButton editor={editor} />
       )}
     </main>
