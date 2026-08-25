@@ -1,4 +1,4 @@
-import { byte, clamp01, mix, smooth01 } from '../proceduralNoise'
+import { byte, clamp01, hash2, mix, smooth01 } from '../proceduralNoise'
 import { CoarseField } from '../coarseField'
 import type { BarkFields } from './fields'
 import type { BarkPalette } from './types'
@@ -32,13 +32,25 @@ export function packPalmBarkAlbedo(
       const grain = fields.grain[index]!
       const weather = broad.at(x, y) - 0.5
       const worn = abrasion.at(x, y)
+      // Per-boot identity, exactly as the hardwood pass uses per-scale
+      // identity. A stipe is a stack of severed petiole bases of visibly
+      // different ages, and driving their variation off a random per-boot draw
+      // is what stops the alternative — driving it off the relief — turning
+      // every boot into the same pale tile.
+      const boot = fields.flakeId[index]!
 
       const cutFace = smooth01((exposure - 0.39) * 4.8)
       // Old Phoenix scars are mostly the same grey-brown as the surrounding
       // fibre. Making every boot face a pale tile turns the stipe into a
       // stamped reptile pattern, even when the relief is anatomically right.
+      // The old range was 0.16 to 0.28 of the fissure-to-crown span — a
+      // sixth of the palette, which is why a date palm rendered as one flat
+      // dark brown however good its fibre relief was. Widening it and moving
+      // most of the variation onto the per-boot draw gives the range back
+      // without returning to the stamped-tile look that closed it down.
       const faceWear = clamp01(
-        0.16 + cutFace * (0.12 + weather * 0.055) + (grain - 0.5) * 0.05,
+        0.12 + cutFace * (0.44 + weather * 0.22) + (boot - 0.5) * 0.34 +
+        (grain - 0.5) * 0.12,
       )
       let red = mix(palette.fissure[0], palette.crown[0], faceWear)
       let green = mix(palette.fissure[1], palette.crown[1], faceWear)
@@ -50,7 +62,9 @@ export function packPalmBarkAlbedo(
       green = mix(green, palette.fresh[1], tornFibre * 0.2)
       blue = mix(blue, palette.fresh[2], tornFibre * 0.15)
 
-      const tone = 1 + (grain - 0.5) * 0.16 + (fibre - 0.5) * 0.14 + weather * 0.12
+      // Fibre and texel grit. A stipe read as moulded rubber without them.
+      const tone = (1 + (grain - 0.5) * 0.24 + (fibre - 0.5) * 0.22 + weather * 0.16) *
+        (1 + (hash2(x, y, seed + 6151) - 0.5) * 0.09)
       red *= tone
       green *= tone
       blue *= tone

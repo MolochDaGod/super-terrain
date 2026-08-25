@@ -8,13 +8,17 @@ import { barkProfileFor } from './profiles'
 import type { BarkMaps } from './types'
 
 /**
- * A 1.6-metre tile at this width is about 1.6mm per texel, which is what the
- * closest review distance — a camera two and a half metres from the bole —
- * actually resolves. The map is twice as tall as it is wide because the world
- * tile is twice as tall as it is wide.
+ * A 1.6-metre tile at this width is about 0.8mm per texel, which resolves cork
+ * granulation rather than merely implying it — the difference is visible from
+ * anywhere closer than arm's length and invisible beyond a couple of metres.
+ * The map is twice as tall as it is wide because the world tile is.
+ *
+ * The cost is real and worth stating: the three maps are 96MB per species at
+ * this size against 24MB at 1024, and the bake is four times the work. Halving
+ * both numbers here is the whole change needed to go back.
  */
-const BARK_WIDTH = 1024
-const BARK_HEIGHT = 2048
+const BARK_WIDTH = 2048
+const BARK_HEIGHT = 4096
 
 /**
  * Bakes a deterministic tiling PBR bark set.
@@ -50,7 +54,9 @@ export function bakeBarkMaps(
     packBarkAlbedo(fields, profile.palette, profile, albedo, seed)
   }
   packBarkRoughness(fields, roughness)
-  packBarkAmbientOcclusion(fields.relief, fields.furrow, roughness, width, height)
+  packBarkAmbientOcclusion(
+    fields.relief, fields.furrow, roughness, width, height, fields.lip,
+  )
   barkRelief(fields, normal, profile.normalStrength)
   return {
     albedo,

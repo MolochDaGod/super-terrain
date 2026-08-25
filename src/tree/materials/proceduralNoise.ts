@@ -60,6 +60,50 @@ export function tiledValueNoise(
   )
 }
 
+/**
+ * {@link tiledValueNoise} together with its analytic gradient, into `out`.
+ *
+ * The crease field needs the gradient at every texel to normalise its fold
+ * into a distance, and taking it by finite differences costs three full noise
+ * evaluations — twelve hashes — where the bilinear form gives it exactly from
+ * the four corners already fetched. On a two-megapixel bake across five
+ * octaves that difference is most of a minute.
+ *
+ * Writes `[value, d/dx, d/dy]`; the derivatives are with respect to the cell
+ * coordinates passed in, not to uv.
+ */
+export function tiledValueNoiseGradient(
+  x: number,
+  y: number,
+  seed: number,
+  periodX: number,
+  periodY: number,
+  out: Float64Array,
+): void {
+  const left = Math.floor(x)
+  const top = Math.floor(y)
+  const fx = x - left
+  const fy = y - top
+  const tx = fade(fx)
+  const ty = fade(fy)
+  // d/dt of t*t*(3 - 2t).
+  const dtx = 6 * fx * (1 - fx)
+  const dty = 6 * fy * (1 - fy)
+  const x0 = positiveModulo(left, periodX)
+  const x1 = positiveModulo(left + 1, periodX)
+  const y0 = positiveModulo(top, periodY)
+  const y1 = positiveModulo(top + 1, periodY)
+  const c00 = hash2(x0, y0, seed)
+  const c10 = hash2(x1, y0, seed)
+  const c01 = hash2(x0, y1, seed)
+  const c11 = hash2(x1, y1, seed)
+  const bottom = c00 + (c10 - c00) * tx
+  const topRow = c01 + (c11 - c01) * tx
+  out[0] = bottom + (topRow - bottom) * ty
+  out[1] = ((c10 - c00) + ((c11 - c01) - (c10 - c00)) * ty) * dtx
+  out[2] = (topRow - bottom) * dty
+}
+
 /** Octaves of {@link tiledValueNoise}; each doubles both frequency and period. */
 export function tiledFbm(
   x: number,

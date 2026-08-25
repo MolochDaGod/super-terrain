@@ -33,6 +33,13 @@ export function packBarkAmbientOcclusion(
   target: Uint8Array,
   width: number,
   height: number,
+  /**
+   * Contact shadow under an overlapping scale lip. The horizon sweep cannot
+   * find it: it runs at half resolution over radii of two texels and up, and a
+   * scale lip is a step one texel wide, so the one piece of occlusion that
+   * sits on a hard edge has to be supplied directly.
+   */
+  lips?: Float32Array,
 ): void {
   const half = width >= 64 && height >= 64
   const scale = half ? 2 : 1
@@ -77,7 +84,8 @@ export function packBarkAmbientOcclusion(
       // occlusion that follows a sharp edge, and resampling it would soften
       // every crack rim by a texel.
       const fissure = Math.pow(furrows[index]!, 0.78)
-      target[index * 4] = byte(clamp01(1 - fissure * 0.14 - shelter * 0.5))
+      const lip = lips ? lips[index]! : 0
+      target[index * 4] = byte(clamp01(1 - fissure * 0.14 - shelter * 0.5 - lip * 0.3))
     }
   }
 }

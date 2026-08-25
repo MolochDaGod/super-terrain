@@ -17,6 +17,7 @@
     "capture:build": "vite build --config tools/capture/vite.config.ts",
     "capture": "npm run capture:build && node .capture/capture.mjs",
     "shot": "node tools/browser/shot.mjs",
+    "bark": "bun tools/textures/barkSheet.ts",
     "survey": "vite build --config tools/capture/vite.config.ts --ssr tools/capture/survey.ts --outDir .capture/survey && node .capture/survey/capture.mjs"
   },
   "dependencies": {

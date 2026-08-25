@@ -1,4 +1,4 @@
-import { byte, clamp01, mix, smooth01 } from '../proceduralNoise'
+import { byte, clamp01, hash2, mix, smooth01 } from '../proceduralNoise'
 import { CoarseField } from '../coarseField'
 import type { BarkFields } from './fields'
 import type { BarkPalette, BarkProfile } from './types'
@@ -51,6 +51,9 @@ export function packBarkAlbedo(
       const scar = fields.scar[index]!
       const exposure = fields.exposure[index]!
       const flake = fields.flake[index]!
+      const flakeId = fields.flakeId[index]!
+      const flakeAge = fields.flakeAge[index]!
+      const lip = fields.lip[index]!
 
       // Weathering at three scales. The broad field is what stops one trunk
       // reading as one paint; the mid field gives the patchiness a decade of
@@ -71,8 +74,14 @@ export function packBarkAlbedo(
       // Gentler than the relief. Bark colour does not switch from crown to
       // fissure at the lip of the crack — the weathering fades down the wall,
       // so a hard albedo step there reads as a line drawn along the bottom.
+      // The broad washes are held well below the anatomy they sit on. At half
+      // amplitude they swing the surface across most of its own tonal range,
+      // and since they run at two and nine cycles across the whole tile the
+      // result is soft dark continents drifting over the bark with every trace
+      // of scale detail dissolved inside them — read as damp stains or as a
+      // badly lit render, never as bark. They are a modulation, not a layer.
       const rawWeathering = clamp01(Math.pow(exposure, 0.72) * 1.05 +
-        broad * 0.5 + meso * 0.3)
+        broad * 0.26 + meso * 0.18)
       // Some barks differ radically in relief but only subtly in colour. Live
       // oak is the important case: copying the full depth field into albedo
       // turns every shallow shrinkage fissure into a painted black symbol.
@@ -83,6 +92,51 @@ export function packBarkAlbedo(
       let red = mix(palette.fissure[0], palette.crown[0], weathering)
       let green = mix(palette.fissure[1], palette.crown[1], weathering)
       let blue = mix(palette.fissure[2], palette.crown[2], weathering)
+
+      // --- the per-scale colour mosaic --------------------------------------
+      //
+      // This is the single largest difference between a photograph of bark and
+      // everything above it. Every term so far is a smooth function of depth or
+      // of a broad wash, so the whole trunk comes out as one pigment shaded
+      // light and dark — which is what a turned and stained cylinder looks
+      // like, and is what it read as. In a photograph, two scales sharing an
+      // edge routinely differ by a third in value and visibly in hue: ochre
+      // beside pink-grey beside olive. The variation is *per scale*, it is
+      // discontinuous at the scale boundary, and it is uncorrelated with how
+      // deep that scale happens to sit.
+      //
+      // So it has to come from the scale's own identity rather than from any
+      // field the relief also reads. Two independent hashes per scale: what
+      // tint its cork is, and how long it has been in the weather.
+      const mosaic = profile.mosaicAmount ?? 1
+      const tint = (flakeId - 0.5) * 2
+      // A young scale still has the warm, saturated colour of fresh cork; an
+      // old one has bleached toward the grey crown. Because `flakeAge` is a
+      // separate hash from `flakeId`, a pale scale is not automatically the
+      // warm one, and the mosaic stops reading as a single colour ramp.
+      const aged = smooth01((flakeAge - 0.32) * 1.7)
+      const scaleR = mix(palette.fresh[0], palette.crown[0], aged)
+      const scaleG = mix(palette.fresh[1], palette.crown[1], aged)
+      const scaleB = mix(palette.fresh[2], palette.crown[2], aged)
+      // Weighted by exposure: this is the colour of a scale face, and it must
+      // not paint over the raw tissue at the bottom of a fissure.
+      const faceWeight = mosaic * 0.6 * clamp01(exposure * 1.3);
+      red = mix(red, scaleR, faceWeight)
+      green = mix(green, scaleG, faceWeight)
+      blue = mix(blue, scaleB, faceWeight)
+      // Per-scale value and hue. The hue swing matters as much as the value
+      // one: bark chroma is low, but which direction that low chroma points
+      // changes from scale to scale, and value jitter alone still reads as a
+      // greyscale pattern with a tint applied afterwards.
+      const value = 1 + tint * 0.22 * mosaic * clamp01(exposure * 1.5)
+      // Deliberately about a quarter of the value swing. Bark hue does vary
+      // from scale to scale, but only within a narrow warm band; matching the
+      // two made neighbouring scales read as blue-grey against orange, which
+      // is lichen crust or camouflage rather than cork.
+      const warm = tint * 0.055 * mosaic
+      red *= value * (1 + warm)
+      green *= value * (1 + warm * 0.25)
+      blue *= value * (1 - warm)
 
       // A freshly shed scale exposes lighter, warmer cork underneath. It has
       // to be *lighter* than the weathered crown: a darker target turns every
@@ -107,7 +161,9 @@ export function packBarkAlbedo(
 
       // Rain runs down the fissures and keeps them dark long after the plate
       // faces have dried.
-      const damp = smooth01((moisture - 0.48) * 3) * mix(0.25, 1, furrow)
+      // Damp belongs in the fissures. Letting a quarter of it onto the open
+      // plates put a second soft continent-scale stain over the first.
+      const damp = smooth01((moisture - 0.48) * 3) * mix(0.06, 1, furrow)
       const wetness = damp * (resinous ? 0.16 : 0.3) * fissureColour
       red = mix(red, palette.fissure[0] * 0.86, wetness)
       green = mix(green, palette.fissure[1] * 0.86, wetness)
@@ -149,6 +205,22 @@ export function packBarkAlbedo(
         blue = mix(blue, 0.4, scar * 0.62)
       }
 
+      // The overlapped side of a lip. A real occlusion rather than decoration:
+      // a scale lying under its neighbour carries a hard shadow along the
+      // shared edge and the one on top carries none, and that asymmetry is
+      // most of what makes a surface read as stacked rather than as cracked.
+      // A symmetric groove — which is all a crack network can draw — has it on
+      // both sides and therefore reads as neither.
+      const shade = 1 - lip * 0.3
+      // Texel-scale grit, uncorrelated with everything above on purpose. Cork
+      // is granular right down to the resolution limit; a map that is
+      // perfectly smooth between its features renders as wet plastic however
+      // good the low frequencies are.
+      const grit = shade * (1 + (hash2(x, y, seed + 6151) - 0.5) * 0.1)
+      red *= grit
+      green *= grit
+      blue *= grit
+
       const offset = index * 4
       target[offset] = byte(red)
       target[offset + 1] = byte(green)
@@ -167,9 +239,15 @@ export function packBarkAlbedo(
 export function packBarkRoughness(fields: BarkFields, target: Uint8Array): void {
   const { width, height } = fields
   for (let index = 0; index < width * height; index += 1) {
+    // Roughness varies per scale for the same reason albedo does. A single
+    // roughness for the whole trunk gives every face an identical sheen, and a
+    // uniform sheen is one of the strongest cues that a surface was generated
+    // rather than photographed: real scales differ in how far each has
+    // weathered down from resinous and slightly glossy to chalky and matte.
     const rough = clamp01(
-      0.94 - fields.exposure[index]! * 0.18 - fields.scar[index]! * 0.22 +
+      0.9 - fields.exposure[index]! * 0.16 - fields.scar[index]! * 0.22 +
         fields.furrow[index]! * 0.05 +
+        (fields.flakeAge[index]! - 0.5) * 0.14 +
         (fields.grain[index]! - 0.5) * 0.12 +
         (fields.striation[index]! - 0.5) * 0.06,
     )

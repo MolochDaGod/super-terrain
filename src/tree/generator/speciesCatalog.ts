@@ -168,7 +168,7 @@ export const TREE_SPECIES_DEFINITIONS = [
     rootModel: 'basal-surface',
     organModel: 'scale-foliage',
     trunkProfile: 'conifer-excurrent',
-    barkProfile: 'conifer-plated',
+    barkProfile: 'araucaria-wrinkled',
     foliageProfile: 'araucaria-scale',
   },
   {
@@ -333,7 +333,7 @@ export const TREE_SPECIES_DEFINITIONS = [
     rootModel: 'basal-surface',
     organModel: 'scale-foliage',
     trunkProfile: 'conifer-excurrent',
-    barkProfile: 'conifer-scaled',
+    barkProfile: 'norfolk-peeling',
     foliageProfile: 'araucaria-scale',
   },
   {

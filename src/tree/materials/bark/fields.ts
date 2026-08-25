@@ -3,6 +3,7 @@ import {
   clamp01,
   hash2,
   mix,
+  positiveModulo,
   smooth01,
   tiledFbm,
   tiledValueNoise,
@@ -10,6 +11,8 @@ import {
 import { CoarseField } from '../coarseField'
 import { sampleColumnarFissures } from './structures/columnarFissures'
 import { sampleShallowBlocks } from './structures/shallowBlocks'
+import { emptyFlakeSample, sampleFlakeScales } from './structures/flakeScales'
+import { ridgedFurrow } from './structures/ridgedFurrows'
 import { sampleScars } from './structures/scars'
 import { samplePalmBoots } from './structures/palmBoots'
 import { samplePalmRings } from './structures/palmRings'
@@ -38,6 +41,25 @@ export interface BarkFields {
   exposure: Float32Array
   /** Scale and flake pattern across the plate faces. */
   flake: Float32Array
+  /**
+   * Which scale this texel belongs to, as a stable 0..1 hash.
+   *
+   * This is the field the colour pass needs most and the one the old bake had
+   * no equivalent of. Photographed bark is a mosaic of individually coloured
+   * flakes — ochre next to grey next to olive — and without a per-scale
+   * identity the albedo can only be a smooth function of depth, which is
+   * exactly the one-paint wash that makes a procedural trunk read as moulded
+   * plastic however good its relief is.
+   */
+  flakeId: Float32Array
+  /** How long this scale has been exposed. Independent of `flakeId` on purpose. */
+  flakeAge: Float32Array
+  /**
+   * Contact shadow where a scale is overlapped by a higher neighbour. Only the
+   * overlapped side of a lip carries it, which is what makes the surface read
+   * as stacked rather than as cracked.
+   */
+  lip: Float32Array
   /**
    * Healed wound tissue, 1 on the face of an old branch scar. Kept as its own
    * field so the colour pass can make scar tissue the smoother, paler,
@@ -68,6 +90,32 @@ function down(cyclesU: number, aspect: number, stretch = 1): number {
   return Math.max(1, Math.round((cyclesU * aspect) / stretch))
 }
 
+/** Sample count per axis for the crease quantile solve. */
+const THRESHOLD_SAMPLES = 128
+
+/** The crease level above which `coverage` of the tile's area falls. */
+function solveFurrowThreshold(
+  cyclesU: number,
+  cyclesV: number,
+  seed: number,
+  octaves: number,
+  width: number,
+  coverage: number,
+): number {
+  const samples = new Float32Array(THRESHOLD_SAMPLES * THRESHOLD_SAMPLES)
+  for (let y = 0; y < THRESHOLD_SAMPLES; y += 1) {
+    for (let x = 0; x < THRESHOLD_SAMPLES; x += 1) {
+      samples[y * THRESHOLD_SAMPLES + x] = ridgedFurrow(
+        x / THRESHOLD_SAMPLES, y / THRESHOLD_SAMPLES,
+        cyclesU, cyclesV, seed, octaves, width,
+      )
+    }
+  }
+  samples.sort()
+  const rank = Math.round((1 - clamp01(coverage)) * (samples.length - 1))
+  return samples[Math.min(samples.length - 1, Math.max(0, rank))]!
+}
+
 export function bakeBarkFields(
   seed: number,
   profile: BarkProfile,
@@ -83,10 +131,21 @@ export function bakeBarkFields(
     furrow: new Float32Array(pixels),
     exposure: new Float32Array(pixels),
     flake: new Float32Array(pixels),
+    flakeId: new Float32Array(pixels),
+    flakeAge: new Float32Array(pixels),
+    lip: new Float32Array(pixels),
     scar: new Float32Array(pixels),
     grain: new Float32Array(pixels),
     striation: new Float32Array(pixels),
   }
+  // Cork granulation and fibre are genuinely sub-millimetre, so the bands that
+  // carry them are capped by the texel grid rather than by the material: at
+  // 1024 across a 1.6-metre tile there is no point asking for anything finer
+  // than about eighty cycles, and asking anyway produces the woven lattice
+  // artefact rather than detail. Scaling them with the map means a higher
+  // resolution buys actual surface instead of a smooth interpolation of the
+  // same surface.
+  const detail = width / 1024
   const noise = (u: number, v: number, cyclesU: number, cyclesV: number, key: number) =>
     tiledValueNoise(u * cyclesU, v * cyclesV, key, cyclesU, cyclesV)
   const fbm = (
@@ -106,6 +165,9 @@ export function bakeBarkFields(
   const plateField = CoarseField.fbm(
     width, height, 13, down(13, aspect, 2.4), seed + 173, 4, 3,
   )
+  const grainField = CoarseField.fbm(
+    width, height, 30, down(30, aspect, 1.5), seed + 211, 4, 2,
+  )
   // How vigorously the bark is fissuring, as a broad field over the bole.
   // Without it every plate boundary is cut to the same depth and the network
   // reads as basketwork or corduroy — a regular lattice of identical dark
@@ -114,12 +176,17 @@ export function bakeBarkFields(
   const vigourField = CoarseField.fbm(
     width, height, 3, down(3, aspect, 1.7), seed + 331, 4, 8,
   )
-  // The two subordinate crack networks at half resolution. A cell-border field
-  // resampled this way softens its crack by about a texel, which matters for
-  // the plate network that carries the whole read and does not for these two:
-  // one splits a plate and the other is shallow scale relief. Each was a
-  // nine-cell search with two hashes per cell, and between them they were a
-  // third of the field pass.
+  // How far open the fissure is at this point along its own length.
+  //
+  // Without it a crease network of constant width and constant depth comes out
+  // as inked outlines — a jigsaw drawn on the bark rather than cut into it —
+  // because the one thing every real crack does is vary: it pinches shut,
+  // widens into a gape, and simply stops. This runs several times finer than
+  // the vigour wash so the variation happens *within* one fissure rather than
+  // between one region and the next.
+  const openingField = CoarseField.fbm(
+    width, height, 11, down(11, aspect, 2.6), seed + 887, 4, 4,
+  )
   const [, linkY] = profile.linkFrequency
   const across = profile.columns
   const [minorX, minorY] = profile.minorFrequency
@@ -129,24 +196,106 @@ export function bakeBarkFields(
   // and a threshold a couple of texels wide inside those cells comes out as a
   // black hairline rather than as a crack with any width to it.
   const subAcross = Math.max(2, Math.round(across * 1.5))
-  const structuredBark = profile.structure === 'columnar-fissures' ||
-    profile.structure === 'shallow-blocks' || profile.structure === 'palm-boots' ||
-    profile.structure === 'palm-rings'
-  const subField = structuredBark
-    ? undefined
-    : new CoarseField(width, height, 2, (u, v) => {
+  const structure = profile.structure ?? 'scaled-plates'
+  const columnarStructure = structure === 'columnar-fissures'
+  const shallowBlockStructure = structure === 'shallow-blocks'
+  const palmBootStructure = structure === 'palm-boots'
+  const palmRingStructure = structure === 'palm-rings'
+  const palmStructure = palmBootStructure || palmRingStructure
+  const scaledPlates = structure === 'scaled-plates'
+  const ridgedStructure = structure === 'ridged-furrows'
+  const paperyStructure = structure === 'papery-strips'
+  const mottledStructure = structure === 'mottled-smooth'
+  // Structures that carry their own boundary field and must not be warped as
+  // hard as a free-floating cell network.
+  const structuredBark = columnarStructure || shallowBlockStructure || palmStructure
+  const legacyCells = !structuredBark && !scaledPlates && !ridgedStructure &&
+    !paperyStructure && !mottledStructure
+  const subField = legacyCells
+    ? new CoarseField(width, height, 2, (u, v) => {
       const warp = (tiledValueNoise(u * 2, v * 4, seed + 11, 2, 4) - 0.5) * 0.2
       return cellularBorder(
         (u + warp) * subAcross + 1.9, v * linkY - 4.1, seed + 131,
         subAcross, linkY, 0.66,
       )
     })
-  const flakeBorderField = new CoarseField(width, height, 2, (u, v) => {
+    : undefined
+  // Only the structures that actually read these pay for them. The scale-based
+  // families supply their own fine tier and were evaluating a nine-cell border
+  // search, a lenticel octave and two coarse washes per texel purely to
+  // multiply the results by zero — about a third of the field pass.
+  const legacyFlakes = legacyCells || columnarStructure || shallowBlockStructure ||
+    palmStructure
+  const flakeBorderField = !legacyFlakes ? undefined : new CoarseField(width, height, 2, (u, v) => {
     const warp = (tiledValueNoise(u * 2, v * 4, seed + 11, 2, 4) - 0.5) * 0.2
     return cellularBorder(
       (u + warp) * minorX + 3.1, v * minorY - 1.7, seed + 109, minorX, minorY, 0.46,
     )
   })
+
+  // --- scale tiers -------------------------------------------------------
+  //
+  // Cell counts for the overlapping-scale field. A bark surface is legible at
+  // three ranges at once and the eye checks all three: the metre-scale plate
+  // grouping, the hand-scale scales themselves, and the thumbnail-scale chips
+  // shedding off their faces. Supplying only one of the three is what makes a
+  // texture read as a pattern rather than as a material, whatever that one
+  // tier is doing.
+  const scaleAspect = profile.scaleAspect ?? profile.plateAspect
+  const scaleColumns = Math.max(2, Math.round(across * (profile.scaleDensity ?? 1.5)))
+  const scaleRows = Math.max(2, Math.round((scaleColumns * aspect) / scaleAspect))
+  const chipColumns = Math.max(3, Math.round(scaleColumns * 2.7))
+  const chipRows = Math.max(3, Math.round((chipColumns * aspect) / Math.max(1, scaleAspect * 0.8)))
+  const along0 = Math.max(1, Math.round((across * aspect) / profile.plateAspect))
+  const granuleCycles = Math.max(24, Math.round(82 * detail))
+  const striationCycles = Math.max(24, Math.round(96 * detail))
+  const scaleSample = emptyFlakeSample()
+  const chipSample = emptyFlakeSample()
+  const scarAmount = profile.scarAmount ?? 0
+  // Scars are the lowest-frequency feature in the whole bake — three sites
+  // across a 1.6-metre tile — and the most expensive thing evaluated per texel:
+  // a nine-cell search with six hashes a cell, for a feature whose smallest
+  // detail is a hundred texels across. On the lattice it costs a sixteenth of
+  // that and nothing about it is resolvable at full rate anyway.
+  const scarRows = Math.max(2, Math.round((3 * aspect) / 1.4))
+  const scarTissue = scarAmount > 0
+    ? new CoarseField(width, height, 4, (u, v) =>
+        sampleScars(u, v, 3, scarRows, seed + 401, scarAmount).tissue)
+    : undefined
+  const scarRelief = scarAmount > 0
+    ? new CoarseField(width, height, 4, (u, v) =>
+        sampleScars(u, v, 3, scarRows, seed + 401, scarAmount).relief)
+    : undefined
+  const scaleLift = profile.scaleLift ?? 0.5
+  // The third tier is a chip shedding off the face of a scale, so it only has
+  // somewhere to live if the scales are coarse enough to have a face. On a
+  // finely scaled bark it lands at the same size as the scales themselves and
+  // the two tiers average into gravel.
+  const chipStrength = profile.chipAmount ?? 1
+  // Furrow network frequency for the ridged structures, deliberately below the
+  // scale tier: the furrows group the scales, they do not outline them.
+  const furrowColumns = Math.max(2, Math.round(across * 0.5))
+  const furrowRows = Math.max(1, Math.round((furrowColumns * aspect) / Math.max(1, profile.plateAspect)))
+  const creaseColumns = ridgedStructure ? furrowColumns : Math.max(2, across)
+  const creaseRows = ridgedStructure ? Math.max(1, furrowRows) : Math.max(1, along0)
+  const creaseOctaves = ridgedStructure ? 5 : 4
+  // Crease width in cell units. A fibrous bark's furrows are wide troughs; a
+  // plated hardwood's are narrow tears between the plates.
+  const creaseWidth = profile.furrowWidth ?? (ridgedStructure ? 0.34 : 0.2)
+  // Solve the threshold from the field's own distribution instead of authoring
+  // it as a raw level.
+  //
+  // A ridged multifractal's distribution moves with its octave count and its
+  // sharpening exponent, so a hand-picked level silently means a different
+  // amount of bark every time either is touched — which is how oak came to be
+  // forty per cent furrow by area, an unbroken smear of dark cloud rather than
+  // a network of cracks, from a number that had looked reasonable when it was
+  // written. Sixteen thousand samples is nothing beside two million texels and
+  // it makes `furrowCoverage` mean the fraction it claims to.
+  const creaseThreshold = solveFurrowThreshold(
+    creaseColumns, creaseRows, seed + 733, creaseOctaves, creaseWidth,
+    profile.furrowCoverage ?? 0.18,
+  )
 
   for (let y = 0; y < height; y += 1) {
     const v = y / height
@@ -156,50 +305,53 @@ export function bakeBarkFields(
 
       // Warp mostly along the columns so a fissure snakes rather than running
       // as a ruled line. Every primitive is periodic, preserving both seams.
-      const columnarStructure = profile.structure === 'columnar-fissures'
-      const shallowBlockStructure = profile.structure === 'shallow-blocks'
-      const palmBootStructure = profile.structure === 'palm-boots'
-      const palmRingStructure = profile.structure === 'palm-rings'
-      const palmStructure = palmBootStructure || palmRingStructure
       const warpX = structuredBark
         ? (warpCoarseX.at(x, y) - 0.5) * 0.025 + (warpFineX.at(x, y) - 0.5) * 0.018
-        : (warpCoarseX.at(x, y) - 0.5) * 0.26 + (warpFineX.at(x, y) - 0.5) * 0.085
+        : (warpCoarseX.at(x, y) - 0.5) * 0.16 + (warpFineX.at(x, y) - 0.5) * 0.06
       const warpY = (warpCoarseY.at(x, y) - 0.5) * 0.14 + (warpFineY.at(x, y) - 0.5) * 0.04
       const wu = u + warpX
       const wv = v + warpY
 
-      // --- the plate network, which is the whole read of mature bark -------
+      // --- the overlapping scale field, shared by every non-palm structure --
       //
-      // Bark plates are *closed blocks*, and the fissures are the gaps all the
-      // way around each one. Building the network from a one-dimensional cell
-      // field in x cannot express that: every fissure it produces is a single
-      // continuous curve running the entire height of the bole, so the trunk
-      // comes out as a bundle of unbroken vertical ribbons and no amount of
-      // cross-cutting laid on afterwards convincingly breaks them.
-      //
-      // A jittered cell network does express it, and the vertical bias oak
-      // actually has comes for free from running the two axes at different
-      // frequencies: a plate a hand wide and three hands tall is just a cell
-      // that is square in the sampled space and stretched in the world.
+      // Even the smooth barks run it: with the lift near zero and only a
+      // handful of cells across the tile it stops being scales and becomes the
+      // broad shedding patches a gum or a plane tree actually has, and the
+      // colour pass gets a per-patch identity out of the same call.
+      let scales: typeof scaleSample | undefined
+      if (!palmStructure) {
+        sampleFlakeScales(
+          scaleSample, wu, wv, scaleColumns, scaleRows, seed + 617,
+          scaleLift, scaleLift * 0.55,
+        )
+        scales = scaleSample
+      }
+      let chips: typeof chipSample | undefined
+      if (!palmStructure && !mottledStructure && chipStrength > 0) {
+        // Offset, never scaled. Multiplying the uv by 1.7 to decorrelate this
+        // tier from the one above it also multiplied its period, so the chip
+        // field no longer closed on the tile: every bark using it carried a
+        // ruled discontinuity down both seams, which on a trunk is a straight
+        // line running the full height of the bole. A constant offset and a
+        // different seed decorrelate the two tiers just as well and leave the
+        // period alone.
+        sampleFlakeScales(
+          chipSample, wu + 0.31, wv - 0.17, chipColumns, chipRows,
+          seed + 929, scaleLift * 0.42, scaleLift * 0.3,
+        )
+        chips = chipSample
+      }
+
+      // --- the fissure network ---------------------------------------------
       const along = Math.max(1, Math.round((across * aspect) / profile.plateAspect))
-      const columnar = profile.structure === 'columnar-fissures'
+      const columnar = columnarStructure
         ? sampleColumnarFissures(
-            wu,
-            wv,
-            across,
-            profile.plateCyclesY,
-            seed,
-            profile.transverseFissureStrength,
+            wu, wv, across, profile.plateCyclesY, seed, profile.transverseFissureStrength,
           )
         : undefined
       const shallowBlock = shallowBlockStructure
         ? sampleShallowBlocks(
-            wu,
-            wv,
-            across,
-            profile.plateCyclesY,
-            seed,
-            profile.transverseFissureStrength,
+            wu, wv, across, profile.plateCyclesY, seed, profile.transverseFissureStrength,
           )
         : undefined
       const palmBoot = palmBootStructure
@@ -208,176 +360,260 @@ export function bakeBarkFields(
           ? samplePalmRings(wu, wv, across, profile.plateCyclesY, seed)
           : undefined
       const structured = columnar ?? shallowBlock ?? palmBoot
-      const plateBorder = structured?.majorBorder ?? cellularBorder(
-        wu * across + 5.7, wv * along - 2.3, seed + 83, across, along, 0.78,
-      )
-      // Per-plate identity, so no two plates weather or sit at quite the same
-      // height. Quantising the warped position is enough — the network's own
-      // cells are within a texel or two of these bounds.
-      const plateId = structured?.plateIdentity ?? hash2(
-        Math.floor(wu * across), Math.floor(wv * along), seed + 97,
-      )
-      const halfWidth = profile.furrowHalfWidth *
-        (0.6 + plateId * 0.55 + widthField.at(x, y) * 0.6)
-      // A rounded floor rather than a step: `smooth01` of the signed distance
-      // gives a fissure that opens gradually into the plates either side, which
-      // is what a shrinkage crack in a growing cork layer actually looks like.
-      // Widen the ramp well past the crack itself. A fissure whose depth turns
-      // on over a texel or two is a black line; a real one is an open trough
-      // with two lit walls falling into it, and the walls are most of what the
-      // eye uses to read the bark as deep rather than drawn.
       const vigour = clamp01(vigourField.at(x, y) * 1.5 - 0.18)
-      // The wall, not the crack, is what the eye reads as depth. Ramping the
-      // depth over roughly the crack's own width gives a near-vertical wall a
-      // couple of texels across, which lights as a single black line with no
-      // lit side at all — the ink-stripe look, arrived at from the opposite
-      // direction. Opening the ramp to nearly twice the half-width turns it
-      // into a trough with two walls the sun can actually catch.
-      const wall = halfWidth * 1.9
-      const major = smooth01((wall - plateBorder) / wall) * mix(0.22, 1.1, vigour) *
-        (structured?.majorStrength ?? 1)
+
+      let major = 0
+      let plateBorder = 0.5
+      let subBorder = Number.POSITIVE_INFINITY
+      let plateId = scales?.identity ?? 0.5
+      let halfWidth = profile.furrowHalfWidth
+      if (scaledPlates || ridgedStructure) {
+        // A crease field rather than a cell border: it forks, it terminates,
+        // and its width varies along its own length, none of which a Voronoi
+        // edge can do. See the note in the ridged-furrow module.
+        // Four octaves rather than three on the plated barks too. The extra
+        // band is what gives a fissure a ragged edge at the texel scale; with
+        // three the crease crosses its threshold along a smooth curve and the
+        // furrow comes back as an airbrushed smear rather than as a tear.
+        const crease = ridgedFurrow(
+          wu, wv, creaseColumns, creaseRows, seed + 733,
+          creaseOctaves, creaseWidth,
+        )
+        // A fixed ramp rather than one scaled by the remaining headroom. Tying
+        // the wall width to the threshold coupled two things that have nothing
+        // to do with each other: asking for sparser fissures also made every
+        // one of them softer, so the network faded out instead of thinning.
+        const opening = smooth01((openingField.at(x, y) - 0.3) * 2.6)
+        major = smooth01((crease - creaseThreshold) / 0.07) *
+          mix(0.55, 1.25, vigour) * mix(0.12, 1.15, opening)
+        plateBorder = 1 - crease
+      } else if (paperyStructure || mottledStructure) {
+        major = 0
+        plateBorder = 1
+      } else {
+        halfWidth = profile.furrowHalfWidth *
+          (0.6 + plateId * 0.55 + widthField.at(x, y) * 0.6)
+        plateBorder = structured?.majorBorder ?? cellularBorder(
+          wu * across + 5.7, wv * along - 2.3, seed + 83, across, along, 0.78,
+        )
+        plateId = structured?.plateIdentity ?? hash2(
+          Math.floor(wu * across), Math.floor(wv * along), seed + 97,
+        )
+        const wall = halfWidth * 1.9
+        major = smooth01((wall - plateBorder) / wall) * mix(0.22, 1.1, vigour) *
+          (structured?.majorStrength ?? 1)
+        subBorder = structured?.crossBreakBorder ?? subField!.at(x, y)
+      }
 
       // --- secondary cracks subdividing the larger plates -------------------
-      const subBorder = structured?.crossBreakBorder ?? subField!.at(x, y)
       const linkMask = structured
         ? smooth01((linkField.at(x, y) - 0.43) * 4)
         : smooth01((linkField.at(x, y) - 0.28) * 3.2)
-      // Shallower than the plate fissures, which is the correct hierarchy: a
-      // secondary crack splits a plate, it does not open another gap.
       const linkWall = profile.linkHalfWidth * 1.8
-      const link = smooth01((linkWall - subBorder) / linkWall) * linkMask
+      const link = Number.isFinite(subBorder)
+        ? smooth01((linkWall - subBorder) / linkWall) * linkMask
+        : 0
 
       // --- flaking on the plate faces --------------------------------------
-      //
-      // Not cracks. Mature bark sheds in scales, and the shallow steps between
-      // them are what stops a plate face reading as a smooth panel. Kept
-      // shallow on purpose: at fissure depth they compete with the fissures and
-      // the surface turns to gravel.
-      const flakeBorder = flakeBorderField.at(x, y)
-      const flakeMask = smooth01((flakeField.at(x, y) - 0.42) * 4)
-      // Same reasoning as the secondary cracks: a scale edge has to be a step
-      // several texels wide, or it is another hairline.
-      const flake = smooth01((0.2 - flakeBorder) / 0.2) * flakeMask *
-        (structuredBark ? 0.2 : 1)
+      const flake = legacyFlakes
+        ? smooth01((0.2 - flakeBorderField!.at(x, y)) / 0.2) *
+          smooth01((flakeField.at(x, y) - 0.42) * 4) * (structuredBark ? 0.2 : 1)
+        : 0
 
-      // Secondary cracks contribute far less depth than the plate fissures. At
-      // parity they cut a sharp, deep line a few texels wide across every plate
-      // face, and a field of those is the ink-drawn look returning by the back
-      // door — the hierarchy between a gap and a split has to be visible.
       const furrow = clamp01(
         major * profile.furrowStrength + link * (structuredBark ? 0.12 : 0.28),
       )
       fields.furrow[index] = furrow
       fields.flake[index] = flake
 
-      // The plate itself: a broad crown that falls away toward every fissure,
-      // carrying its own coarse and fine roughness.
-      // The plate domes across most of its own width rather than reaching full
-      // height a few texels in and then running dead flat. A flat-topped plate
-      // has no gradient anywhere on it, which is why the faces were reading as
-      // sanded plywood with a wood-grain print on them.
+      // Per-scale identity, and the contact shadow under an overlapping lip.
+      // Blending the two scale tiers keeps a chip's own tint from wiping out
+      // the scale it sits on: a small chip is a lighter or darker patch *of*
+      // its parent scale, not an unrelated colour.
+      // On a smooth bark the shed patches have no edge to speak of — the old
+      // layer thins away rather than lifting off — so a hard step in identity
+      // at every patch boundary draws the polygon outline the structure was
+      // chosen to avoid. Feathering it toward the broad wash keeps the mottling
+      // and loses the tiling.
+      const rawIdentity = scales
+        ? clamp01(mix(scales.identity, chips?.identity ?? 0.5, 0.28 * chipStrength))
+        : plateId
+      fields.flakeId[index] = mottledStructure
+        ? mix(rawIdentity, plateField.at(x, y), 0.45)
+        : rawIdentity
+      fields.flakeAge[index] = scales
+        ? clamp01(mix(scales.age, chips?.age ?? 0.5, 0.3 * chipStrength))
+        : 0.5
+      // A smooth bark's shedding patches have soft, feathered boundaries — the
+      // old layer thins out rather than breaking off along an edge — so the
+      // contact shadow that makes a scaled bark read as stacked would draw a
+      // hard black outline round every patch and turn a beech into camouflage.
+      const lipScale = mottledStructure ? 0.12 : paperyStructure ? 0.3 : 1
+      fields.lip[index] = scales
+        ? clamp01((scales.undercut * 1.5 + (chips?.undercut ?? 0) * 0.8 * chipStrength) * lipScale)
+        : 0
+
       const effectiveMajorBorder = structured
         ? mix(0.5, plateBorder, structured.majorStrength)
         : plateBorder
       const crownBorder = Math.min(effectiveMajorBorder, subBorder)
       const crown = palmStructure
         ? palmBoot!.faceRelief
-        : smooth01(crownBorder / Math.max(1e-3, halfWidth * 2.6)) *
-          mix(0.86, 1.06, plateId)
-      // Plate form and grain both run up the bole, so they keep a deliberate
-      // vertical stretch; the pores and the micro grain do not, so they get the
-      // full aspect correction.
+        : scaledPlates || ridgedStructure || paperyStructure || mottledStructure
+          ? 1 - major
+          : smooth01(crownBorder / Math.max(1e-3, halfWidth * 2.6)) *
+            mix(0.86, 1.06, plateId)
+
       const plate = plateField.at(x, y)
-      const grain = fbm(u, v, 34, down(34, aspect, 1.5), seed + 211, 4)
+      const grain = grainField.at(x, y)
       fields.grain[index] = grain
-      // Raised cork pores, only where the surface is not already broken. These
-      // were running at a quarter of the vertical frequency they needed and
-      // came out as short vertical dashes rather than as pores.
-      // Sparse on mature fissured bark: lenticels are a young-bark feature and
-      // a field of them reads as tick marks scattered over the plates.
-      const lenticel = smooth01(
-        (noise(u, v, 96, down(96, aspect), seed + 251) - 0.9) * 10,
-      ) * (1 - furrow)
+      const lenticel = legacyFlakes || mottledStructure
+        ? smooth01((noise(u, v, 96, down(96, aspect), seed + 251) - 0.9) * 10) *
+          (1 - furrow)
+        : 0
 
-      // Cork granulation at the scale of a texel or two. Without it the plate
-      // faces come back with a normal pointing straight out over almost their
-      // whole area, which is what makes bark render as a smooth turned
-      // cylinder no matter how good the fissure network above it is.
-      // A sharp, shallow crack tier between the fissures and the grain.
-      //
-      // Bark is rough at every scale at once, and a surface carrying only one
-      // feature size reads as moulded however deep that feature is. The
-      // fissures ramp over eight or nine texels because a trough needs walls;
-      // this tier deliberately does the opposite — a texel or two wide and
-      // barely deep — so the close-range surface has something crisp on it
-      // without adding another set of dark lines.
-      const fineBorder = cellularBorder(
-        wu * across * 3.4 + 11.3, wv * along * 3.4 - 6.7, seed + 379,
-        Math.max(2, Math.round(across * 3.4)), Math.max(2, Math.round(along * 3.4)), 0.7,
-      )
-      const fineCrack = smooth01((0.055 - fineBorder) / 0.055) *
-        smooth01((fbm(u, v, 6, down(6, aspect), seed + 383, 3) - 0.34) * 3)
+      // The scale families get their finest tier from the chip pass, so this
+      // extra nine-cell search only earns its cost on the older structures.
+      let fineCrack = 0
+      if (legacyFlakes) {
+        const fineColumns = Math.max(2, Math.round(across * 3.4))
+        const fineRows = Math.max(2, Math.round(along * 3.4))
+        const fineBorder = cellularBorder(
+          wu * fineColumns + 11.3, wv * fineRows - 6.7, seed + 379,
+          fineColumns, fineRows, 0.7,
+        )
+        fineCrack = smooth01((0.055 - fineBorder) / 0.055) *
+          smooth01((fbm(u, v, 6, down(6, aspect), seed + 383, 3) - 0.34) * 3)
+      }
 
-      const granule = fbm(u, v, 300, down(300, aspect), seed + 271, 2)
-      // Cork splits along the grain, so a plate face is covered in fine
-      // vertical striation. It is the one feature that genuinely wants a
-      // strong vertical stretch, and its absence is why plate faces read as
-      // smooth leather rather than as something fibrous and woody.
+      const granule = fbm(u, v, granuleCycles, down(granuleCycles, aspect), seed + 271, 2)
       const palmFibre = palmStructure ? samplePalmFibres(u, v, seed) : undefined
       const striation = palmFibre
         ? clamp01(palmFibre.tone * 0.58 + palmBoot!.faceTone * 0.42)
-        :
-        fbm(u, v, 190, down(190, aspect, 9), seed + 289, 2)
+        : fbm(u, v, striationCycles, down(striationCycles, aspect, 9), seed + 289, 2)
       fields.striation[index] = striation
 
-      // Old branch sockets. A handful of large features that break the
-      // vertical grain and give the bole a history; see the scar module.
-      const scar = sampleScars(
-        wu, wv, 3, Math.max(2, Math.round((3 * aspect) / 1.4)), seed + 401,
-        profile.scarAmount ?? 0,
-      )
-      fields.scar[index] = scar.tissue
+      // --- papery horizontal peel, for birch --------------------------------
+      //
+      // Birch is the one bark whose whole identity is transverse. Running it
+      // through any of the plate structures produces a cracked-mud sheet that
+      // nobody would name as birch, because the structure it needs is not a
+      // network at all: it is a stack of horizontal papery bands that lift at
+      // their lower edge, plus lenticel dashes drawn straight across them.
+      let peel = 0
+      let peelEdge = 0
+      let lenticelDash = 0
+      if (paperyStructure) {
+        const bandCycles = Math.max(4, Math.round(profile.plateCyclesY))
+        const bandWarp = (fbm(u, v, 5, down(5, aspect, 3), seed + 811, 3) - 0.5) * 0.8
+        // The phase offset is not cosmetic. With an integer band count and no
+        // offset, a band boundary lands exactly on v = 0 across the whole
+        // width, so the one edge in the pattern that cannot wave sits precisely
+        // on the tile seam and wraps as a dead straight rule running the full
+        // height of the bole. Shifting the phase moves every boundary off it.
+        const bandPosition = wv * bandCycles + 0.37 + bandWarp
+        const bandStart = Math.floor(bandPosition)
+        // Wrapped, or the band the tile ends on and the band it starts on draw
+        // different hashes and the strip pattern steps at the horizontal seam.
+        const bandIndex = positiveModulo(bandStart, bandCycles)
+        const withinBand = bandPosition - bandStart
+        const bandHeight = hash2(0, bandIndex, seed + 823)
+        peel = bandHeight
+        // The lifted lower lip of each strip: a hard step, not a groove.
+        peelEdge = smooth01((0.13 - withinBand) / 0.13) *
+          smooth01((hash2(1, bandIndex, seed + 827) - 0.25) * 3)
+        // Lenticels: short dark dashes running across the grain, sparse and
+        // strongly elongated in x. They are most of what a viewer identifies
+        // birch by after the colour.
+        const dash = noise(u, v, 26, down(26, aspect, 7), seed + 839)
+        lenticelDash = smooth01((dash - 0.74) * 7)
+      }
+
+      const scarTissueValue = scarTissue ? scarTissue.at(x, y) : 0
+      const scarReliefValue = scarRelief ? scarRelief.at(x, y) : 0
+      fields.scar[index] = scarTissueValue
+
+      // Scales ride on the surface between the fissures, and a fissure that is
+      // itself full of scales is not a fissure — it is a seam of gravel. This
+      // one multiply is what restores the hierarchy the crease field is meant
+      // to impose: the network groups the scales rather than competing with
+      // them, and the trunk reads as fissured from across a clearing again
+      // instead of as an even rubble of chips at every distance.
+      const openBark = 1 - furrow
+      const scaleRelief = (scales?.height ?? 0) * mix(0.25, 1, openBark)
+      const chipRelief = (chips?.height ?? 0) * chipStrength * openBark
 
       fields.relief[index] = clamp01(palmStructure
-        // Lower date-palm boots are healed, split fibre and shallow scar lips,
-        // not inflated cushions. The upper retained bases are represented by
-        // actual crown geometry; the material supplies the aged lower scars.
         ? 0.2 + crown * 0.08 + plate * 0.07 + grain * 0.08 +
           granule * 0.09 + (palmFibre?.relief ?? striation) * 0.48 -
           flake * 0.012 - fineCrack * 0.02 -
           furrow * profile.furrowDepth
+        : mottledStructure
+        // A smooth bark is not flat, but everything on it is broad: shallow
+        // shedding patches and a faint swell over the wood beneath. Any crisp
+        // relief at all reads as damage on a surface the eye expects to be
+        // continuous.
+        ? 0.45 + scaleRelief * 0.16 + plate * 0.06 + grain * 0.05 +
+          granule * 0.035 + striation * 0.02 + lenticel * 0.02
+        : paperyStructure
+        ? 0.44 + peel * 0.05 + peelEdge * 0.16 + grain * 0.05 +
+          granule * 0.04 + lenticelDash * 0.05 + scarReliefValue * 0.18 -
+          furrow * profile.furrowDepth
+        : ridgedStructure
+        // Fibrous bark: the furrows carry nearly all the relief and the faces
+        // between them are covered in vertical fibre rather than in scales.
+        ? 0.34 + scaleRelief * 0.14 + chipRelief * 0.07 + striation * 0.16 +
+          grain * 0.1 + granule * 0.07 + plate * 0.05 -
+          furrow * profile.furrowDepth + scarReliefValue * 0.2
+        : scaledPlates
+        // The scale tiers carry the relief and the furrows group them. This is
+        // the reverse of the old weighting, where a crack network carried
+        // everything and the faces between were left smooth.
+        ? 0.3 + scaleRelief * 0.26 + chipRelief * 0.12 + grain * 0.14 +
+          granule * 0.11 + striation * 0.07 + plate * 0.05 -
+          furrow * profile.furrowDepth + scarReliefValue * 0.22
         : shallowBlockStructure
-        // Live-oak-style shallow blocks need a crisp meso-scale silhouette and
-        // restrained grain. If fine fbm carries more relief than the block
-        // shoulders, the result is blurry camouflage instead of cork plates.
-        ? 0.3 + crown * 0.3 + plate * 0.045 + grain * 0.075 +
+        ? 0.3 + crown * 0.3 + scaleRelief * 0.08 + plate * 0.045 + grain * 0.075 +
           granule * 0.065 + striation * 0.04 + lenticel * 0.025 -
           flake * 0.018 - fineCrack * 0.02 -
-          furrow * profile.furrowDepth + scar.relief * 0.2
+          furrow * profile.furrowDepth + scarReliefValue * 0.2
         : columnarStructure
-        // Hardwood cork is rough across the plate face as well as inside its
-        // fissures. Keeping granular bands stronger than the shallow furrow
-        // prevents a close normal map from becoming a set of routed slots.
-        ? 0.28 + crown * 0.18 + plate * 0.12 + grain * 0.15 +
-          granule * 0.12 + striation * 0.1 + lenticel * 0.04 -
-          flake * 0.025 - fineCrack * 0.055 -
-          furrow * profile.furrowDepth + scar.relief * 0.28
-        // Amplitudes are chosen against the slope each band actually produces,
-        // not by eye: an fbm returns a 0..1 field whose usable swing is about
-        // half its range, so a band's contribution to the normal is roughly
-        // amplitude x pi / wavelength-in-texels x the strength above. The fine
-        // bands need far more amplitude than they look like they should.
-        : 0.24 + crown * 0.42 + plate * 0.2 + grain * 0.1 + scar.relief * 0.28 -
+        // Oak plates are themselves made of scales. Adding the scale tier here
+        // is what stops a plate face between two fissures reading as a sanded
+        // board with a wood-grain print on it.
+        ? 0.28 + crown * 0.16 + scaleRelief * 0.16 + chipRelief * 0.07 +
+          plate * 0.09 + grain * 0.12 +
+          granule * 0.1 + striation * 0.08 + lenticel * 0.03 -
+          flake * 0.025 - fineCrack * 0.05 -
+          furrow * profile.furrowDepth + scarReliefValue * 0.28
+        : 0.24 + crown * 0.42 + plate * 0.2 + grain * 0.1 + scarReliefValue * 0.28 -
           fineCrack * 0.05 +
           granule * 0.06 + striation * 0.05 + lenticel * 0.055 - flake * 0.09 -
           furrow * profile.furrowDepth)
+
       // Exposure is what has been facing the weather: the crowns of the plates,
       // never the insides of the cracks.
       fields.exposure[index] = palmStructure
-        // A healed boot is not a pale tile pasted over the fibre bed. Most of
-        // its contrast comes from roughness and edge relief; only freshly worn
-        // faces lift slightly in colour.
         ? clamp01(0.25 + crown * 0.14 + (palmFibre?.tone ?? 0.5) * 0.2 - furrow * 0.22)
+        : scaledPlates || ridgedStructure
+        // A raised scale is the part that has been in the weather; the ones it
+        // overlaps are sheltered. Reading exposure off the scale relief rather
+        // than off distance-to-a-crack is what lets the colour pass bleach the
+        // proud flakes and leave the sunk ones raw.
+        // Raised to a power so the fissure's shoulder does not bleach into a
+        // soft dark cloud spreading over the plates either side. A linear
+        // `1 - furrow` paints the entire ramp, and since the ramp is much
+        // wider than the crack, the trunk comes back covered in smudges that
+        // read as stains rather than as openings in the bark.
+        ? clamp01((1 - Math.pow(furrow, 1.9)) * (0.18 + scaleRelief * 0.92) -
+          fields.lip[index]! * 0.4)
+        : paperyStructure
+        ? clamp01(0.7 + peel * 0.3 - peelEdge * 0.7 - lenticelDash * 0.6)
+        : mottledStructure
+        // Gently: on a smooth bark this is the difference between one shed
+        // patch and the next, not between a lit crown and the floor of a
+        // fissure, and saturating it posterises the trunk into flat regions.
+        ? clamp01(0.15 + scaleRelief * 0.75)
         : clamp01(crown * (1 - furrow) - flake * 0.35)
     }
   }

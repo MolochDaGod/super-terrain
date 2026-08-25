@@ -21,10 +21,15 @@ export const DATE_PALM_BARK: BarkProfile = {
   mossAmount: 0.008,
   grainAmount: 1.22,
   fissureColorStrength: 0.2,
+  // The palette carried a fissure-to-crown span of about 0.15 in luminance, so
+  // no amount of shading downstream could make the stipe anything but one flat
+  // brown: a full sweep of every weathering term in the packer moved the
+  // surface less than a scale-to-scale step does on a hardwood. A sunlit boot
+  // face and the slot beside it are most of a stop apart in life.
   palette: {
-    fissure: [0.205, 0.17, 0.125],
-    crown: [0.355, 0.295, 0.215],
-    fresh: [0.425, 0.345, 0.235],
+    fissure: [0.085, 0.068, 0.05],
+    crown: [0.52, 0.45, 0.34],
+    fresh: [0.63, 0.545, 0.4],
     lichen: [0.39, 0.385, 0.325],
     moss: [0.12, 0.15, 0.08],
   },

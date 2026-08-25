@@ -32,9 +32,23 @@ export interface BarkPalette {
 /** Material family traits consumed by the bark baker. */
 export interface BarkProfile {
   family: 'fissured-hardwood' | 'resinous-conifer'
-  /** Large-scale surface anatomy; colour and PBR packing remain shared. */
+  /**
+   * Large-scale surface anatomy; colour and PBR packing remain shared.
+   *
+   * These are genuinely different constructions, not one field with different
+   * constants. Running every bark through a single crack-network primitive and
+   * varying its numbers is what collapsed the whole catalogue into two looks —
+   * reptile skin and vertical dashes — with nothing recognisable as a species.
+   *
+   * - `scaled-plates`   overlapping cork scales grouped by shallow creases:
+   *                     pine, spruce, acacia, mangrove, most mature hardwoods.
+   * - `ridged-furrows`  deep vertical fibrous furrows: redwood, sequoia, cedar.
+   * - `papery-strips`   horizontal peeling bands and lenticel dashes: birch.
+   * - `mottled-smooth`  no fissuring at all, broad shedding patches: beech,
+   *                     fig, gum eucalyptus, baobab.
+   */
   structure?: 'cellular-plates' | 'columnar-fissures' | 'shallow-blocks' | 'palm-boots' |
-    'palm-rings'
+    'palm-rings' | 'scaled-plates' | 'ridged-furrows' | 'papery-strips' | 'mottled-smooth'
   /** Plates around the bole's circumference in one tile. */
   columns: number
   /** How many times taller than wide a plate is. */
@@ -71,5 +85,38 @@ export interface BarkProfile {
   grainAmount?: number
   /** How strongly fissure anatomy shifts albedo away from broad weathering. */
   fissureColorStrength?: number
+  /**
+   * Scales per plate cell. Above one the scales are finer than the fissure
+   * network that groups them, which is the normal relationship; at one they
+   * coincide and the surface reads as tiled.
+   */
+  scaleDensity?: number
+  /** How many times taller than wide one scale is; defaults to `plateAspect`. */
+  scaleAspect?: number
+  /**
+   * Spread of the per-scale height offsets. This is the control that decides
+   * whether a bark reads as stacked flakes or as a cracked sheet, so it is the
+   * first thing to reach for on a profile that looks flat.
+   */
+  scaleLift?: number
+  /**
+   * Weight of the third, chip-sized scale tier. Drop it toward zero on a bark
+   * whose scales are already fine: at that point the two tiers are the same
+   * size and averaging them turns the surface into gravel.
+   */
+  chipAmount?: number
+  /** Crease width in cell units; narrower gives sharper, tighter fissures. */
+  furrowWidth?: number
+  /**
+   * Fraction of the tile that is furrow, by area. Solved against the crease
+   * field's own distribution at bake time, so it means the same thing whatever
+   * the octave count and width happen to be.
+   */
+  furrowCoverage?: number
+  /**
+   * How strongly neighbouring scales differ in colour, 0..1+. Only smooth
+   * barks with genuinely uniform cork — beech, birch — want this below one.
+   */
+  mosaicAmount?: number
   palette: BarkPalette
 }
