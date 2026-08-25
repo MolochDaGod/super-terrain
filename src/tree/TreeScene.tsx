@@ -1,15 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { OrbitControls, useTexture } from '@react-three/drei'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { OrbitControls } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
 import {
   Euler,
   MathUtils,
   MeshBasicNodeMaterial,
-  RepeatWrapping,
-  SRGBColorSpace,
   Vector3,
 } from 'three/webgpu'
-import type { Group } from 'three/webgpu'
+import type { Group, Object3D } from 'three/webgpu'
 import { float, smoothstep, uv } from 'three/tsl'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { WorldTerrain } from '../terrain/WorldTerrain'
@@ -17,10 +15,11 @@ import type { EditorStore } from '../terrain/editor/EditorStore'
 import { useEditorSnapshot } from '../terrain/react/hooks'
 import { TerrainEnvironment } from '../terrain/react/TerrainEnvironment'
 import { TerrainRenderPipeline } from '../terrain/react/TerrainRenderPipeline'
-import groundArmUrl from '../terrain/react/assets/rock-ground-arm-1k.jpg'
-import groundMapUrl from '../terrain/react/assets/rock-ground-diffuse-1k.jpg'
-import groundNormalUrl from '../terrain/react/assets/rock-ground-normal-gl-1k.jpg'
+import { FoliageLayer } from '../foliage/react/FoliageLayer'
+import type { FoliageEditorStore } from '../foliage/FoliageEditorStore'
 import { TreeAssetView } from './TreeAssetView'
+import { preloadProceduralTreeTextures } from './materials/proceduralTreeTextureClient'
+import { TreeMaterialPrewarmer } from './materials/TreeMaterialPrewarmer'
 import type { TreeDebugMode, TreeEditorStore } from './TreeEditorStore'
 import {
   DEFAULT_TREE_ENVIRONMENT,
@@ -30,7 +29,6 @@ import {
 import { generateTreeAsset } from './treeGeneratorClient'
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 
-const GROUND_SIZE = 400
 const FLY_SPEED = 12
 const FLY_BOOST_SPEED = 80
 
@@ -38,20 +36,41 @@ const FLY_BOOST_SPEED = 80
 export function TreeScene({
   editor,
   store,
+  foliage,
   terrain,
 }: {
   editor: EditorStore
   store: TreeEditorStore
+  foliage: FoliageEditorStore
   terrain: WorldTerrain
 }) {
   const snapshot = useTreeEditorSnapshot(store)
   const [presented, setPresented] = useState<PreparedTree | null>(null)
   const [prewarmObject, setPrewarmObject] = useState<Group | null>(null)
+  const [warmupObject, setWarmupObject] = useState<
+    ((object: Object3D) => Promise<void>) | undefined
+  >(undefined)
+  const publishWarmup = useCallback(
+    (warm: (object: Object3D) => Promise<void>) => setWarmupObject(() => warm),
+    [],
+  )
   useEffect(() => {
     const revision = snapshot.buildRevision
     if (snapshot.compiledRevision === revision) return
     const abort = new AbortController()
     if (!store.beginBuild(revision)) return
+    // Material generation is independent of the semantic graph. Starting it
+    // beside the geometry worker makes a cold tree pay the slower of the two
+    // jobs instead of their sum; TreeAssetView later joins the same cache entry.
+    void preloadProceduralTreeTextures(
+      snapshot.parameters.species,
+      snapshot.parameters.seed,
+      { signal: abort.signal },
+    ).catch((error: unknown) => {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        console.error('Tree material preload failed', error)
+      }
+    })
     void generateTreeAsset(snapshot.parameters, DEFAULT_TREE_ENVIRONMENT, {
       signal: abort.signal,
       onProgress: (status, amount) => store.reportProgress(revision, status, amount),
@@ -122,7 +141,11 @@ export function TreeScene({
           editor renders with. A tree judged under a different rig is judged
           against a look the game will never show. */}
       <TerrainEnvironment mode="full" config={terrain.config} updatePriority={0} />
-      <TreeReviewGround />
+      {/* The soil under the tree is the foliage layer's ground: it carries the
+          painted species mask and the far-field canopy, so there is only ever
+          one surface at y=0 and nothing to z-fight with. */}
+      <FoliageLayer store={foliage} warmup={warmupObject} />
+      <TreeMaterialPrewarmer warmup={warmupObject} />
       {preparedTrees.map((entry) => (
         <PreparedTreeView
           key={entry.revision}
@@ -146,47 +169,9 @@ export function TreeScene({
         prewarmKey={prewarmKey}
         onPrewarmComplete={finishPrewarm}
         onPrewarmError={failPrewarm}
+        onWarmupReady={publishWarmup}
       />
     </>
-  )
-}
-
-/**
- * A physically scaled neutral substrate for judging roots and contact shadows.
- *
- * The semantic environment solves against y=0, so the rendered soil surface
- * must live there too. The old half-metre offset made correctly buried roots
- * hover as loose bark-coloured shards and hid that error in a flat olive fill.
- */
-function TreeReviewGround() {
-  const [map, normalMap, armMap] = useTexture([
-    groundMapUrl,
-    groundNormalUrl,
-    groundArmUrl,
-  ])
-  useMemo(() => {
-    for (const texture of [map, normalMap, armMap]) {
-      texture.wrapS = RepeatWrapping
-      texture.wrapT = RepeatWrapping
-      texture.repeat.set(80, 80)
-      texture.anisotropy = 8
-      texture.needsUpdate = true
-    }
-    map.colorSpace = SRGBColorSpace
-  }, [armMap, map, normalMap])
-  return (
-    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
-      <planeGeometry args={[GROUND_SIZE, GROUND_SIZE, 1, 1]} />
-      <meshStandardMaterial
-        map={map}
-        normalMap={normalMap}
-        aoMap={armMap}
-        aoMapIntensity={0.5}
-        roughnessMap={armMap}
-        roughness={0.95}
-        metalness={0}
-      />
-    </mesh>
   )
 }
 
@@ -248,28 +233,11 @@ function PreparedTreeView({
  * unlit fragment expression, rather than a screen-space AO pass over the frame.
  */
 function TreeGroundingShadow({ height }: { height: number }) {
-  const material = useMemo(() => {
-    const created = new MeshBasicNodeMaterial({
-      name: 'tree root contact shadow',
-      color: 0x020302,
-      transparent: true,
-      depthWrite: false,
-      depthTest: true,
-      toneMapped: false,
-    })
-    const local = uv().sub(0.5).mul(2)
-    const radiusSquared = local.x.mul(local.x).add(local.y.mul(local.y))
-    created.opacityNode = smoothstep(1, 0, radiusSquared)
-      .pow(1.65)
-      .mul(float(0.24))
-    return created
-  }, [])
-  useEffect(() => () => material.dispose(), [material])
   const radius = Math.max(1.15, height * 0.058)
   return (
     <mesh
       name="root-contact-shadow"
-      material={material}
+      material={TREE_GROUNDING_SHADOW_MATERIAL}
       position={[0, -0.012, 0]}
       rotation={[-Math.PI / 2, 0, 0]}
       scale={[radius * 1.45, radius, 1]}
@@ -278,6 +246,25 @@ function TreeGroundingShadow({ height }: { height: number }) {
       <circleGeometry args={[1, 48]} />
     </mesh>
   )
+}
+
+const TREE_GROUNDING_SHADOW_MATERIAL = createTreeGroundingShadowMaterial()
+
+function createTreeGroundingShadowMaterial(): MeshBasicNodeMaterial {
+  const material = new MeshBasicNodeMaterial({
+    name: 'tree root contact shadow',
+    color: 0x020302,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    toneMapped: false,
+  })
+  const local = uv().sub(0.5).mul(2)
+  const radiusSquared = local.x.mul(local.x).add(local.y.mul(local.y))
+  material.opacityNode = smoothstep(1, 0, radiusSquared)
+    .pow(1.65)
+    .mul(float(0.24))
+  return material
 }
 
 function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number }) {

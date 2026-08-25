@@ -101,7 +101,7 @@ function reduce(level: MipLevel, content: MipContent): MipLevel {
         const nz = blue / weight
         // Renormalise, or every level flattens toward the average direction and
         // the blade orientations dissolve into one flat-facing sheet.
-        const inverse = 1 / Math.max(1e-5, Math.hypot(nx, ny, nz))
+        const inverse = 1 / Math.max(1e-5, Math.sqrt(nx * nx + ny * ny + nz * nz))
         data[offset] = clampByte((nx * inverse + 1) * 127.5)
         data[offset + 1] = clampByte((ny * inverse + 1) * 127.5)
         data[offset + 2] = clampByte((nz * inverse + 1) * 127.5)
@@ -154,9 +154,13 @@ function coverageAt(data: Uint8Array, alphaTest: number, scale: number): number 
 }
 
 function toLinear(value: number): number {
+  return SRGB_TO_LINEAR[value]!
+}
+
+const SRGB_TO_LINEAR = Float64Array.from({ length: 256 }, (_, value) => {
   const unit = value / 255
   return unit <= 0.04045 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4
-}
+})
 
 function toSrgb(value: number): number {
   const encoded = value <= 0.0031308

@@ -51,7 +51,9 @@ export function ridgedFurrow(
     const key = seed + octave * 131
     tiledValueNoiseGradient(u * spanX, v * spanY, key, spanX, spanY, SAMPLE)
     const centre = SAMPLE[0]! * 2 - 1
-    const gradient = Math.hypot(SAMPLE[1]! * 2, SAMPLE[2]! * 2)
+    const gx = SAMPLE[1]! * 2
+    const gy = SAMPLE[2]! * 2
+    const gradient = Math.sqrt(gx * gx + gy * gy)
     // The distance, in cell units, from here to the crease this octave draws.
     const distance = Math.abs(centre) / Math.max(1e-3, gradient)
     const half = width * 0.5

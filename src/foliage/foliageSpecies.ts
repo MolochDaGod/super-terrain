@@ -1,0 +1,328 @@
+import { Vector4 } from 'three/webgpu'
+
+/**
+ * The ground-cover palette a brush can lay down.
+ *
+ * These are not eight variations on one lawn. A meadow reads as real because
+ * several unrelated growth habits share the same square metre: fine soft
+ * blades, a coarse arching tussock that breaks the height silhouette, a
+ * broadleaf mat that fills the floor, a dry straw component that supplies the
+ * warm hue nothing else has. Painting a single species anywhere always looks
+ * like a texture; painting three overlapping ones looks like ground.
+ */
+export type FoliageSpeciesId =
+  | 'meadow-fescue'
+  | 'tussock'
+  | 'dry-steppe'
+  | 'clover-mat'
+  | 'broadleaf-weed'
+  | 'woodland-fern'
+  | 'wildflower'
+  | 'sedge-reed'
+
+export interface FoliageSpecies {
+  id: FoliageSpeciesId
+  label: string
+  /** Short authoring note shown in the toolbar tooltip. */
+  hint: string
+  /** UI swatch, in the same family as the shaded result. */
+  swatch: string
+
+  /** Metres, before per-blade variance. */
+  height: number
+  /** Fraction of `height` the per-blade random walk spans. */
+  heightVariance: number
+  /** Metres at the widest point of a blade. */
+  width: number
+  /**
+   * Resistance to wind. 1 is a stiff reed that barely moves, 0 a limp blade
+   * that lies over in a gust.
+   */
+  stiffness: number
+  /** Radians of resting arc from base to tip with no wind at all. */
+  arch: number
+  /** Metres the blades of one clump scatter from its centre. */
+  clumpRadius: number
+  /**
+   * Width profile exponent. High values taper to a needle point (grasses),
+   * low values hold width most of the way (broadleaf).
+   */
+  taper: number
+  /** Mid-blade widening. This is what turns a strip into a leaf. */
+  bulge: number
+  /** Radians the individual blades of a clump fan away from its axis. */
+  yawSpread: number
+  /** Radians of outward tilt at the base — an open rosette versus a tight tuft. */
+  tiltSpread: number
+
+  /** Linear-space colour at the sheath. */
+  base: readonly [number, number, number]
+  /** Linear-space colour at the tip, before drying. */
+  tip: readonly [number, number, number]
+  /** Linear-space colour of the flower or seed head, when one occurs. */
+  flower: readonly [number, number, number]
+  /** Fraction of blades that carry a head. */
+  flowerChance: number
+  /** Fraction of blades that have gone over to straw. */
+  dryChance: number
+
+  roughness: number
+  /** How much light passes straight through the blade. Drives the backlit look. */
+  translucency: number
+  /**
+   * Relative clump count. A fern colony is sparse and large; a lawn is dense
+   * and small, and both have to feel right at the same brush density.
+   */
+  densityScale: number
+  /** Blades drawn per clump at the closest level of detail. */
+  bladesPerClump: number
+}
+
+export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
+  {
+    id: 'meadow-fescue',
+    label: 'Meadow fescue',
+    hint: 'Fine soft pasture grass · the default floor',
+    swatch: '#6f9a4a',
+    height: 0.34,
+    heightVariance: 0.42,
+    width: 0.0075,
+    stiffness: 0.34,
+    arch: 0.62,
+    clumpRadius: 0.075,
+    taper: 1.35,
+    bulge: 0.1,
+    yawSpread: 2.6,
+    tiltSpread: 0.42,
+    base: [0.055, 0.085, 0.028],
+    tip: [0.155, 0.215, 0.062],
+    flower: [0.19, 0.2, 0.11],
+    flowerChance: 0.05,
+    dryChance: 0.13,
+    roughness: 0.62,
+    translucency: 0.78,
+    densityScale: 1,
+    bladesPerClump: 6,
+  },
+  {
+    id: 'tussock',
+    label: 'Tussock',
+    hint: 'Coarse arching bunchgrass · breaks the skyline',
+    swatch: '#8aa86a',
+    height: 0.82,
+    heightVariance: 0.34,
+    width: 0.0115,
+    stiffness: 0.55,
+    arch: 1.25,
+    clumpRadius: 0.13,
+    taper: 1.7,
+    bulge: 0.06,
+    yawSpread: 3.1,
+    tiltSpread: 0.72,
+    base: [0.062, 0.078, 0.03],
+    tip: [0.19, 0.216, 0.09],
+    flower: [0.24, 0.21, 0.12],
+    flowerChance: 0.22,
+    dryChance: 0.3,
+    roughness: 0.58,
+    translucency: 0.72,
+    densityScale: 0.42,
+    bladesPerClump: 7,
+  },
+  {
+    id: 'dry-steppe',
+    label: 'Dry steppe',
+    hint: 'Sun-bleached bent grass · warm straw hue',
+    swatch: '#c2a35c',
+    height: 0.48,
+    heightVariance: 0.5,
+    width: 0.006,
+    stiffness: 0.28,
+    arch: 1.05,
+    clumpRadius: 0.1,
+    taper: 1.9,
+    bulge: 0.04,
+    yawSpread: 3.0,
+    tiltSpread: 0.6,
+    base: [0.105, 0.098, 0.042],
+    tip: [0.34, 0.29, 0.128],
+    flower: [0.42, 0.36, 0.19],
+    flowerChance: 0.4,
+    dryChance: 0.82,
+    roughness: 0.72,
+    translucency: 0.9,
+    densityScale: 0.72,
+    bladesPerClump: 6,
+  },
+  {
+    id: 'clover-mat',
+    label: 'Clover mat',
+    hint: 'Low broadleaf ground cover · fills the floor',
+    swatch: '#4f7a3a',
+    height: 0.115,
+    heightVariance: 0.3,
+    width: 0.031,
+    stiffness: 0.6,
+    arch: 0.34,
+    clumpRadius: 0.055,
+    taper: 0.22,
+    bulge: 0.85,
+    yawSpread: 3.14,
+    tiltSpread: 0.95,
+    base: [0.03, 0.055, 0.018],
+    tip: [0.075, 0.135, 0.038],
+    flower: [0.5, 0.48, 0.4],
+    flowerChance: 0.11,
+    dryChance: 0.04,
+    roughness: 0.5,
+    translucency: 0.6,
+    densityScale: 1.5,
+    bladesPerClump: 5,
+  },
+  {
+    id: 'broadleaf-weed',
+    label: 'Broadleaf weed',
+    hint: 'Ribbed plantain rosette · coarse silhouette break',
+    swatch: '#5c8340',
+    height: 0.23,
+    heightVariance: 0.36,
+    width: 0.045,
+    stiffness: 0.72,
+    arch: 0.5,
+    clumpRadius: 0.03,
+    taper: 0.45,
+    bulge: 0.62,
+    yawSpread: 3.14,
+    tiltSpread: 1.15,
+    base: [0.034, 0.052, 0.02],
+    tip: [0.098, 0.146, 0.046],
+    flower: [0.2, 0.19, 0.1],
+    flowerChance: 0.18,
+    dryChance: 0.08,
+    roughness: 0.55,
+    translucency: 0.55,
+    densityScale: 0.4,
+    bladesPerClump: 5,
+  },
+  {
+    id: 'woodland-fern',
+    label: 'Woodland fern',
+    hint: 'Shade understory frond · deep cool green',
+    swatch: '#3f6b3c',
+    height: 0.55,
+    heightVariance: 0.3,
+    width: 0.062,
+    stiffness: 0.66,
+    arch: 0.95,
+    clumpRadius: 0.07,
+    taper: 0.75,
+    bulge: 0.5,
+    yawSpread: 3.14,
+    tiltSpread: 0.9,
+    base: [0.022, 0.045, 0.02],
+    tip: [0.062, 0.115, 0.045],
+    flower: [0.08, 0.12, 0.05],
+    flowerChance: 0,
+    dryChance: 0.06,
+    roughness: 0.44,
+    translucency: 0.68,
+    densityScale: 0.3,
+    bladesPerClump: 6,
+  },
+  {
+    id: 'wildflower',
+    label: 'Wildflower',
+    hint: 'Mixed sward with flower heads · colour accents',
+    swatch: '#b8c46a',
+    height: 0.42,
+    heightVariance: 0.45,
+    width: 0.008,
+    stiffness: 0.4,
+    arch: 0.55,
+    clumpRadius: 0.11,
+    taper: 1.4,
+    bulge: 0.12,
+    yawSpread: 3.0,
+    tiltSpread: 0.55,
+    base: [0.05, 0.08, 0.028],
+    tip: [0.16, 0.215, 0.07],
+    flower: [0.62, 0.52, 0.2],
+    flowerChance: 0.34,
+    dryChance: 0.12,
+    roughness: 0.6,
+    translucency: 0.8,
+    densityScale: 0.8,
+    bladesPerClump: 6,
+  },
+  {
+    id: 'sedge-reed',
+    label: 'Sedge & reed',
+    hint: 'Tall stiff wetland blades · vertical accent',
+    swatch: '#6d9b78',
+    height: 1.15,
+    heightVariance: 0.28,
+    width: 0.014,
+    stiffness: 0.86,
+    arch: 0.42,
+    clumpRadius: 0.09,
+    taper: 1.15,
+    bulge: 0.08,
+    yawSpread: 2.2,
+    tiltSpread: 0.3,
+    base: [0.04, 0.072, 0.038],
+    tip: [0.12, 0.192, 0.098],
+    flower: [0.13, 0.1, 0.07],
+    flowerChance: 0.16,
+    dryChance: 0.1,
+    roughness: 0.4,
+    translucency: 0.62,
+    densityScale: 0.32,
+    bladesPerClump: 7,
+  },
+]
+
+export const FOLIAGE_SPECIES_COUNT = FOLIAGE_SPECIES.length
+
+export function foliageSpeciesIndex(id: FoliageSpeciesId): number {
+  const index = FOLIAGE_SPECIES.findIndex((species) => species.id === id)
+  return index < 0 ? 0 : index
+}
+
+/** Rows per species in the packed uniform table. */
+export const FOLIAGE_SPECIES_STRIDE = 6
+
+/**
+ * The species table as the shaders see it.
+ *
+ * One `uniformArray` indexed by a species number is what lets every painted
+ * type share a single draw call. The alternative — a material per species —
+ * multiplies both the draw count and the number of pipelines that have to be
+ * compiled before the first frame, for no visual gain: the differences are all
+ * numbers a shader can read.
+ */
+export function packFoliageSpecies(
+  species: readonly FoliageSpecies[] = FOLIAGE_SPECIES,
+): Vector4[] {
+  const rows: Vector4[] = []
+  for (const entry of species) {
+    rows.push(
+      new Vector4(entry.height, entry.heightVariance, entry.width, entry.stiffness),
+      new Vector4(entry.arch, entry.clumpRadius, entry.taper, entry.bulge),
+      new Vector4(entry.base[0], entry.base[1], entry.base[2], entry.roughness),
+      new Vector4(entry.tip[0], entry.tip[1], entry.tip[2], entry.translucency),
+      new Vector4(
+        entry.flower[0],
+        entry.flower[1],
+        entry.flower[2],
+        entry.flowerChance,
+      ),
+      new Vector4(
+        entry.dryChance,
+        entry.yawSpread,
+        entry.tiltSpread,
+        entry.densityScale,
+      ),
+    )
+  }
+  return rows
+}

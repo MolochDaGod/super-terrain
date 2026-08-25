@@ -6,17 +6,30 @@ import {
 } from 'three/webgpu'
 import {
   faceDirection,
+  attribute,
+  Fn,
   float,
+  mat4,
   mix,
   normalize,
+  normalLocal,
+  normalMap,
   normalView,
+  positionLocal,
   positionViewDirection,
   texture,
+  transformNormal,
+  uv,
+  vec2,
   vec3,
   vec4,
 } from 'three/tsl'
 import type { Node } from 'three/webgpu'
-import { LEAF_ALPHA_TEST, type LeafCardTextures } from './proceduralTreeTextures'
+import {
+  LEAF_ALPHA_TEST,
+  type LeafAtlasTextures,
+  type LeafCardTextures,
+} from './proceduralTreeTextures'
 
 type VectorNode = Node<'vec3'>
 
@@ -107,20 +120,37 @@ class LeafNodeMaterial extends MeshStandardNodeMaterial {
  * whole texture bound per draw.
  */
 export function createFoliageMaterial(
-  card: LeafCardTextures | undefined,
+  card: LeafCardTextures | LeafAtlasTextures | undefined,
+  attributeInstancing = card !== undefined && 'variants' in card,
 ): MeshStandardNodeMaterial {
   if (!card) {
-    return new MeshStandardNodeMaterial({
+    const material = new MeshStandardNodeMaterial({
       name: 'far foliage mass',
       color: 0xffffff,
       vertexColors: true,
       roughness: 0.92,
       metalness: 0,
     })
+    if (attributeInstancing) {
+      applyAttributeInstanceTransform(material)
+      material.colorNode = vec4(
+        attribute<'vec3'>('treeInstanceColor', 'vec3'), 1,
+      )
+    }
+    return material
   }
 
-  const surface = texture(card.surfaceMap)
-  const albedo = texture(card.map)
+  const atlasUv = 'variants' in card
+    ? vec2(
+        uv().x.add(attribute<'float'>('leafVariant', 'float')).div(card.variants),
+        uv().y,
+      )
+    : undefined
+  const instanceTint = atlasUv
+    ? attribute<'vec3'>('treeInstanceColor', 'vec3')
+    : vec3(1)
+  const surface = atlasUv ? texture(card.surfaceMap, atlasUv) : texture(card.surfaceMap)
+  const albedo = atlasUv ? texture(card.map, atlasUv) : texture(card.map)
   // R roughness, G blade translucency, B card-local ambient occlusion. Reading
   // three properties from one texture rather than three keeps the leaf atlas to
   // three maps per variant.
@@ -139,9 +169,14 @@ export function createFoliageMaterial(
 
   const material = new LeafNodeMaterial(translucency, transmitted)
   material.name = 'leaf spray card'
-  material.vertexColors = true
-  material.map = card.map
-  material.normalMap = card.normalMap
+  material.vertexColors = !atlasUv
+  if (attributeInstancing) applyAttributeInstanceTransform(material)
+  if (atlasUv) {
+    material.normalNode = normalMap(texture(card.normalMap, atlasUv).rgb, vec2(0.28))
+  } else {
+    material.map = card.map
+    material.normalMap = card.normalMap
+  }
   // Enough tangent relief to separate the blades within a spray, while the
   // bowed card still provides the branchlet-scale change in orientation. The
   // atlas relief is now dominated by broad blade cupping rather than by vein
@@ -172,7 +207,9 @@ export function createFoliageMaterial(
   // material's whole colour setup, map included, so handing it a vec3 silently
   // drops the atlas cutout and every card renders as a solid opaque quad.
   material.colorNode = vec4(
-    albedo.rgb.mul(mix(vec3(1, 1, 1), vec3(1.06, 0.92, 1.08), underside)),
+    albedo.rgb
+      .mul(mix(vec3(1, 1, 1), vec3(1.06, 0.92, 1.08), underside))
+      .mul(instanceTint),
     albedo.a,
   )
   material.roughnessNode = mix(roughnessChannel, roughnessChannel.add(0.16), underside)
@@ -184,7 +221,7 @@ export function createFoliageMaterial(
 }
 
 /** Opaque compound leaves use real pinna geometry rather than atlas cutouts. */
-export function createFrondMaterial(): MeshStandardNodeMaterial {
+export function createFrondMaterial(attributeInstancing = false): MeshStandardNodeMaterial {
   const material = new LeafNodeMaterial(float(0.13), vec3(0.1, 0.21, 0.045))
   material.name = 'segmented palm frond'
   material.color.set(0xaaaaaa)
@@ -192,5 +229,27 @@ export function createFrondMaterial(): MeshStandardNodeMaterial {
   material.roughness = 0.86
   material.metalness = 0
   material.side = DoubleSide
+  if (attributeInstancing) {
+    applyAttributeInstanceTransform(material)
+    material.colorNode = vec4(
+      attribute<'vec3'>('treeInstanceColor', 'vec3').mul(vec3(0.667)),
+      1,
+    )
+  }
   return material
+}
+
+export function applyAttributeInstanceTransform(
+  material: MeshStandardNodeMaterial,
+): void {
+  const instanceMatrix = mat4(
+    attribute<'vec4'>('treeInstanceMatrix0', 'vec4'),
+    attribute<'vec4'>('treeInstanceMatrix1', 'vec4'),
+    attribute<'vec4'>('treeInstanceMatrix2', 'vec4'),
+    attribute<'vec4'>('treeInstanceMatrix3', 'vec4'),
+  )
+  material.positionNode = Fn(() => {
+    normalLocal.assign(transformNormal(normalLocal, instanceMatrix))
+    return instanceMatrix.mul(positionLocal).xyz
+  })()
 }

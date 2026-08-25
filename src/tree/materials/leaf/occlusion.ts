@@ -78,25 +78,44 @@ function boxBlur(source: Float32Array, size: number, radius: number): Float32Arr
 function maxBlur(source: Float32Array, size: number, radius: number): Float32Array {
   const horizontal = new Float32Array(size * size)
   const result = new Float32Array(size * size)
+  const deque = new Int32Array(size)
   for (let y = 0; y < size; y += 1) {
     const row = y * size
+    let head = 0
+    let tail = 0
+    let added = -1
     for (let x = 0; x < size; x += 1) {
-      let peak = 0
-      for (let offset = -radius; offset <= radius; offset += 1) {
-        const value = source[row + clampIndex(x + offset, size)]!
-        if (value > peak) peak = value
+      const right = Math.min(size - 1, x + radius)
+      while (added < right) {
+        added += 1
+        const value = source[row + added]!
+        while (tail > head && source[row + deque[tail - 1]!]! <= value) tail -= 1
+        deque[tail++] = added
       }
-      horizontal[row + x] = peak
+      const left = Math.max(0, x - radius)
+      while (tail > head && deque[head]! < left) head += 1
+      horizontal[row + x] = source[row + deque[head]!]!
     }
   }
   for (let x = 0; x < size; x += 1) {
+    let head = 0
+    let tail = 0
+    let added = -1
     for (let y = 0; y < size; y += 1) {
-      let peak = 0
-      for (let offset = -radius; offset <= radius; offset += 1) {
-        const value = horizontal[clampIndex(y + offset, size) * size + x]!
-        if (value > peak) peak = value
+      const bottom = Math.min(size - 1, y + radius)
+      while (added < bottom) {
+        added += 1
+        const value = horizontal[added * size + x]!
+        while (
+          tail > head && horizontal[deque[tail - 1]! * size + x]! <= value
+        ) {
+          tail -= 1
+        }
+        deque[tail++] = added
       }
-      result[y * size + x] = peak
+      const top = Math.max(0, y - radius)
+      while (tail > head && deque[head]! < top) head += 1
+      result[y * size + x] = horizontal[deque[head]! * size + x]!
     }
   }
   return result

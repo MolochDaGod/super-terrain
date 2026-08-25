@@ -28,6 +28,110 @@ export interface FlakeSample {
 }
 
 /**
+ * Immutable per-cell data for one scale tier.
+ *
+ * A texel visits the same nine cells as every other texel inside that cell.
+ * Their feature offsets, lift, identity and age therefore belong to the tier,
+ * not to the texel. Precomputing them removes eleven integer hashes per sample
+ * while producing the same field at every coordinate.
+ */
+export class FlakeScaleSampler {
+  private readonly countX: number
+  private readonly countY: number
+  private readonly featureX: Float64Array
+  private readonly featureY: Float64Array
+  private readonly lifts: Float64Array
+  private readonly identities: Float64Array
+  private readonly ages: Float64Array
+  private readonly lift: number
+  private readonly dome: number
+
+  constructor(
+    columns: number,
+    rows: number,
+    seed: number,
+    lift = 0.55,
+    dome = 0.3,
+  ) {
+    this.countX = Math.max(2, Math.round(columns))
+    this.countY = Math.max(2, Math.round(rows))
+    this.lift = lift
+    this.dome = dome
+    const cells = this.countX * this.countY
+    this.featureX = new Float64Array(cells)
+    this.featureY = new Float64Array(cells)
+    this.lifts = new Float64Array(cells)
+    this.identities = new Float64Array(cells)
+    this.ages = new Float64Array(cells)
+    for (let y = 0; y < this.countY; y += 1) {
+      for (let x = 0; x < this.countX; x += 1) {
+        const index = y * this.countX + x
+        const draw = hash2(x, y, seed + 83)
+        const packed = Math.floor(draw * 16777216)
+        this.featureX[index] = 0.16 + ((packed & 255) / 255) * 0.68
+        this.featureY[index] = 0.16 + (((packed >> 8) & 255) / 255) * 0.68
+        this.lifts[index] = ((packed >> 16) & 255) / 255
+        this.identities[index] = hash2(x, y, seed + 97)
+        this.ages[index] = hash2(x, y, seed + 3571)
+      }
+    }
+  }
+
+  sample(out: FlakeSample, u: number, v: number): void {
+    const x = u * this.countX + 5.7
+    const y = v * this.countY - 2.3
+    const cellX = Math.floor(x)
+    const cellY = Math.floor(y)
+
+    let bestField = -Infinity
+    let secondField = -Infinity
+    let bestLift = 0
+    let secondLift = 0
+    let bestIndex = 0
+    let bestDistance = 0
+
+    for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+      const sourceY = cellY + offsetY
+      let wrappedY = sourceY % this.countY
+      if (wrappedY < 0) wrappedY += this.countY
+      for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+        const sourceX = cellX + offsetX
+        let wrappedX = sourceX % this.countX
+        if (wrappedX < 0) wrappedX += this.countX
+        const index = wrappedY * this.countX + wrappedX
+        const dx = sourceX + this.featureX[index]! - x
+        const dy = sourceY + this.featureY[index]! - y
+        const distance = Math.sqrt(dx * dx + dy * dy)
+        const scaleLift = this.lifts[index]!
+        const field = scaleLift * this.lift - distance
+        if (field > bestField) {
+          secondField = bestField
+          secondLift = bestLift
+          bestField = field
+          bestLift = scaleLift
+          bestIndex = index
+          bestDistance = distance
+        } else if (field > secondField) {
+          secondField = field
+          secondLift = scaleLift
+        }
+      }
+    }
+
+    const separation = bestField - secondField
+    const span = Math.max(1e-6, this.lift + this.dome)
+    const edge = 1 - smooth01(separation / 0.22)
+    const pad = smooth01(separation / 0.1)
+    out.height = (bestLift * this.lift + pad * this.dome) / span
+    out.edge = edge
+    out.undercut = edge * Math.pow(Math.max(0, secondLift - bestLift), 2.2)
+    out.identity = this.identities[bestIndex]!
+    out.age = this.ages[bestIndex]!
+    out.rim = Math.min(1, bestDistance / 0.7)
+  }
+}
+
+/**
  * A field of overlapping cork scales.
  *
  * The usual procedural bark primitive is a Voronoi border used as a crack

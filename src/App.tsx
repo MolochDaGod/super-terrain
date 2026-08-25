@@ -28,6 +28,8 @@ import { TerrainScene } from './terrain/react/TerrainScene'
 import { WebGpuCanvas } from './terrain/react/WebGpuCanvas'
 import { useEditorSnapshot } from './terrain/react/hooks'
 import { currentViewUrlState } from './terrain/react/viewUrlState'
+import { FoliageEditorStore } from './foliage/FoliageEditorStore'
+import { FoliageToolbar } from './foliage/react/FoliageToolbar'
 import { TreeMenuBar } from './tree/TreeMenuBar'
 import { TreeEditorStore } from './tree/TreeEditorStore'
 import { TreeScene } from './tree/TreeScene'
@@ -36,6 +38,7 @@ import { TreeWorkspacePanels } from './tree/TreeWorkspacePanels'
 function App() {
   const editor = useMemo(() => new EditorStore(), [])
   const treeEditor = useMemo(() => new TreeEditorStore(), [])
+  const foliageEditor = useMemo(() => new FoliageEditorStore(), [])
   const view = useMemo(() => currentViewUrlState(), [])
   const [workspace, setWorkspace] = useState<Workspace>(() => view.editor ?? 'terrain')
   const changeWorkspace = useCallback((next: Workspace) => {
@@ -147,7 +150,12 @@ function App() {
             {terrainWorkspace ? (
               <TerrainScene key={worldGeneration} terrain={terrain} editor={editor} />
             ) : (
-              <TreeScene editor={editor} store={treeEditor} terrain={terrain} />
+              <TreeScene
+                editor={editor}
+                store={treeEditor}
+                foliage={foliageEditor}
+                terrain={terrain}
+              />
             )}
           </WebGpuCanvas>
         </div>
@@ -173,6 +181,7 @@ function App() {
             workspace={workspace}
             onWorkspaceChange={changeWorkspace}
           />
+          <FoliageToolbar store={foliageEditor} />
           <TreeWorkspacePanels store={treeEditor} />
         </>
       )}

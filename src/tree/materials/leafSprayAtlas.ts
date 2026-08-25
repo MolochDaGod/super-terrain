@@ -1,7 +1,7 @@
 import { clamp01 } from './proceduralNoise'
 import type { TreeSpecies } from '../generator/types'
 import { makeBladeShape } from './leaf/blade'
-import { dilateChannel, dilateInterleaved } from './leaf/dilate'
+import { dilateFields } from './leaf/dilate'
 import { layoutSpray } from './leaf/layout'
 import { packNormals } from './leaf/normal'
 import { bakeCardOcclusion } from './leaf/occlusion'
@@ -47,15 +47,17 @@ export function bakeLeafSpray(
   const occlusion = bakeCardOcclusion(fields)
 
   const { alpha } = fields
-  dilateInterleaved(fields.tint, 3, alpha, size, DILATION_PASSES)
-  dilateChannel(fields.height, alpha, size, DILATION_PASSES)
-  dilateChannel(fields.surfaceRoughness, alpha, size, DILATION_PASSES)
-  dilateChannel(fields.translucency, alpha, size, DILATION_PASSES)
-  dilateChannel(occlusion, alpha, size, DILATION_PASSES)
-  // The blade planes need dilating for the same reason every other channel
-  // does: an undilated rim texel holds a zero normal, which mips into a
-  // sideways-facing fringe around every cutout.
-  dilateInterleaved(fields.basis, 3, alpha, size, DILATION_PASSES)
+  dilateFields([
+    { values: fields.tint, stride: 3 },
+    { values: fields.height, stride: 1 },
+    { values: fields.surfaceRoughness, stride: 1 },
+    { values: fields.translucency, stride: 1 },
+    { values: occlusion, stride: 1 },
+    // The blade planes need dilating for the same reason every other channel
+    // does: an undilated rim texel holds a zero normal, which mips into a
+    // sideways-facing fringe around every cutout.
+    { values: fields.basis, stride: 3 },
+  ], alpha, size, DILATION_PASSES)
 
   const pixels = size * size
   const albedo = new Uint8Array(pixels * 4)

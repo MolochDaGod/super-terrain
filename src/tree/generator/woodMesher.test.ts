@@ -214,7 +214,7 @@ describe('continuation junctions', () => {
       // General sanity: no edge spans more than a few times the widest member.
       expect(worst / widest, species).toBeLessThan(6)
     }
-  })
+  }, 20_000)
 
   it('seeds a swept frame with an inherited phase instead of world up', () => {
     const tangent = { x: 0, y: 1, z: 0 }

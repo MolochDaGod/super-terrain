@@ -254,6 +254,11 @@ async function warmSceneObject(
 ): Promise<void> {
   const previousTarget = renderer.getRenderTarget()
   const previousMrt = renderer.getMRT()
+  const renderables: Object3D[] = []
+  object.updateMatrixWorld(true)
+  object.traverseVisible((candidate) => {
+    if ('material' in candidate && 'geometry' in candidate) renderables.push(candidate)
+  })
   let compiling: Promise<unknown>
   try {
     // Match the exact half-float, multisampled attachment used by the scene
@@ -261,7 +266,14 @@ async function warmSceneObject(
     // key and simply move the hitch to the first visible post-processed frame.
     renderer.setRenderTarget(scenePass.renderTarget)
     renderer.setMRT(scenePass.getMRT())
-    compiling = renderer.compileAsync(object, camera, scene)
+    // Renderer.compileAsync captures its render context and work list before
+    // yielding. Starting independent renderables together lets WebGPU compile
+    // their pipelines and prepare their buffers concurrently; a group compile
+    // deliberately awaits every object in series and made eight frond variants
+    // cost eight times one variant on every staged tree.
+    compiling = Promise.all(
+      renderables.map((renderable) => renderer.compileAsync(renderable, camera, scene)),
+    )
   } finally {
     // compileAsync captures the render context and work list synchronously,
     // then yields while node graphs and GPU pipelines build. Restore the live

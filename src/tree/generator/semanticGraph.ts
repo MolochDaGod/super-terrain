@@ -5,7 +5,6 @@ import {
   dot,
   emptyBounds,
   groundHeightAt,
-  hashUnit,
   includeInBounds,
   length,
   lerp,
@@ -19,7 +18,6 @@ import {
 } from './math'
 import {
   normalizeTreeParameters,
-  type FoliageCluster,
   type SemanticTreeGraph,
   type SemanticTreePart,
   type TreeCrossSection,
@@ -47,6 +45,10 @@ import { speciesArchitecture, type SpeciesArchitecture } from './speciesArchitec
 import { treeSpeciesDefinition } from './speciesCatalog'
 import { growRegimeCrown } from './growth/regimeCrown'
 import { growSupportRoots } from './growth/supportRoots'
+import {
+  allocateColonizedFoliage,
+  foliageStationTarget,
+} from './growth/foliageAllocation'
 import { fitAerialRootsToCarriers } from './growth/descendingRoot'
 import type { FruitClusterDraft, GrowthAxisDraft, OrganStationDraft } from './growth/types'
 import { trunkRadiusMultiplier } from './growth/trunkProfile'
@@ -213,7 +215,13 @@ export function generateSemanticTree(
   }
   resolveTreeSpace(graph, environment, parameters)
   graph.foliageClusters = species.growthModel === 'colonized-crown'
-    ? createFoliageClusters(crownNodes, parameters, architecture, random)
+    ? allocateColonizedFoliage(
+        crownNodes,
+        crownBranches,
+        parameters,
+        architecture,
+        random,
+      )
     : (() => {
       // A frond bound to its bearer's tip is right when the bearer *is* the
       // petiole — one organ, one axis, as an apical palm crown builds it. It is
@@ -2167,100 +2175,7 @@ function solveRadiusInheritance(parts: SemanticTreePart[]): void {
   }
 }
 
-/**
- * Foliage stations sit on the twiggy ends of the growth tree, not on the swept
- * limbs. Each one becomes a small clump of leaf cards, so the crown is built
- * from overlapping sprays hanging off real branchlets rather than from loose
- * leaves scattered through a lobe-shaped volume.
- */
-function createFoliageClusters(
-  nodes: readonly GrowthNode[],
-  parameters: TreeParameters,
-  architecture: SpeciesArchitecture,
-  random: TreeRandom,
-): FoliageCluster[] {
-  if (parameters.foliageDensity <= 0.01 || nodes.length === 0) return []
-  const carriers: { index: number; weight: number }[] = []
-  const threshold = architecture.meshedTipRadius * 3.4
-  for (const [index, node] of nodes.entries()) {
-    if (node.parent < 0) continue
-    if (node.radius > threshold) continue
-    // Foliage is concentrated on terminal and near-terminal current growth.
-    // A thin axis deep inside the crown is not automatically leafy: weighting
-    // by exposure and a broad spatial patch field opens real light corridors
-    // and groups the canopy into secondary masses instead of filling the whole
-    // envelope with an even green fog.
-    const exposure = clamp(1 - node.occlusion, 0, 1)
-    const patch = hashUnit(
-      parameters.seed ^ 0x6ac690c5,
-      node.position.x * 0.16,
-      node.position.y * 0.13,
-      node.position.z * 0.16,
-    )
-    if (patch < 0.16 && node.children.length > 0) continue
-    const terminalWeight = node.children.length === 0 ? 2.8 : 0.55
-    carriers.push({
-      index,
-      weight: terminalWeight * lerpNumber(0.18, 1.35, exposure * exposure) *
-        lerpNumber(0.28, 1.45, patch * patch),
-    })
-  }
-  if (carriers.length === 0) return []
-
-  // Subsampling to a target rather than taking every twig keeps the card count
-  // stable across recipes that ramify very differently. Density above 1 is a
-  // deliberate hero-quality region: it spends instances on smaller sprays,
-  // while the hard 5k station ceiling keeps LOD0 below 15k cards and LOD2 still
-  // collapses to its existing ~120 cluster budget.
-  const target = foliageStationTarget(parameters.foliageDensity)
-  const organModel = treeSpeciesDefinition(parameters.species).organModel
-  const clusters: FoliageCluster[] = []
-  const totalWeight = carriers.reduce((sum, carrier) => sum + carrier.weight, 0)
-  let carrierCursor = 0
-  let accumulatedWeight = carriers[0]!.weight
-  // Sampling by output index makes the count exact. Above density 1 there may
-  // be more stations than carrier twigs; in that case each carrier receives a
-  // small deterministic clump with independent scale, seed and card jitter.
-  // That is preferable to silently saturating at one station per twig, which
-  // made the upper half of the density control visually inert.
-  for (let station = 0; station < target; station += 1) {
-    // Systematic weighted resampling is deterministic, exact-count, and
-    // avoids the clumping noise of independent roulette draws. High-exposure
-    // terminal twigs receive several neighbouring sprays while interior axes
-    // remain readable through deliberate voids.
-    const wanted = ((station + 0.5) / target) * totalWeight
-    while (carrierCursor < carriers.length - 1 && accumulatedWeight < wanted) {
-      carrierCursor += 1
-      accumulatedWeight += carriers[carrierCursor]!.weight
-    }
-    const index = carriers[carrierCursor]!.index
-    const node = nodes[index]!
-    const parent = nodes[node.parent]!
-    const axis = normalize(subtract(node.position, parent.position), node.direction)
-    const scale = random.range(0.82, 1.28)
-    const radius = architecture.cardSize * scale
-    clusters.push({
-      id: `foliage-${clusters.length + 1}`,
-      partId: `growth-${index}`,
-      center: add(node.position, multiply(axis, radius * 0.32)),
-      axis,
-      radius,
-      depth: radius * random.range(0.78, 1.22),
-      occlusion: node.occlusion,
-      organModel,
-      seed: Math.floor(random.unit() * 0x7fffffff),
-    })
-  }
-  return clusters
-}
-
-/** Stable station budget shared by generation and focused budget tests. */
-export function foliageStationTarget(density: number): number {
-  const value = clamp(density, 0, 2)
-  return Math.round(value <= 1
-    ? lerpNumber(420, 1_500, value)
-    : lerpNumber(1_500, 5_000, value - 1))
-}
+export { foliageStationTarget }
 
 function graphBounds(graph: SemanticTreeGraph) {
   const bounds = emptyBounds()

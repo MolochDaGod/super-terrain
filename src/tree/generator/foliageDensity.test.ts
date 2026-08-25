@@ -37,7 +37,7 @@ describe('foliage density authoring', () => {
     expect(foliageStationTarget(200)).toBe(5_000)
   })
 
-  it('keeps deterministic card counts and bounded LOD scaling at high density', () => {
+  it('keeps deterministic support-bounded counts and bounded LOD scaling at high density', () => {
     const parameters = normalizeTreeParameters({
       ...DEFAULT_TREE_PARAMETERS,
       branchCount: 5,
@@ -47,14 +47,23 @@ describe('foliage density authoring', () => {
     const first = generateSemanticTree(parameters, DEFAULT_TREE_ENVIRONMENT)
     const second = generateSemanticTree(parameters, DEFAULT_TREE_ENVIRONMENT)
     expect(second.foliageClusters).toEqual(first.foliageClusters)
-    expect(first.foliageClusters).toHaveLength(foliageStationTarget(2))
+    // The target is an upper budget, not a command to duplicate a sparse
+    // crown's few eligible twigs until it reaches 5,000.
+    expect(first.foliageClusters.length).toBeLessThan(foliageStationTarget(2))
+    const normal = generateSemanticTree(
+      { ...parameters, foliageDensity: 1 },
+      DEFAULT_TREE_ENVIRONMENT,
+    )
+    expect(first.foliageClusters.length).toBeGreaterThan(normal.foliageClusters.length)
+    const partIds = new Set(first.parts.map((part) => part.id))
+    expect(first.foliageClusters.every((cluster) => partIds.has(cluster.partId))).toBe(true)
 
     const architecture = speciesArchitecture(parameters)
     const hero = compileFoliage(first, parameters, 0)
     const medium = compileFoliage(first, parameters, 1)
     const far = compileFoliage(first, parameters, 2)
     expect(hero.count).toBe(first.foliageClusters.length * architecture.cardsPerStation)
-    expect(hero.count).toBe(15_000)
+    expect(hero.count).toBeLessThan(15_000)
     expect(medium.count).toBeLessThan(hero.count)
     expect(far.count).toBeLessThanOrEqual(121)
   }, 20_000)

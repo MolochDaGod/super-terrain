@@ -47,21 +47,40 @@ export function packBarkAmbientOcclusion(
   const lowHeight = Math.max(1, Math.floor(height / scale))
   const lowHeights = half ? downsample(heights, width, height, lowWidth, lowHeight) : heights
   const occlusion = new Float32Array(lowWidth * lowHeight)
+  const sampleXs = new Int32Array(DIRECTIONS.length * RADII.length * lowWidth)
+  const sampleYs = new Int32Array(DIRECTIONS.length * RADII.length * lowHeight)
+  for (let direction = 0; direction < DIRECTIONS.length; direction += 1) {
+    const [dx, dy] = DIRECTIONS[direction]!
+    for (let step = 0; step < RADII.length; step += 1) {
+      const radius = RADII[step]!
+      const slot = direction * RADII.length + step
+      const xOffset = slot * lowWidth
+      const yOffset = slot * lowHeight
+      for (let x = 0; x < lowWidth; x += 1) {
+        sampleXs[xOffset + x] = positiveModulo(x + dx * radius, lowWidth)
+      }
+      for (let y = 0; y < lowHeight; y += 1) {
+        sampleYs[yOffset + y] = positiveModulo(y + dy * radius, lowHeight)
+      }
+    }
+  }
 
   for (let y = 0; y < lowHeight; y += 1) {
     for (let x = 0; x < lowWidth; x += 1) {
       const index = y * lowWidth + x
       const centre = lowHeights[index]!
       let shelter = 0
-      for (const [dx, dy] of DIRECTIONS) {
+      for (let direction = 0; direction < DIRECTIONS.length; direction += 1) {
         let horizon = 0
-        for (const radius of RADII) {
+        for (let step = 0; step < RADII.length; step += 1) {
+          const radius = RADII[step]!
           // A single `+ width` before the modulo only lands back in range while
           // the radius is smaller than the map. Once it is not, the index goes
           // negative, the lookup yields undefined, and everything downstream
           // becomes NaN — which packs as a black texel rather than failing.
-          const sampleX = positiveModulo(x + dx * radius, lowWidth)
-          const sampleY = positiveModulo(y + dy * radius, lowHeight)
+          const slot = direction * RADII.length + step
+          const sampleX = sampleXs[slot * lowWidth + x]!
+          const sampleY = sampleYs[slot * lowHeight + y]!
           // The bias grows with distance so a gently domed plate does not
           // shadow itself; without it, broad relief reads as grime.
           const rise = lowHeights[sampleY * lowWidth + sampleX]! - centre -
@@ -77,9 +96,22 @@ export function packBarkAmbientOcclusion(
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const index = y * width + x
-      const shelter = half
-        ? sampleBilinear(occlusion, lowWidth, lowHeight, x / scale, y / scale)
-        : occlusion[index]!
+      let shelter: number
+      if (half) {
+        const left = x >> 1
+        const top = y >> 1
+        const right = left + 1 === lowWidth ? 0 : left + 1
+        const bottom = top + 1 === lowHeight ? 0 : top + 1
+        const fractionX = (x & 1) * 0.5
+        const fractionY = (y & 1) * 0.5
+        const upper = occlusion[top * lowWidth + left]! * (1 - fractionX) +
+          occlusion[top * lowWidth + right]! * fractionX
+        const lower = occlusion[bottom * lowWidth + left]! * (1 - fractionX) +
+          occlusion[bottom * lowWidth + right]! * fractionX
+        shelter = upper * (1 - fractionY) + lower * fractionY
+      } else {
+        shelter = occlusion[index]!
+      }
       // The fissure term stays at full resolution: it is the one part of the
       // occlusion that follows a sharp edge, and resampling it would soften
       // every crack rim by a texel.
@@ -111,27 +143,4 @@ function downsample(
     }
   }
   return result
-}
-
-/** Wrapping bilinear sample, so the resampled occlusion keeps both seams. */
-function sampleBilinear(
-  source: Float32Array,
-  width: number,
-  height: number,
-  x: number,
-  y: number,
-): number {
-  const left = Math.floor(x)
-  const top = Math.floor(y)
-  const fractionX = x - left
-  const fractionY = y - top
-  const x0 = positiveModulo(left, width)
-  const x1 = positiveModulo(left + 1, width)
-  const y0 = positiveModulo(top, height)
-  const y1 = positiveModulo(top + 1, height)
-  const upper = source[y0 * width + x0]! * (1 - fractionX) +
-    source[y0 * width + x1]! * fractionX
-  const lower = source[y1 * width + x0]! * (1 - fractionX) +
-    source[y1 * width + x1]! * fractionX
-  return upper * (1 - fractionY) + lower * fractionY
 }

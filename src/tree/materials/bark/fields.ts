@@ -11,7 +11,7 @@ import {
 import { CoarseField } from '../coarseField'
 import { sampleColumnarFissures } from './structures/columnarFissures'
 import { sampleShallowBlocks } from './structures/shallowBlocks'
-import { emptyFlakeSample, sampleFlakeScales } from './structures/flakeScales'
+import { emptyFlakeSample, FlakeScaleSampler } from './structures/flakeScales'
 import { ridgedFurrow } from './structures/ridgedFurrows'
 import { sampleScars } from './structures/scars'
 import { samplePalmBoots } from './structures/palmBoots'
@@ -272,6 +272,16 @@ export function bakeBarkFields(
   // finely scaled bark it lands at the same size as the scales themselves and
   // the two tiers average into gravel.
   const chipStrength = profile.chipAmount ?? 1
+  const scaleSampler = palmStructure
+    ? undefined
+    : new FlakeScaleSampler(
+        scaleColumns, scaleRows, seed + 617, scaleLift, scaleLift * 0.55,
+      )
+  const chipSampler = !palmStructure && !mottledStructure && chipStrength > 0
+    ? new FlakeScaleSampler(
+        chipColumns, chipRows, seed + 929, scaleLift * 0.42, scaleLift * 0.3,
+      )
+    : undefined
   // Furrow network frequency for the ridged structures, deliberately below the
   // scale tier: the furrows group the scales, they do not outline them.
   const furrowColumns = Math.max(2, Math.round(across * 0.5))
@@ -319,15 +329,12 @@ export function bakeBarkFields(
       // broad shedding patches a gum or a plane tree actually has, and the
       // colour pass gets a per-patch identity out of the same call.
       let scales: typeof scaleSample | undefined
-      if (!palmStructure) {
-        sampleFlakeScales(
-          scaleSample, wu, wv, scaleColumns, scaleRows, seed + 617,
-          scaleLift, scaleLift * 0.55,
-        )
+      if (scaleSampler) {
+        scaleSampler.sample(scaleSample, wu, wv)
         scales = scaleSample
       }
       let chips: typeof chipSample | undefined
-      if (!palmStructure && !mottledStructure && chipStrength > 0) {
+      if (chipSampler) {
         // Offset, never scaled. Multiplying the uv by 1.7 to decorrelate this
         // tier from the one above it also multiplied its period, so the chip
         // field no longer closed on the tile: every bark using it carried a
@@ -335,10 +342,7 @@ export function bakeBarkFields(
         // line running the full height of the bole. A constant offset and a
         // different seed decorrelate the two tiers just as well and leave the
         // period alone.
-        sampleFlakeScales(
-          chipSample, wu + 0.31, wv - 0.17, chipColumns, chipRows,
-          seed + 929, scaleLift * 0.42, scaleLift * 0.3,
-        )
+        chipSampler.sample(chipSample, wu + 0.31, wv - 0.17)
         chips = chipSample
       }
 
@@ -639,15 +643,18 @@ export function barkRelief(
 ): void {
   const { width, height, relief } = fields
   for (let y = 0; y < height; y += 1) {
-    const previousY = (y - 1 + height) % height
-    const nextY = (y + 1) % height
+    const previousY = y === 0 ? height - 1 : y - 1
+    const nextY = y + 1 === height ? 0 : y + 1
+    const row = y * width
+    const previousRow = previousY * width
+    const nextRow = nextY * width
     for (let x = 0; x < width; x += 1) {
-      const previousX = (x - 1 + width) % width
-      const nextX = (x + 1) % width
-      const dx = (relief[y * width + nextX]! - relief[y * width + previousX]!) * strength
-      const dy = (relief[nextY * width + x]! - relief[previousY * width + x]!) * strength
-      const inverse = 1 / Math.hypot(dx, dy, 1)
-      const offset = (y * width + x) * 4
+      const previousX = x === 0 ? width - 1 : x - 1
+      const nextX = x + 1 === width ? 0 : x + 1
+      const dx = (relief[row + nextX]! - relief[row + previousX]!) * strength
+      const dy = (relief[nextRow + x]! - relief[previousRow + x]!) * strength
+      const inverse = 1 / Math.sqrt(dx * dx + dy * dy + 1)
+      const offset = (row + x) * 4
       target[offset] = toByte(-dx * inverse * 0.5 + 0.5)
       target[offset + 1] = toByte(-dy * inverse * 0.5 + 0.5)
       target[offset + 2] = toByte(inverse * 0.5 + 0.5)

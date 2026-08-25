@@ -48,6 +48,9 @@ export function textureDataTransferables(
       card.albedo.buffer,
       card.normal.buffer,
       card.roughness.buffer,
+      ...card.mipmaps.albedo.slice(1).map((level) => level.data.buffer),
+      ...card.mipmaps.normal.slice(1).map((level) => level.data.buffer),
+      ...card.mipmaps.roughness.slice(1).map((level) => level.data.buffer),
     ]),
   ] as ArrayBuffer[]
 }

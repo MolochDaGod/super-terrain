@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   BufferAttribute,
   BufferGeometry,
-  Color,
   IcosahedronGeometry,
-  InstancedMesh,
+  InstancedBufferAttribute,
+  InstancedBufferGeometry,
+  InstancedInterleavedBuffer,
+  InterleavedBufferAttribute,
   LineBasicNodeMaterial,
-  Matrix4,
   MeshStandardNodeMaterial,
+  type Texture,
 } from 'three/webgpu'
 import type {
   ProceduralTreeAsset,
@@ -20,10 +22,7 @@ import type {
   TreeVec3,
 } from './generator/types'
 import type { TreeDebugMode } from './TreeEditorStore'
-import {
-  type LeafCardTextures,
-  type ProceduralTreeTextures,
-} from './materials/proceduralTreeTextures'
+import { type ProceduralTreeTextures } from './materials/proceduralTreeTextures'
 import { bakeProceduralTreeTexturesAsync } from './materials/proceduralTreeTextureClient'
 import { createFoliageMaterial, createFrondMaterial } from './materials/leafMaterial'
 import { createLeafCardGeometry, splitFoliageByVariant } from './materials/leafCardGeometry'
@@ -105,10 +104,9 @@ function ReadyTreeAssetView({
 }) {
   const lod = asset.lods[lodLevel]
   const woodGeometry = useTreeGeometry(lod.wood)
-  const woodMaterial = useMemo(
-    () => createBarkMaterial(textures),
-    [textures],
-  )
+  const materialLease = useMemo(() => acquireTreeMaterials(textures), [textures])
+  const woodMaterial = materialLease.materials.bark
+  const surfaceVisible = debugMode === 'surface' || debugMode === 'topology'
   const topologyMaterial = useMemo(
     () =>
       new MeshStandardNodeMaterial({
@@ -122,8 +120,10 @@ function ReadyTreeAssetView({
     [],
   )
   const debugGeometry = useMemo(
-    () => createDebugGeometry(asset.graph, debugMode),
-    [asset.graph, debugMode],
+    () => surfaceVisible
+      ? new BufferGeometry()
+      : createDebugGeometry(asset.graph, debugMode),
+    [asset.graph, debugMode, surfaceVisible],
   )
   const debugMaterial = useMemo(
     () =>
@@ -135,15 +135,13 @@ function ReadyTreeAssetView({
       }),
     [],
   )
-  const surfaceVisible = debugMode === 'surface' || debugMode === 'topology'
-
   useEffect(
     () => () => {
-      woodMaterial.dispose()
+      materialLease.release()
       topologyMaterial.dispose()
       debugMaterial.dispose()
     },
-    [debugMaterial, topologyMaterial, woodMaterial],
+    [debugMaterial, materialLease, topologyMaterial],
   )
   useEffect(() => () => debugGeometry.dispose(), [debugGeometry])
   useEffect(() => {
@@ -190,8 +188,13 @@ function ReadyTreeAssetView({
             data={lod.foliage}
             lodLevel={lodLevel}
             textures={textures}
+            materials={materialLease.materials}
           />
-          <FruitInstances data={lod.fruits} lodLevel={lodLevel} />
+          <FruitInstances
+            data={lod.fruits}
+            lodLevel={lodLevel}
+            material={materialLease.materials.fruit}
+          />
         </>
       )}
     </group>
@@ -201,42 +204,29 @@ function ReadyTreeAssetView({
 function FruitInstances({
   data,
   lodLevel,
+  material,
 }: {
   data: TreeFruitData
   lodLevel: TreeLodLevel
+  material: MeshStandardNodeMaterial
 }) {
-  const instances = useRef<InstancedMesh>(null)
-  const geometry = useMemo(() => new IcosahedronGeometry(1, 2), [])
-  const material = useMemo(() => createFruitMaterial(), [])
-
-  useEffect(() => {
-    const mesh = instances.current
-    if (!mesh) return
-    const matrix = new Matrix4()
-    const color = new Color()
-    for (let index = 0; index < data.count; index += 1) {
-      mesh.setMatrixAt(index, matrix.fromArray(data.matrices, index * 16))
-      mesh.setColorAt(index, color.fromArray(data.colors, index * 3))
-    }
-    mesh.instanceMatrix.needsUpdate = true
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
-    mesh.computeBoundingSphere()
-  }, [data])
-
-  useEffect(() => () => {
-    geometry.dispose()
-    material.dispose()
-  }, [geometry, material])
+  const geometry = useMemo(
+    () => createAttributeInstancedGeometry(
+      fruitBaseGeometry(), data.matrices, data.colors, data.count,
+    ),
+    [data.colors, data.count, data.matrices],
+  )
+  useEffect(() => () => geometry.dispose(), [geometry])
 
   if (data.count === 0) return null
   return (
-    <instancedMesh
-      ref={instances}
+    <mesh
       name="fruit-clusters"
-      args={[geometry, material, data.count]}
+      geometry={geometry}
+      material={material}
       castShadow={lodLevel === 0}
       receiveShadow
-      frustumCulled
+      frustumCulled={false}
     />
   )
 }
@@ -256,22 +246,23 @@ function useTreeGeometry(mesh: TreeMeshData): BufferGeometry {
   return geometry
 }
 
-/**
- * One instanced batch per atlas spray. Instances carry no per-instance UV, so
- * varying the artwork means varying the material — four batches is a trivial
- * cost next to giving every card its own draw or building a custom attribute
- * path for the sake of one texture lookup.
- */
+/** One attribute-instanced batch covers every authored atlas spray variant. */
 function FoliageInstances({
   data,
   lodLevel,
   textures,
+  materials,
 }: {
   data: TreeFoliageData
   lodLevel: TreeLodLevel
   textures: ProceduralTreeTextures
+  materials: TreeMaterialSet
 }) {
-  const batches = useMemo(() => splitFoliageByVariant(data), [data])
+  const atlas = data.cardGeometry === 'spray' && textures.leafAtlas
+  const batches = useMemo(
+    () => atlas ? [] : splitFoliageByVariant(data),
+    [atlas, data],
+  )
   if (data.count === 0) return null
   if (data.representation === 'clusters') {
     return (
@@ -281,10 +272,26 @@ function FoliageInstances({
         matrices={data.matrices}
         colors={data.colors}
         count={data.count}
-        card={undefined}
+        cardGeometryEnabled={false}
         geometryKind="spray"
         lodLevel={lodLevel}
+        material={materials.cluster}
       />
+    )
+  }
+  if (atlas) {
+    return (
+      <group name="leaf-cards">
+        <FoliageAtlasBatch
+          name="leaf-cards-atlas"
+          matrices={data.matrices}
+          colors={data.colors}
+          variants={data.variants}
+          count={data.count}
+          lodLevel={lodLevel}
+          material={materials.leafAtlas}
+        />
+      </group>
     )
   }
   return (
@@ -297,10 +304,17 @@ function FoliageInstances({
             matrices={batch.matrices}
             colors={batch.colors}
             count={batch.count}
-            card={textures.leafCards[variant] ?? textures.leafCards[0]}
+            cardGeometryEnabled
             geometryKind={data.cardGeometry}
             geometryVariant={variant}
             lodLevel={lodLevel}
+            material={
+              data.cardGeometry === 'frond' ||
+                data.cardGeometry === 'fan-frond' ||
+                data.cardGeometry === 'rosette'
+                ? materials.frond
+                : materials.leafAtlas
+            }
           />
         ),
       )}
@@ -308,77 +322,207 @@ function FoliageInstances({
   )
 }
 
-function FoliageBatch({
+function FoliageAtlasBatch({
   name,
   matrices,
   colors,
+  variants,
   count,
-  card,
-  geometryKind,
-  geometryVariant = 0,
   lodLevel,
+  material,
 }: {
   name: string
   matrices: Float32Array
   colors: Float32Array
+  variants: Uint8Array
   count: number
-  card: LeafCardTextures | undefined
+  lodLevel: TreeLodLevel
+  material: MeshStandardNodeMaterial
+}) {
+  const geometry = useMemo(() => {
+    const base = foliageBaseGeometry('spray', 0, true)
+    return createAttributeInstancedGeometry(base, matrices, colors, count, variants)
+  }, [colors, count, matrices, variants])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  return (
+    <mesh
+      name={name}
+      geometry={geometry}
+      material={material}
+      castShadow={lodLevel === 0}
+      receiveShadow
+      frustumCulled={false}
+    />
+  )
+}
+
+function FoliageBatch({
+  name,
+  matrices,
+  colors,
+  variants,
+  count,
+  cardGeometryEnabled,
+  geometryKind,
+  geometryVariant = 0,
+  lodLevel,
+  material,
+}: {
+  name: string
+  matrices: Float32Array
+  colors: Float32Array
+  variants?: Uint8Array
+  count: number
+  cardGeometryEnabled: boolean
   geometryKind: TreeFoliageData['cardGeometry']
   geometryVariant?: number
   lodLevel: TreeLodLevel
+  material: MeshStandardNodeMaterial
 }) {
-  const instances = useRef<InstancedMesh>(null)
   const geometry = useMemo(
-    () => (card
-      ? geometryKind === 'frond'
-        ? createFrondCardGeometry(geometryVariant)
-        : geometryKind === 'fan-frond'
-          ? createPalmFanGeometry(geometryVariant)
-          : geometryKind === 'rosette'
-            ? createSucculentRosetteGeometry(geometryVariant)
-          : createLeafCardGeometry()
-      : new IcosahedronGeometry(1, 1)),
-    [card, geometryKind, geometryVariant],
+    () => {
+      const base = foliageBaseGeometry(
+        geometryKind, geometryVariant, cardGeometryEnabled,
+      )
+      return createAttributeInstancedGeometry(base, matrices, colors, count, variants)
+    },
+    [cardGeometryEnabled, colors, count, geometryKind, geometryVariant, matrices, variants],
   )
-  const material = useMemo(
-    () => geometryKind === 'frond' || geometryKind === 'fan-frond' || geometryKind === 'rosette'
-      ? createFrondMaterial()
-      : createFoliageMaterial(card),
-    [card, geometryKind],
-  )
-
-  useEffect(() => {
-    const mesh = instances.current
-    if (!mesh) return
-    const matrix = new Matrix4()
-    const color = new Color()
-    for (let index = 0; index < count; index += 1) {
-      mesh.setMatrixAt(index, matrix.fromArray(matrices, index * 16))
-      mesh.setColorAt(index, color.fromArray(colors, index * 3))
-    }
-    mesh.instanceMatrix.needsUpdate = true
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
-    mesh.computeBoundingSphere()
-  }, [colors, count, matrices])
 
   useEffect(
     () => () => {
       geometry.dispose()
-      material.dispose()
     },
-    [geometry, material],
+    [geometry],
   )
 
   return (
-    <instancedMesh
-      ref={instances}
+    <mesh
       name={name}
-      args={[geometry, material, count]}
+      geometry={geometry}
+      material={material}
       castShadow={lodLevel === 0}
       receiveShadow
-      frustumCulled
+      frustumCulled={false}
     />
   )
+}
+
+const foliageBaseGeometries = new Map<string, BufferGeometry>()
+let cachedFruitBaseGeometry: BufferGeometry | undefined
+
+function fruitBaseGeometry(): BufferGeometry {
+  cachedFruitBaseGeometry ??= new IcosahedronGeometry(1, 2)
+  return cachedFruitBaseGeometry
+}
+
+function foliageBaseGeometry(
+  geometryKind: TreeFoliageData['cardGeometry'],
+  variant: number,
+  cardGeometryEnabled: boolean,
+): BufferGeometry {
+  const key = cardGeometryEnabled ? `${geometryKind}:${variant}` : 'cluster'
+  let geometry = foliageBaseGeometries.get(key)
+  if (geometry) return geometry
+  geometry = cardGeometryEnabled
+    ? geometryKind === 'frond'
+      ? createFrondCardGeometry(variant)
+      : geometryKind === 'fan-frond'
+        ? createPalmFanGeometry(variant)
+        : geometryKind === 'rosette'
+          ? createSucculentRosetteGeometry(variant)
+          : createLeafCardGeometry()
+    : new IcosahedronGeometry(1, 1)
+  foliageBaseGeometries.set(key, geometry)
+  return geometry
+}
+
+function createAttributeInstancedGeometry(
+  base: BufferGeometry,
+  matrices: Float32Array,
+  colors: Float32Array,
+  count: number,
+  variants?: Uint8Array,
+): InstancedBufferGeometry {
+  const geometry = new InstancedBufferGeometry()
+  geometry.setIndex(base.getIndex())
+  for (const name of Object.keys(base.attributes)) {
+    geometry.setAttribute(name, base.getAttribute(name))
+  }
+  const matrixBuffer = new InstancedInterleavedBuffer(matrices, 16, 1)
+  for (let column = 0; column < 4; column += 1) {
+    geometry.setAttribute(
+      `treeInstanceMatrix${column}`,
+      new InterleavedBufferAttribute(matrixBuffer, 4, column * 4),
+    )
+  }
+  geometry.setAttribute(
+    'treeInstanceColor',
+    new InstancedBufferAttribute(colors, 3),
+  )
+  if (variants) {
+    geometry.setAttribute(
+      'leafVariant',
+      new InstancedBufferAttribute(Float32Array.from(variants), 1),
+    )
+  }
+  geometry.instanceCount = count
+  return geometry
+}
+
+interface TreeMaterialSet {
+  bark: MeshStandardNodeMaterial
+  leafAtlas: MeshStandardNodeMaterial
+  frond: MeshStandardNodeMaterial
+  cluster: MeshStandardNodeMaterial
+  fruit: MeshStandardNodeMaterial
+}
+
+interface TreeMaterialSetEntry {
+  materials: TreeMaterialSet
+  references: number
+}
+
+const treeMaterialSets = new WeakMap<Texture, TreeMaterialSetEntry>()
+
+function acquireTreeMaterials(textures: ProceduralTreeTextures): {
+  materials: TreeMaterialSet
+  release(): void
+} {
+  const key = textures.barkMap
+  let entry = treeMaterialSets.get(key)
+  if (!entry) {
+    entry = {
+      materials: {
+        bark: createBarkMaterial(textures),
+        leafAtlas: createFoliageMaterial(
+          textures.leafAtlas ?? textures.leafCards[0],
+        ),
+        frond: createFrondMaterial(true),
+        cluster: createFoliageMaterial(undefined, true),
+        fruit: createFruitMaterial(true),
+      },
+      references: 0,
+    }
+    treeMaterialSets.set(key, entry)
+  }
+  entry.references += 1
+  let released = false
+  return {
+    materials: entry.materials,
+    release() {
+      if (released) return
+      released = true
+      entry!.references -= 1
+      if (entry!.references > 0) return
+      treeMaterialSets.delete(key)
+      entry!.materials.bark.dispose()
+      entry!.materials.leafAtlas.dispose()
+      entry!.materials.frond.dispose()
+      entry!.materials.cluster.dispose()
+      entry!.materials.fruit.dispose()
+    },
+  }
 }
 
 function createDebugGeometry(

@@ -2,6 +2,8 @@ import type { TreeSpecies } from '../generator/types'
 import {
   bakeProceduralTreeTextureData,
   createProceduralTreeTextures,
+  treeMaterialKey,
+  treeMaterialSeed,
   type ProceduralTreeTextureData,
   type ProceduralTreeTextures,
 } from './proceduralTreeTextures'
@@ -16,20 +18,22 @@ export interface ProceduralTreeTextureBakeOptions {
 
 interface CacheEntry {
   key: string
-  promise: Promise<ProceduralTreeTextureData>
+  promise: Promise<ProceduralTreeTextures>
   cancel(): void
   pending: boolean
   consumers: number
   lastUsed: number
+  textures?: ProceduralTreeTextures
 }
 
 /**
- * Two raw bakes cover the current tree and one undo/redo neighbour without
- * retaining an unbounded 36 MiB payload for every seed visited in the editor.
- * GPU textures are never shared: every caller owns and disposes its wrappers.
+ * Two complete texture sets cover the current tree and one undo/redo neighbour
+ * without retaining an unbounded payload for every seed visited in the editor.
+ * Callers receive reference-counted leases; staged and presented trees can use
+ * the same GPU resources while a rebuild is being swapped into view.
  */
 const CACHE_LIMIT = 2
-const rawCache = new Map<string, CacheEntry>()
+const textureCache = new Map<string, CacheEntry>()
 let useClock = 0
 
 /**
@@ -45,30 +49,45 @@ export async function bakeProceduralTreeTexturesAsync(
   seed: number,
   options: ProceduralTreeTextureBakeOptions = {},
 ): Promise<ProceduralTreeTextures> {
-  const data = await acquireTextureData(species, seed, options.signal)
-  if (options.signal?.aborted) throw abortError()
-  return createProceduralTreeTextures(data)
-}
-
-/** Test/dev hook; ready entries are bytes only and own no GPU resources. */
-export function clearProceduralTreeTextureCache(): void {
-  for (const entry of rawCache.values()) {
-    if (entry.pending) entry.cancel()
+  const textures = await acquireTextures(species, seed, options.signal)
+  if (options.signal?.aborted) {
+    textures.dispose()
+    throw abortError()
   }
-  rawCache.clear()
+  return textures
 }
 
-function acquireTextureData(
+/** Starts or joins a material bake without taking long-term ownership. */
+export async function preloadProceduralTreeTextures(
   species: TreeSpecies,
   seed: number,
+  options: ProceduralTreeTextureBakeOptions = {},
+): Promise<void> {
+  const textures = await bakeProceduralTreeTexturesAsync(species, seed, options)
+  textures.dispose()
+}
+
+/** Test/dev hook; active leases remain valid until their owners release them. */
+export function clearProceduralTreeTextureCache(): void {
+  for (const entry of textureCache.values()) {
+    if (entry.pending) entry.cancel()
+    else if (entry.consumers === 0) entry.textures?.dispose()
+  }
+  textureCache.clear()
+}
+
+function acquireTextures(
+  species: TreeSpecies,
+  _seed: number,
   signal?: AbortSignal,
-): Promise<ProceduralTreeTextureData> {
+): Promise<ProceduralTreeTextures> {
   if (signal?.aborted) return Promise.reject(abortError())
-  const key = `${species}:${seed >>> 0}`
-  let entry = rawCache.get(key)
+  const key = treeMaterialKey(species)
+  const seed = treeMaterialSeed(species)
+  let entry = textureCache.get(key)
   if (!entry) {
     entry = createEntry(key, species, seed)
-    rawCache.set(key, entry)
+    textureCache.set(key, entry)
   }
   entry.consumers += 1
   entry.lastUsed = ++useClock
@@ -80,18 +99,20 @@ function acquireTextureData(
       if (settled) return
       settled = true
       signal?.removeEventListener('abort', onAbort)
-      entry!.consumers -= 1
-      if (entry!.pending && entry!.consumers === 0) {
-        entry!.cancel()
-        if (rawCache.get(key) === entry) rawCache.delete(key)
-      }
       callback()
     }
-    const onAbort = () => finish(() => reject(abortError()))
+    const release = () => releaseEntry(key, entry!)
+    const onAbort = () => finish(() => {
+      release()
+      reject(abortError())
+    })
     signal?.addEventListener('abort', onAbort, { once: true })
     entry!.promise.then(
-      (data) => finish(() => resolve(data)),
-      (error: unknown) => finish(() => reject(error)),
+      (textures) => finish(() => resolve(createTextureLease(textures, release))),
+      (error: unknown) => finish(() => {
+        release()
+        reject(error)
+      }),
     )
   })
 }
@@ -112,13 +133,16 @@ function createEntry(
   }
   entry.promise = job.promise.then(
     (data) => {
+      const textures = createProceduralTreeTextures(data, true)
       entry.pending = false
+      entry.textures = textures
       pruneCache()
-      return data
+      return textures
     },
+  ).catch(
     (error: unknown) => {
       entry.pending = false
-      if (rawCache.get(key) === entry) rawCache.delete(key)
+      if (textureCache.get(key) === entry) textureCache.delete(key)
       throw error
     },
   )
@@ -195,13 +219,50 @@ function bakeWithoutWorker(
 }
 
 function pruneCache(): void {
-  if (rawCache.size <= CACHE_LIMIT) return
-  const evictable = [...rawCache.values()]
+  if (textureCache.size <= CACHE_LIMIT) return
+  const evictable = [...textureCache.values()]
     .filter((entry) => !entry.pending && entry.consumers === 0)
     .sort((a, b) => a.lastUsed - b.lastUsed)
-  while (rawCache.size > CACHE_LIMIT && evictable.length > 0) {
+  while (textureCache.size > CACHE_LIMIT && evictable.length > 0) {
     const entry = evictable.shift()!
-    if (rawCache.get(entry.key) === entry) rawCache.delete(entry.key)
+    if (textureCache.get(entry.key) !== entry) continue
+    textureCache.delete(entry.key)
+    entry.textures?.dispose()
+  }
+}
+
+function releaseEntry(key: string, entry: CacheEntry): void {
+  entry.consumers -= 1
+  if (entry.pending && entry.consumers === 0) {
+    entry.cancel()
+    if (textureCache.get(key) === entry) textureCache.delete(key)
+    return
+  }
+  if (entry.consumers === 0 && textureCache.get(key) !== entry) {
+    entry.textures?.dispose()
+    return
+  }
+  pruneCache()
+}
+
+function createTextureLease(
+  textures: ProceduralTreeTextures,
+  release: () => void,
+): ProceduralTreeTextures {
+  let released = false
+  return {
+    barkMap: textures.barkMap,
+    barkNormalMap: textures.barkNormalMap,
+    barkNormalScale: textures.barkNormalScale,
+    barkProjection: textures.barkProjection,
+    barkRoughnessMap: textures.barkRoughnessMap,
+    leafCards: textures.leafCards,
+    leafAtlas: textures.leafAtlas,
+    dispose() {
+      if (released) return
+      released = true
+      release()
+    },
   }
 }
 

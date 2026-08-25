@@ -16,6 +16,13 @@ export interface TerrainRenderPipelineProps {
   prewarmKey?: string
   onPrewarmComplete?: (key: string) => void
   onPrewarmError?: (key: string, error: unknown) => void
+  /**
+   * Publishes this pass's object warm-up so a layer mounted elsewhere in the
+   * scene can compile against the same multisampled attachment. Compiling
+   * against the swap chain instead produces a different pipeline key and moves
+   * the stall to the first post-processed frame rather than removing it.
+   */
+  onWarmupReady?: (warm: (object: Object3D) => Promise<void>) => void
 }
 
 /**
@@ -47,6 +54,7 @@ export function TerrainRenderPipeline({
   prewarmKey,
   onPrewarmComplete,
   onPrewarmError,
+  onWarmupReady,
 }: TerrainRenderPipelineProps) {
   const { gl, scene, camera, size } = useThree()
   const [readyMode, setReadyMode] = useState<TerrainRenderMode | null>(null)
@@ -100,6 +108,10 @@ export function TerrainRenderPipeline({
   }, [mode, onCompilingChange, rendering])
 
   useEffect(() => () => rendering.dispose(), [rendering])
+
+  useEffect(() => {
+    onWarmupReady?.(rendering.warmupObject)
+  }, [onWarmupReady, rendering])
 
   useEffect(() => {
     if (!prewarmObject || prewarmKey === undefined) return

@@ -87,8 +87,18 @@ describe('baobab crown division', () => {
     const topRadius = trunk.spine.at(-1)!.radius
     for (const division of divisions) {
       const base = division.spine[0]!.radius
-      expect(base / topRadius).toBeGreaterThan(0.3)
-      expect(base / topRadius).toBeLessThan(0.95)
+      if (division.junctionType === 'continuation') {
+        // This is the bole's shared terminal ring, not an independent daughter
+        // base. It reaches the conserved division girth over the emergence
+        // zone instead of opening a radius seam at the handoff.
+        expect(base).toBeCloseTo(topRadius, 4)
+        const settled = division.spine[Math.ceil(division.spine.length * 0.3)]!.radius
+        expect(settled / topRadius).toBeGreaterThan(0.3)
+        expect(settled / topRadius).toBeLessThan(0.95)
+      } else {
+        expect(base / topRadius).toBeGreaterThan(0.3)
+        expect(base / topRadius).toBeLessThan(0.95)
+      }
     }
     const bases = divisions.map((part) => part.spine[0]!.radius)
     expect(Math.max(...bases) / Math.min(...bases)).toBeGreaterThan(1.15)
