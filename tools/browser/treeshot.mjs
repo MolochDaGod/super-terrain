@@ -27,10 +27,19 @@ const options = {
   height: Number(flags.get('height') ?? 1200),
   out: flags.get('out') ?? 'captures/tree',
   timeoutMs: Number(flags.get('timeout') ?? 180_000),
+  debugMode: flags.get('debug') ?? 'surface',
   // Named viewpoints. Each is [azimuth deg, elevation deg, distance multiple of
   // tree height, target height as a fraction of tree height].
   shots: (flags.get('shots') ?? 'hero,trunk,bark,canopy,silhouette').split(','),
+  // Omit --lods to preserve the historical filenames. Supplying it makes the
+  // selected render LOD explicit in every filename, which is what review
+  // matrices should use (for example --lods=0,1,2).
+  lods: (flags.get('lods') ?? '0')
+    .split(',')
+    .map(Number)
+    .filter((level) => Number.isInteger(level) && level >= 0 && level <= 2),
 }
+const explicitLods = flags.has('lods')
 
 // A stand of trees from one recipe. Variety is a property of the generator
 // that a single frame cannot show at all: the only way to see whether re-seeding
@@ -68,6 +77,9 @@ const VIEWS = {
   canopy: { azimuth: 186, elevation: 26, metres: 11, target: 0.66, fov: 52 },
   // Backlit profile against the sky: pure silhouette read.
   silhouette: { azimuth: -38, elevation: 7, distance: 2.05, target: 0.5, fov: 34 },
+  // Crown plan and radial balance. Some crowns look plausible from the side
+  // while collapsing into a wheel or a single plane from here.
+  overhead: { azimuth: 18, elevation: 72, distance: 1.65, target: 0.48, fov: 38 },
 }
 
 mkdirSync(resolve(options.out), { recursive: true })
@@ -107,7 +119,13 @@ await page.waitForFunction(() => Boolean(globalThis.__meshtree), null, {
 const built = await page.evaluate(
   async ({ parameters, timeoutMs }) => {
     const { store } = globalThis.__meshtree
-    if (Object.keys(parameters).length > 0) store.patchParameters(parameters)
+    // A species selection in the editor is not a one-field patch: it loads the
+    // complete authored preset. Patching only `species` silently combines a new
+    // growth grammar with the previous tree's dimensions and was allowing
+    // invalid cross-species captures into visual review.
+    const { species, ...overrides } = parameters
+    if (species) store.applySpecies(species)
+    if (Object.keys(overrides).length > 0) store.patchParameters(overrides)
     store.regenerate()
     const wanted = store.getSnapshot().buildRevision
     const started = performance.now()
@@ -147,6 +165,7 @@ if (seedList && seedList.length > 0) {
             return {
               bounds: snapshot.asset.graph.bounds,
               parts: snapshot.asset.stats.partCount,
+              trunkRadius: snapshot.parameters.trunkRadius,
             }
           }
           await new Promise((done) => setTimeout(done, 200))
@@ -159,19 +178,35 @@ if (seedList && seedList.length > 0) {
       console.warn(`seed ${seed} timed out`)
       continue
     }
+    // The asset revision lands before procedural textures and WebGPU materials
+    // are installed in the scene. Without this second wait, seed matrices can
+    // capture six perfectly consistent empty frames and still exit zero.
+    await page.waitForFunction(
+      () => globalThis.__meshtree?.store.getSnapshot().status.startsWith('Tree ready'),
+      null,
+      { timeout: options.timeoutMs },
+    )
     const seedHeight = info.bounds.max.y - Math.min(0, info.bounds.min.y)
     const seedWidth = Math.max(
       info.bounds.max.x - info.bounds.min.x,
       info.bounds.max.z - info.bounds.min.z,
     )
-    for (const shotName of options.shots) {
-      const view = VIEWS[shotName]
-      if (!view) continue
-      await frameView(view, seedHeight, seedWidth)
-      await page.waitForTimeout(1_000)
-      const file = resolve(options.out, `${options.name}-${seed}-${shotName}.png`)
-      await page.screenshot({ path: file })
-      console.log(`wrote ${file} (${info.parts} parts, ${seedHeight.toFixed(1)}m)`)
+    for (const level of options.lods) {
+      await selectLod(level)
+      for (const shotName of options.shots) {
+        const view = VIEWS[shotName]
+        if (!view) continue
+        await frameView(view, seedHeight, seedWidth, info.trunkRadius)
+        await page.waitForTimeout(1_000)
+        const filename = explicitLods
+          ? `${options.name}-seed-${seed}-${shotName}-lod${level}.png`
+          : `${options.name}-${seed}-${shotName}.png`
+        const file = resolve(options.out, filename)
+        await page.screenshot({ path: file })
+        console.log(
+          `wrote ${file} (${info.parts} parts, ${seedHeight.toFixed(1)}m, LOD${level})`,
+        )
+      }
     }
   }
   await browser.close()
@@ -182,6 +217,24 @@ if (built.timedOut) {
   console.error(`tree build timed out: ${built.status}`)
   await browser.close()
   process.exit(1)
+}
+
+// Geometry completion precedes the worker texture bake and WebGPU pipeline
+// warm-up. Capturing while the store still says "preparing WebGPU materials"
+// produces an empty scene, which is especially misleading during texture work.
+await page.waitForFunction(
+  () => globalThis.__meshtree?.store.getSnapshot().status.startsWith('Tree ready'),
+  null,
+  { timeout: options.timeoutMs },
+)
+
+if (options.debugMode !== 'surface') {
+  await page.evaluate((debugMode) => {
+    globalThis.__meshtree.store.patch({
+      debugMode,
+      showFoliage: false,
+    })
+  }, options.debugMode)
 }
 
 const height = built.bounds.max.y - Math.min(0, built.bounds.min.y)
@@ -229,30 +282,49 @@ const lighting = await page.evaluate(() => {
 console.log(`lighting ${JSON.stringify(lighting)}`)
 
 const written = []
-for (const shotName of options.shots) {
-  const view = VIEWS[shotName]
-  if (!view) {
-    console.warn(`unknown view "${shotName}"`)
-    continue
+for (const level of options.lods) {
+  await selectLod(level)
+  for (const shotName of options.shots) {
+    const view = VIEWS[shotName]
+    if (!view) {
+      console.warn(`unknown view "${shotName}"`)
+      continue
+    }
+    await frameView(view, height, width, built.parameters.trunkRadius)
+    // Shadow maps and the sky dome re-anchor to the camera on the next frames.
+    await page.waitForTimeout(1_200)
+    const lodSuffix = explicitLods ? `-lod${level}` : ''
+    const file = resolve(options.out, `${options.name}-${shotName}${lodSuffix}.png`)
+    await page.screenshot({ path: file })
+    written.push(file)
+    console.log(`wrote ${file}`)
   }
-  await frameView(view, height, width)
-  // Shadow maps and the sky dome re-anchor to the camera on the next frames.
-  await page.waitForTimeout(1_200)
-  const file = resolve(options.out, `${options.name}-${shotName}.png`)
-  await page.screenshot({ path: file })
-  written.push(file)
-  console.log(`wrote ${file}`)
 }
 
-async function frameView(view, height, width) {
+async function selectLod(level) {
+  await page.evaluate((lod) => {
+    globalThis.__meshtree.store.patch({ lod })
+  }, level)
+  // React swaps the geometry synchronously after the store notification, but
+  // WebGPU needs a settled frame before the screenshot is evidence.
+  await page.waitForTimeout(350)
+}
+
+async function frameView(view, height, width, trunkRadius = 0) {
   await page.evaluate(
-    ({ view, height, width }) => {
+    ({ view, height, width, trunkRadius }) => {
       const { camera, controls } = globalThis.__meshtree
       // Frame from the asset's real extent. A fixed distance clips a big oak
       // and strands a small one in the middle of the sky.
       const reach = Math.max(height, width)
       const radians = (degrees) => (degrees * Math.PI) / 180
-      const distance = view.metres ?? reach * view.distance
+      // Absolute close-up distances were authored around an oak-sized bole.
+      // A giant baobab or sequoia can be wider than that entire stand-off,
+      // putting the review camera inside the wood and photographing buried
+      // root geometry. Stay at least one player-width outside the nominal bole.
+      const distance = view.metres === undefined
+        ? reach * view.distance
+        : Math.max(view.metres, trunkRadius * 2.25 + 1.2)
       const azimuth = radians(view.azimuth)
       const elevation = radians(view.elevation)
       camera.fov = view.fov
@@ -280,7 +352,7 @@ async function frameView(view, height, width) {
         controls.update()
       }
     },
-    { view, height, width },
+    { view, height, width, trunkRadius },
   )
 }
 

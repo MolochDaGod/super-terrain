@@ -453,14 +453,16 @@ function solvePipeRadii(
     node.radius = Math.pow(node.subtreeTotal + segmentLength, 1 / exponent)
   }
 
-  let totalTips = 0
-  for (const [index] of seeds.entries()) totalTips += nodes[index]?.tipCount ?? 0
   for (const [index, seed] of seeds.entries()) {
     const root = nodes[index]
     if (!root || root.radius <= 0) continue
-    // Area, not radius, is what a bole divides between its scaffolds.
-    const share = Math.sqrt((root.tipCount || 1) / Math.max(1, totalTips))
-    const scale = (seed.availableRadius * share) / root.radius
+    // `availableRadius` is already the local radius budget at this seed's
+    // attachment. Scaffolds leave at different heights, so dividing it again
+    // by every tip in every other scaffold makes a mature load-bearing limb
+    // implausibly thin. Siblings that truly share one junction are conserved
+    // later by `solveRadiusInheritance`; each independent seed should fill its
+    // own local budget here.
+    const scale = seed.availableRadius / root.radius
     const stack = [index]
     while (stack.length > 0) {
       const current = stack.pop()!

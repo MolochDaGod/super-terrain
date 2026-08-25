@@ -34,15 +34,15 @@ import {
   type TreeSpecies,
   type TreeTrunkDamage,
 } from './generator/types'
+import { TREE_SPECIES_DEFINITIONS } from './generator/speciesCatalog'
 import type { TreeDebugMode, TreeEditorStore } from './TreeEditorStore'
 import { saveTreeToLibrary } from './treePersistence'
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 
-const SPECIES_OPTIONS = [
-  { value: 'ancient-oak', label: 'Ancient oak' },
-  { value: 'field-oak', label: 'Field oak' },
-  { value: 'windswept-pine', label: 'Pine' },
-] satisfies { value: TreeSpecies; label: string }[]
+const SPECIES_OPTIONS = TREE_SPECIES_DEFINITIONS.map(({ id, label }) => ({
+  value: id,
+  label,
+})) satisfies { value: TreeSpecies; label: string }[]
 
 // Orthogonal traits, not one mutually-exclusive style preset. A tree may be a
 // sinuous fused pair with a broken top, or a straight intact multi-bole.
@@ -159,8 +159,8 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
           <RangeField
             label="Height"
             value={parameters.height}
-            min={10}
-            max={45}
+            min={4}
+            max={120}
             step={0.5}
             unit=" m"
             onChange={(height) => store.patchParameters({ height })}
@@ -168,8 +168,8 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
           <RangeField
             label="Crown spread"
             value={parameters.crownRadius}
-            min={3}
-            max={20}
+            min={1.5}
+            max={35}
             step={0.25}
             unit=" m"
             onChange={(crownRadius) => store.patchParameters({ crownRadius })}
@@ -177,8 +177,8 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
           <RangeField
             label="Trunk radius"
             value={parameters.trunkRadius}
-            min={0.3}
-            max={2.2}
+            min={0.12}
+            max={8}
             step={0.05}
             unit=" m"
             onChange={(trunkRadius) => store.patchParameters({ trunkRadius })}
@@ -325,10 +325,10 @@ export function TreeWorkspacePanels({ store }: { store: TreeEditorStore }) {
           <FineControls label="Counts & density">
           <RangeField
             label="Major branches"
-            hint="5–15"
+            hint="5–30"
             value={parameters.branchCount}
             min={5}
-            max={15}
+            max={30}
             step={1}
             onChange={(branchCount) => store.patchParameters({ branchCount })}
           />

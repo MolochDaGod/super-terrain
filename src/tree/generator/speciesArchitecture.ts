@@ -1,4 +1,6 @@
 import { clamp, lerpNumber } from './math'
+import { colonizedCrownProfile } from './growth/profiles/colonizedCrownProfiles'
+import { openCrownProfile } from './growth/profiles/openCrownProfiles'
 import type { TreeParameters } from './types'
 
 /**
@@ -63,8 +65,203 @@ export interface SpeciesArchitecture {
 
 export function speciesArchitecture(parameters: TreeParameters): SpeciesArchitecture {
   const age = clamp(parameters.age, 0, 1)
-  if (parameters.species === 'windswept-pine') return pine(parameters, age)
-  return oak(parameters, age, parameters.species === 'ancient-oak')
+  switch (parameters.species) {
+    case 'windswept-pine':
+      return pine(parameters, age)
+    case 'kapok-ceiba':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.8,
+        crownBaseFraction: 0.72,
+        cardSize: 0.9,
+        farClusterSize: 1.5,
+        cardsPerStation: 3,
+      })
+    case 'baobab':
+      return regimeArchitecture(parameters, {
+        // Two fifths bole, three fifths crown. The bole is still the heaviest
+        // thing in the silhouette because it is enormously wide, not because it
+        // occupies most of the tree's height.
+        boleFraction: 0.4,
+        crownBaseFraction: 0.36,
+        cardSize: 0.54,
+        farClusterSize: 1.32,
+        cardsPerStation: 5,
+      })
+    case 'coconut-palm':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.9,
+        crownBaseFraction: 0.86,
+        cardSize: 0.7,
+        farClusterSize: 1.8,
+        cardsPerStation: 1,
+      })
+    case 'dragon-blood':
+      return regimeArchitecture(parameters, {
+        // A dragon’s blood divides just above a short thick bole; a third of
+        // its height as clear stem is a palm silhouette, not a Dracaena.
+        boleFraction: 0.18,
+        crownBaseFraction: 0.22,
+        cardSize: 0.7,
+        farClusterSize: 1.15,
+        cardsPerStation: 7,
+      })
+    case 'norway-spruce':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.98,
+        crownBaseFraction: 0.28,
+        cardSize: 0.62,
+        farClusterSize: 1.05,
+        cardsPerStation: 4,
+      })
+    case 'coast-redwood':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.995,
+        crownBaseFraction: 0.24,
+        cardSize: 0.72,
+        farClusterSize: 1.3,
+        cardsPerStation: 4,
+      })
+    case 'monkey-puzzle':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.99,
+        crownBaseFraction: 0.4,
+        cardSize: 0.58,
+        farClusterSize: 1.05,
+        cardsPerStation: 4,
+      })
+    case 'date-palm':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.9,
+        crownBaseFraction: 0.86,
+        cardSize: 0.62,
+        farClusterSize: 1.65,
+        cardsPerStation: 1,
+      })
+    case 'tree-fern':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.86,
+        crownBaseFraction: 0.8,
+        cardSize: 0.58,
+        farClusterSize: 1.5,
+        cardsPerStation: 1,
+      })
+    case 'quiver-tree':
+      return regimeArchitecture(parameters, {
+        // The candelabrum starts low. A long clear pole under a small tuft was
+        // the rejected reading.
+        boleFraction: 0.26,
+        crownBaseFraction: 0.3,
+        cardSize: 0.82,
+        farClusterSize: 1.2,
+        cardsPerStation: 6,
+      })
+    case 'doum-palm':
+      return regimeArchitecture(parameters, {
+        // The first genuine dichotomy is low on the stipe, which is what gives
+        // the doum two substantial trunks rather than one pole with a fork on top.
+        boleFraction: 0.24,
+        crownBaseFraction: 0.28,
+        cardSize: 0.68,
+        farClusterSize: 1.5,
+        cardsPerStation: 1,
+      })
+    case 'joshua-tree':
+      return regimeArchitecture(parameters, {
+        // Yucca brevifolia branches low and often; a tall clear mast is what a
+        // damage-triggered architecture is supposed to prevent.
+        boleFraction: 0.24,
+        crownBaseFraction: 0.28,
+        cardSize: 0.76,
+        farClusterSize: 1.1,
+        cardsPerStation: 7,
+      })
+    case 'screw-pine-pandanus':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.74,
+        crownBaseFraction: 0.7,
+        cardSize: 0.7,
+        farClusterSize: 1.45,
+        cardsPerStation: 1,
+      })
+    case 'bristlecone-pine':
+      return bristlecone(parameters)
+    case 'banyan':
+    case 'mangrove':
+    case 'strangler-fig':
+      return {
+        ...colonizedCrownProfile(parameters.species),
+        scaffoldRise: [...colonizedCrownProfile(parameters.species).scaffoldRise],
+        scaffoldCount: parameters.branchCount,
+      }
+    case 'umbrella-acacia':
+    case 'rainbow-eucalyptus':
+    case 'gum-eucalyptus':
+    case 'live-oak':
+    case 'european-beech':
+    case 'silver-birch':
+    case 'cedar-of-lebanon':
+    case 'japanese-black-pine': {
+      const profile = openCrownProfile(parameters.species)!
+      return {
+        ...profile,
+        scaffoldRise: [...profile.scaffoldRise],
+        scaffoldCount: parameters.branchCount,
+      }
+    }
+    case 'giant-sequoia':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.995,
+        crownBaseFraction: 0.3,
+        cardSize: 0.8,
+        farClusterSize: 1.42,
+        cardsPerStation: 4,
+      })
+    case 'norfolk-island-pine':
+      return regimeArchitecture(parameters, {
+        boleFraction: 0.995,
+        crownBaseFraction: 0.2,
+        cardSize: 0.62,
+        farClusterSize: 1.1,
+        cardsPerStation: 4,
+      })
+    case 'ancient-oak':
+    case 'field-oak':
+      return oak(parameters, age, parameters.species === 'ancient-oak')
+  }
+}
+
+function regimeArchitecture(
+  parameters: TreeParameters,
+  values: Pick<
+    SpeciesArchitecture,
+    | 'boleFraction'
+    | 'crownBaseFraction'
+    | 'cardSize'
+    | 'farClusterSize'
+    | 'cardsPerStation'
+  >,
+): SpeciesArchitecture {
+  return {
+    ...values,
+    broadness: 0.5,
+    profileExponent: 0.5,
+    lobeAmplitude: 0.16,
+    lobeCount: 5,
+    scaffoldCount: parameters.branchCount,
+    lowestScaffold: 0.5,
+    scaffoldRise: [0.1, 0.7],
+    scaffoldFollow: 0.4,
+    upTropism: 0.24,
+    sag: 0.14,
+    axialPersistence: 0.64,
+    wander: 0.08,
+    shellBias: 1,
+    segmentFraction: 0.055,
+    attractorCount: 1800,
+    meshedTipRadius: 0.022,
+    shadeValue: 0.62,
+    sunValue: 1.08,
+  }
 }
 
 /**
@@ -93,7 +290,10 @@ function oak(
     profileExponent: lerpNumber(0.46, 0.3, veteran),
     lobeAmplitude: lerpNumber(0.2, 0.32, veteran) + gnarl * 0.08,
     lobeCount: ancient ? 4 : 5,
-    scaffoldCount: ancient ? 5 + (parameters.seed % 3) : 4 + (parameters.seed % 2),
+    // The authored major-branch control owns the number of scaffold seeds.
+    // Seed variation belongs in their placement and development, not in
+    // silently overriding a visible editor parameter.
+    scaffoldCount: parameters.branchCount,
     lowestScaffold: lerpNumber(0.72, 0.42, veteran),
     scaffoldRise: ancient ? [0.05, 0.62] : [0.34, 0.95],
     scaffoldFollow: lerpNumber(0.34, 0.2, veteran),
@@ -107,7 +307,10 @@ function oak(
     shellBias: lerpNumber(0.72, 1.0, veteran),
     segmentFraction: 0.05,
     attractorCount: 4400,
-    meshedTipRadius: 0.026,
+    // Terminal branchlets below a finger's width are represented by layered
+    // sprays. Meshing every one of them makes a veteran crown read as a wire
+    // cage and spends the hero budget where the cards already provide volume.
+    meshedTipRadius: ancient ? 0.042 : 0.03,
     // Branchlet-sized rather than crown-clump-sized. The expanded density range
     // can restore the old projected coverage with more independent sprays.
     cardSize: 0.72,
@@ -127,7 +330,7 @@ function pine(parameters: TreeParameters, age: number): SpeciesArchitecture {
     profileExponent: 0.78,
     lobeAmplitude: 0.2 + gnarl * 0.12,
     lobeCount: 6,
-    scaffoldCount: 7,
+    scaffoldCount: parameters.branchCount,
     lowestScaffold: 0.34,
     scaffoldRise: [-0.14, 0.34],
     scaffoldFollow: 0.42,
@@ -143,6 +346,35 @@ function pine(parameters: TreeParameters, age: number): SpeciesArchitecture {
     farClusterSize: 1.05,
     cardsPerStation: 3,
     shadeValue: 0.52,
+    sunValue: 1.02,
+  }
+}
+
+function bristlecone(parameters: TreeParameters): SpeciesArchitecture {
+  const gnarl = clamp(parameters.gnarl, 0, 1)
+  return {
+    boleFraction: 0.68,
+    crownBaseFraction: 0.5,
+    broadness: 0.4,
+    profileExponent: 0.5,
+    lobeAmplitude: 0.34,
+    lobeCount: 4,
+    scaffoldCount: parameters.branchCount,
+    lowestScaffold: 0.42,
+    scaffoldRise: [-0.08, 0.48],
+    scaffoldFollow: 0.26,
+    upTropism: 0.12,
+    sag: 0.18,
+    axialPersistence: 0.56,
+    wander: 0.18 + gnarl * 0.22,
+    shellBias: 1.75,
+    segmentFraction: 0.058,
+    attractorCount: 1700,
+    meshedTipRadius: 0.035,
+    cardSize: 0.56,
+    farClusterSize: 0.92,
+    cardsPerStation: 3,
+    shadeValue: 0.5,
     sunValue: 1.02,
   }
 }

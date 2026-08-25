@@ -5,6 +5,7 @@ import {
   dot,
   emptyBounds,
   groundHeightAt,
+  hashUnit,
   includeInBounds,
   length,
   lerp,
@@ -43,6 +44,21 @@ import {
   type GrowthSettings,
 } from './crownArchitecture'
 import { speciesArchitecture, type SpeciesArchitecture } from './speciesArchitecture'
+import { treeSpeciesDefinition } from './speciesCatalog'
+import { growRegimeCrown } from './growth/regimeCrown'
+import { growSupportRoots } from './growth/supportRoots'
+import { fitAerialRootsToCarriers } from './growth/descendingRoot'
+import type { FruitClusterDraft, GrowthAxisDraft, OrganStationDraft } from './growth/types'
+import { trunkRadiusMultiplier } from './growth/trunkProfile'
+import {
+  palmTrunkProfile,
+  palmTrunkStation,
+} from './growth/profiles/palmTrunkProfiles'
+import {
+  baobabBoleStation,
+  baobabMeanderAmplitudeLimit,
+} from './growth/profiles/baobabBoleProfile'
+import { boleProfile, boleStation } from './growth/profiles/boleProfiles'
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
 
@@ -58,6 +74,7 @@ export function generateSemanticTree(
   const parameters = normalizeTreeParameters(input)
   const random = new TreeRandom(parameters.seed)
   const architecture = speciesArchitecture(parameters)
+  const species = treeSpeciesDefinition(parameters.species)
   const habit = deriveTreeHabit(parameters)
   const parts: SemanticTreePart[] = []
 
@@ -68,17 +85,42 @@ export function generateSemanticTree(
   // divides, and both halves carry bark, girth and their own crown from there
   // up. Modelling it as branches left every tree in the set standing on the
   // same single column, which is most of why they all read as the same tree.
-  const stems = createCodominantStems(parameters, habit, random, trunk)
+  const stems = species.growthModel === 'colonized-crown'
+    ? createCodominantStems(parameters, habit, random, trunk)
+    : []
   parts.push(...stems)
   for (const stem of stems) connect(trunk, stem, stem.junctionType === 'continuation')
 
   const boles = stems.length > 0 ? stems : [trunk]
-  const crown = growCrownParts(parameters, architecture, habit, random, trunk, boles)
-  parts.push(...crown.parts)
+  let crownBranches: SemanticTreePart[] = []
+  let crownNodes: GrowthNode[] = []
+  let regimeOrgans: OrganStationDraft[] = []
+  let regimeFruits: FruitClusterDraft[] = []
+  if (species.growthModel === 'colonized-crown') {
+    const crown = growCrownParts(parameters, architecture, habit, random, trunk, boles)
+    parts.push(...crown.parts)
+    crownBranches = crown.branches
+    crownNodes = crown.nodes
+  } else {
+    const regime = growRegimeCrown(parameters, trunk, random)
+    const byId = new Map(parts.map((part) => [part.id, part]))
+    for (const axis of regime.axes) {
+      const part = regimeAxisToPart(axis, parameters, random)
+      parts.push(part)
+      crownBranches.push(part)
+      const parent = byId.get(part.parentId!)
+      if (parent) connect(parent, part, axis.continuation)
+      byId.set(part.id, part)
+    }
+    regimeOrgans = regime.organs
+    regimeFruits = regime.fruits ?? []
+  }
 
   // Stubs of the limbs this individual actually lost, at the scars the trunk
   // already swelled around, rather than a fixed quota at arbitrary places.
-  for (const [index, wound] of habit.lostLimbs.entries()) {
+  for (const [index, wound] of (species.growthModel === 'colonized-crown'
+    ? habit.lostLimbs
+    : []).entries()) {
     const stub = createDeadStub(parameters, random, trunk, index, wound)
     parts.push(stub)
     connect(trunk, stub, false)
@@ -88,7 +130,7 @@ export function generateSemanticTree(
   // with dead antlers over it — and it is the single most identifiable
   // ancient-oak profile there is.
   for (let index = 0; index < habit.deadSparCount; index += 1) {
-    const carrier = crown.branches
+    const carrier = crownBranches
       .filter((branch) => branch.branchOrder <= 1)
       .sort((a, b) => b.spine.at(-1)!.position.y - a.spine.at(-1)!.position.y)
     const parent = carrier[index % Math.max(1, carrier.length)]
@@ -98,8 +140,19 @@ export function generateSemanticTree(
     connect(parent, spar, false)
   }
 
+  // Exotic support-root species carry most of their load above ground. A
+  // second full radial root fan underneath them hides that defining topology
+  // and produces a generic starburst base, so retain only a small anchoring
+  // set where it is botanically useful.
+  const basalRootCount = species.rootModel === 'prop' || species.rootModel === 'fibrous-mat'
+    ? 0
+    : species.rootModel === 'aerial-support'
+      ? Math.min(4, parameters.rootCount)
+      : species.rootModel === 'wrapping-fused'
+        ? Math.min(3, parameters.rootCount)
+        : parameters.rootCount
   const structuralRoots: SemanticTreePart[] = []
-  for (let index = 0; index < parameters.rootCount; index += 1) {
+  for (let index = 0; index < basalRootCount; index += 1) {
     const root = createStructuralRoot(
       parameters,
       habit,
@@ -107,7 +160,7 @@ export function generateSemanticTree(
       random,
       index,
       trunk,
-      crown.branches,
+      crownBranches,
     )
     parts.push(root)
     structuralRoots.push(root)
@@ -130,26 +183,147 @@ export function generateSemanticTree(
     }
   }
 
+  for (const supportRoot of growSupportRoots(
+    parameters,
+    environment,
+    boles,
+    crownBranches,
+    random,
+  )) {
+    parts.push(supportRoot)
+    const parent = parts.find((part) => part.id === supportRoot.parentId)
+    if (parent) connect(parent, supportRoot, false)
+  }
+
   raiseButtresses(parts, trunk, habit, parameters)
   buryRootEnds(parts, environment)
   applyLoadSwelling(parts)
   solveRadiusInheritance(parts)
+  // After inheritance, not before: a carrier limb that has just been scaled
+  // down to fit its own parent must not be left thinner than the pillar it
+  // holds up.
+  fitAerialRootsToCarriers(parts)
   const graph: SemanticTreeGraph = {
     seed: parameters.seed,
     parts,
     contacts: [],
     foliageClusters: [],
+    fruitClusters: [],
     bounds: emptyBounds(),
   }
   resolveTreeSpace(graph, environment, parameters)
-  graph.foliageClusters = createFoliageClusters(
-    crown.nodes,
-    parameters,
-    architecture,
-    random,
-  )
+  graph.foliageClusters = species.growthModel === 'colonized-crown'
+    ? createFoliageClusters(crownNodes, parameters, architecture, random)
+    : (() => {
+      // A frond bound to its bearer's tip is right when the bearer *is* the
+      // petiole — one organ, one axis, as an apical palm crown builds it. It is
+      // destructive when a single apex carries a whole fan: every frond in that
+      // head then inherits the same centre and the same bearing, and the crown
+      // collapses to a flat radial carpet however carefully its leaf ages and
+      // lifts were authored.
+      const organsPerBearer = new Map<string, number>()
+      for (const organ of regimeOrgans) {
+        organsPerBearer.set(organ.partId, (organsPerBearer.get(organ.partId) ?? 0) + 1)
+      }
+      return regimeOrgans.map((organ, index) => {
+        const bearer = organ.organModel === 'frond' &&
+          (organsPerBearer.get(organ.partId) ?? 0) === 1
+          ? parts.find((part) => part.id === organ.partId)
+          : undefined
+        const resolvedAxis = bearer && bearer.spine.length > 1
+          ? normalize(
+              subtract(
+                bearer.spine.at(-1)!.position,
+                bearer.spine.at(-2)!.position,
+              ),
+              organ.axis,
+            )
+          : organ.axis
+        return {
+          id: `organ-${index + 1}`,
+          partId: organ.partId,
+          // Bind to the resolved bearer rather than duplicating its authored
+          // endpoint. This remains exact if future environment constraints
+          // legitimately move the whole apical assembly.
+          center: bearer
+            ? add(bearer.spine.at(-1)!.position, multiply(resolvedAxis, -0.035))
+            : organ.center,
+          axis: resolvedAxis,
+          radius: organ.radius,
+          depth: organ.depth,
+          occlusion: organ.occlusion,
+          senescence: organ.senescence,
+          development: organ.development,
+          organModel: organ.organModel,
+          seed: organ.seed,
+        }
+      })
+    })()
+  graph.fruitClusters = regimeFruits.map((fruit, index) => {
+    const bearer = parts.find((part) => part.id === fruit.partId)
+    return {
+      id: `fruit-cluster-${index + 1}`,
+      model: fruit.model,
+      partId: fruit.partId,
+      center: bearer?.spine.at(-1)?.position ?? fruit.center,
+      axis: fruit.axis,
+      radial: fruit.radial,
+      strandCount: fruit.strandCount,
+      spread: fruit.spread,
+      length: fruit.length,
+      fruitRadius: fruit.fruitRadius,
+      count: fruit.count,
+      seed: fruit.seed,
+    }
+  })
   graph.bounds = graphBounds(graph)
   return graph
+}
+
+function regimeAxisToPart(
+  axis: GrowthAxisDraft,
+  parameters: TreeParameters,
+  random: TreeRandom,
+): SemanticTreePart {
+  const spine = axis.samples.map((sample, index) => {
+    const swell = sample.swell ?? 1
+    const radius = sample.radius * swell
+    const crossSection = branchCrossSection(
+      radius,
+      index / Math.max(1, axis.samples.length - 1),
+      parameters,
+      random,
+      axis.branchOrder * 17 + index,
+    )
+    // A dichotomy leaves a node that is widest across the split plane and
+    // narrowest along it, because the two daughters press together as they
+    // thicken. Expressing it on the cross-section keeps the fork inside the
+    // same swept surface instead of needing a separately meshed collar.
+    const flatten = sample.flatten ?? 0
+    if (flatten > 0 && sample.flattenAxis) {
+      const across = normalize(sample.flattenAxis, vec3(1, 0, 0))
+      crossSection.rotation = Math.atan2(across.z, across.x)
+      crossSection.radiusX = radius * (1 + flatten)
+      crossSection.radiusZ = radius * (1 - flatten * 0.62)
+    }
+    return { position: sample.position, radius, burialDepth: 0, crossSection }
+  })
+  return {
+    id: axis.id,
+    type: spine[0]!.radius < 0.06 ? 'twig' : 'branch',
+    parentId: axis.parentId,
+    children: [],
+    branchOrder: axis.branchOrder,
+    age: parameters.age * clamp(1 - axis.branchOrder * 0.12, 0.25, 1),
+    vigor: clamp(1 - axis.branchOrder * 0.12, 0.2, 1),
+    dominance: clamp(1 - axis.branchOrder * 0.2, 0.08, 1),
+    attachment: axis.attachment,
+    junctionType: axis.continuation
+      ? 'continuation'
+      : axis.branchOrder <= 1 ? 'bifurcation' : 'lateral',
+    embedded: axis.embedded,
+    spine,
+  }
 }
 
 function createTrunk(
@@ -168,9 +342,27 @@ function createTrunk(
     : 1
   const height = parameters.height * architecture.boleFraction * habit.snapHeight *
     divisionHeight
-  const sampleCount = parameters.species === 'ancient-oak' ? 22 : 18
+  const trunkProfile = treeSpeciesDefinition(parameters.species).trunkProfile
+  const speciesBole = boleProfile(parameters.species)
+  const palmProfile = trunkProfile === 'palm-column'
+    ? palmTrunkProfile(parameters.species)
+    : undefined
+  const sampleCount = palmProfile
+    // Four axial stations are enough to describe a local scar lip. The old
+    // eight-station sampling was then retained verbatim by the hero mesher,
+    // spending tens of thousands of triangles on a corrugated cylinder.
+    ? Math.max(96, Math.ceil(height / palmProfile.ringSpacing) * 4 + 1)
+    // An authored bole path carries real curvature and a girth field with two
+    // waves in it; eighteen stations turn both into a polyline of straight
+    // sections with visible axial seams between them.
+    // Stations proportional to the bole's own length: enough to resolve the
+    // authored curvature, without oversampling a two-metre stool into hundreds
+    // of near-coincident rings.
+    : speciesBole ? Math.round(clamp(height * 5, 22, 56))
+    : parameters.species === 'ancient-oak' ? 22 : 18
   const pine = parameters.species === 'windswept-pine'
   const ancient = parameters.species === 'ancient-oak'
+  const veteranWood = ancient || parameters.species === 'live-oak'
   const leanX = Math.cos(habit.leanAzimuth)
   const leanZ = Math.sin(habit.leanAzimuth)
   // The bole's meander runs in a plane of its own, not in the lean's, so a
@@ -194,18 +386,44 @@ function createTrunk(
     // Lean accumulates with height rather than tilting the whole column off its
     // base, because a tree that leans grew that way rather than being pushed.
     const leanOffset = t * t * height * Math.tan(habit.lean)
-    const meander = Math.sin(t * Math.PI * habit.sinuosityTurns * 2 + meanderPhase) *
-      habit.sinuosity * parameters.trunkRadius *
+    const requestedMeander = habit.sinuosity * parameters.trunkRadius
+    const meanderAmplitude = parameters.species === 'baobab'
+      ? Math.min(
+          requestedMeander,
+          baobabMeanderAmplitudeLimit(
+            height,
+            parameters.trunkRadius,
+            habit.sinuosityTurns,
+          ),
+        )
+      : requestedMeander
+    // A species bole path owns the centre line outright. Adding the generic
+    // habit meander on top stacks two independent wanders and produces the
+    // corkscrew stack of sausages review rejected.
+    const meander = (speciesBole ? 0 : 1) *
+      Math.sin(t * Math.PI * habit.sinuosityTurns * 2 + meanderPhase) *
+      meanderAmplitude *
       // Almost none at the butt — the base of a bole is anchored — building
       // through the middle and easing off at the top.
       smoothstep(0, 0.35, t) * (1 - t * 0.25)
+    // The authored species path replaces the generic palm sweep too. Doum has
+    // both a palm surface profile and a forked-palm bole profile; accumulating
+    // both centre-line fields doubled its lean and wobble.
+    const palmSweep = palmProfile && !speciesBole
+      ? Math.sin(t * Math.PI) * parameters.trunkRadius * palmProfile.sweep *
+        (0.55 + parameters.sinuosity * 0.45)
+      : 0
+    const palmWobble = palmProfile && !speciesBole
+      ? Math.sin(t * Math.PI * 2.15 + meanderPhase * 0.7) *
+        Math.sin(t * Math.PI) * parameters.trunkRadius * palmProfile.sweepWobble
+      : 0
     const position = vec3(
-      leanX * leanOffset + meanderX * meander,
+      leanX * leanOffset + meanderX * (meander + palmSweep) - meanderZ * palmWobble,
       // The butt starts below the soil. A trunk that begins exactly at ground
       // level shows its own end cap as a hard flat disc cut across the base,
       // and no amount of root work hides a straight line through the flare.
       lerpNumber(-buriedButt, height, t),
-      leanZ * leanOffset + meanderZ * meander,
+      leanZ * leanOffset + meanderZ * (meander + palmSweep) + meanderX * palmWobble,
     )
     const taper = Math.pow(1 - boleT, ancient ? 0.62 : 0.72)
     // Two flares superposed: a wide, shallow one for the whole butt and a tight
@@ -219,7 +437,12 @@ function createTrunk(
         (ancient ? 0.16 + parameters.age * 0.12 : 0.14) +
       smoothstep(0.09, 0, boleT) *
         (ancient ? 0.2 + parameters.age * 0.16 : 0.16)
-    const terminalFraction = ancient ? 0.52 : pine ? 0.28 : 0.42
+    // An open scaffold crown owns the continuation above the bole. Leaving the
+    // generic forty-two-percent terminal there produces a thick flat stump in
+    // the middle of the crown even though a living continuation starts at it.
+    const openScaffold = parameters.species === 'umbrella-acacia' ||
+      parameters.species === 'live-oak'
+    const terminalFraction = openScaffold ? 0.12 : ancient ? 0.52 : pine ? 0.28 : 0.42
     // A broken bole does not taper to a point: it stays thick and stops.
     const snapSwell = habit.snapHeight < 1
       ? 1 + smoothstep(0.7, 1, t) * 0.22
@@ -231,25 +454,99 @@ function createTrunk(
       woundSwell += smoothstep(0.16, 0, Math.abs(boleT - wound.height)) *
         wound.scale * 0.28
     }
-    const radius = parameters.trunkRadius *
-      (terminalFraction + taper * (1 - terminalFraction)) *
-      baseFlare * snapSwell * woundSwell
+    const genericMultiplier = terminalFraction + taper * (1 - terminalFraction)
+    const palmStation = palmProfile
+      ? palmTrunkStation(palmProfile, boleT, height, parameters.seed, parameters.age)
+      : undefined
+    // A species bole path, where one is authored. This is the reusable
+    // replacement for adding another `parameters.species === ...` branch every
+    // time a trunk needs its own character.
+    const species_ = speciesBole
+      ? boleStation(
+          speciesBole,
+          boleT,
+          position.y,
+          parameters.trunkRadius,
+          parameters.seed,
+          parameters.age,
+          height,
+        )
+      : undefined
+    if (species_) {
+      position.x += meanderX * species_.offset - meanderZ * species_.crossOffset
+      position.z += meanderZ * species_.offset + meanderX * species_.crossOffset
+    }
+    const baobabStation = parameters.species === 'baobab'
+      ? baobabBoleStation(
+          boleT,
+          parameters.seed,
+          parameters.age,
+          position.y,
+          parameters.trunkRadius,
+        )
+      : undefined
+    const profileMultiplier = palmStation
+      ? palmStation.radiusMultiplier
+      : baobabStation
+        ? baobabStation.radiusMultiplier
+      : species_
+        ? species_.radiusMultiplier
+      : trunkProfile === 'tapered'
+        ? genericMultiplier * baseFlare
+        : trunkRadiusMultiplier(trunkProfile, boleT)
+    const radius = parameters.trunkRadius * profileMultiplier * snapSwell * woundSwell
     spine.push({
       position,
       radius,
       burialDepth: 0,
       crossSection: {
-        radiusX: radius * (1 + oldWood * 0.08),
-        radiusZ: radius * (1 - oldWood * 0.045),
+        radiusX: radius * (baobabStation?.radiusXScale ??
+          (1 + (palmStation?.ellipticity ?? oldWood * 0.08))),
+        radiusZ: radius * (baobabStation?.radiusZScale ??
+          (1 - (palmStation?.ellipticity ?? oldWood * 0.045) * 0.72)),
         // Spiral grain. A veteran's flutes wind around the bole over its
         // length rather than running as straight columns.
-        rotation: t * habit.twist,
+        rotation: baobabStation?.rotation ??
+          (t * habit.twist + (palmStation?.scarPhase ?? 0) * 0.035),
         // Buttressing, not fluting. A high lobe count run up the whole bole
         // turned the trunk into a fluted column; real swelling is a handful of
         // broad ribs that die out a metre or two above the roots.
-        lobeCount: clamp(Math.round(parameters.rootCount * 0.6), 3, 5),
-        lobeStrength: smoothstep(0.42, 0, boleT) * habit.fluting *
-          (0.06 + parameters.age * (ancient ? 0.2 : 0.12)),
+        lobeCount: baobabStation?.lobeCount ?? (palmProfile
+          ? (boleT < 0.12 ? 9 : 7)
+          : clamp(Math.round(parameters.rootCount * 0.6), 3, 5)),
+        fusedStems: baobabStation?.fusedStems,
+        fusedStemBlend: baobabStation?.fusedStemBlend,
+        lobeStrength: baobabStation?.lobeStrength ?? (palmProfile
+          ? palmProfile.leafBaseRelief * smoothstep(0.08, 1, boleT) *
+              (0.22 + parameters.age * 0.42)
+          : smoothstep(veteranWood ? 0.68 : 0.42, 0, boleT) *
+            habit.fluting *
+            (0.06 + parameters.age * (veteranWood ? 0.2 : 0.12))),
+        // Persistent projecting boots survive only on the young upper column.
+        // Older leaf bases erode to surface scars and belong in the bark maps.
+        palmBootPhase: palmStation && boleT > palmProfile!.leafBaseZoneStart
+          ? palmStation.scarPhase
+          : undefined,
+        palmRinged: parameters.species === 'coconut-palm',
+        palmBootRelief: palmStation
+          ? palmProfile!.ringRelief * lerpNumber(
+              parameters.species === 'date-palm' || parameters.species === 'doum-palm'
+                ? 0.28
+                : 0.12,
+              parameters.species === 'date-palm' || parameters.species === 'doum-palm'
+                ? 0.52
+                : 0.4,
+              smoothstep(0.7, 0.94, boleT),
+            )
+          : undefined,
+        palmBootRanks: palmProfile?.leafBaseRanks,
+        palmBootRetention: palmProfile
+          ? lerpNumber(
+              palmProfile.erodedBootRetention,
+              palmProfile.leafBaseRetention,
+              smoothstep(0.64, 0.9, boleT),
+            )
+          : undefined,
       },
     })
   }
@@ -326,9 +623,20 @@ function createCodominantStems(
     const splay = (habit.bolePlan === 'multistem'
         ? random.range(0.16, 0.3)
         : lerpNumber(0.34, 0.14, share) * random.range(0.75, 1.3))
+    // Never past the authored height. A dominant stem given twelve per cent
+    // more than its share stood metres clear of the crown its own branches
+    // build, and the mesher can only finish it with a cap — a blunt pole
+    // sticking out of the canopy on every co-dominant species.
+    const ceiling = Math.max(
+      parameters.height * 0.15,
+      parameters.height * habit.snapHeight - boleTop,
+    )
     const length = fused
-      ? remaining
-      : remaining * lerpNumber(0.82, 1.12, clamp(share * stemCount, 0, 1))
+      ? Math.min(remaining, ceiling)
+      : Math.min(
+          remaining * lerpNumber(0.82, 1.12, clamp(share * stemCount, 0, 1)),
+          ceiling,
+        )
     // Preserve roughly twelve authored stations per turn. Six turns sampled at
     // the old fixed 26 points alias into angular chords and look kinked rather
     // than like a slow continuous braid.
@@ -410,9 +718,12 @@ function createCodominantStems(
         ? 1 + smoothstep(0, 0.045, t) * smoothstep(0.24, 0.045, t) *
           (0.12 + parameters.age * 0.1)
         : 1 + smoothstep(0.22, 0, t) * (0.28 + parameters.age * 0.22)
+      // A trunk does not end in a stump. The last stretch resolves to a shoot
+      // so the terminal cap is the size of a twig rather than a sawn disc.
+      const terminalShoot = lerpNumber(1, 0.3, smoothstep(0.84, 1, t))
       const radius = Math.max(
         0.05,
-        baseRadius * stemTaper * unionSwell,
+        baseRadius * stemTaper * unionSwell * terminalShoot,
       )
       spine.push({
         position,
@@ -916,7 +1227,13 @@ function chainToPart(
     const swing = Math.sin(t * Math.PI * 2.1 + phase) * 0.68 +
       Math.sin(t * Math.PI * 4.7 + phase * 1.7) * 0.32
     const twist = Math.sin(t * Math.PI * 3.3 + phase * 0.7)
-    const amplitude = node.radius * gnarlWeight * 1.35
+    // A member is fixed at its attachment. Starting the procedural gnarl at
+    // full amplitude displaces the child centreline before the collar solver
+    // sees it; continuations then leave a hard circumferential shelf and
+    // lateral limbs appear to tunnel out of the parent. Let deformation grow
+    // over the first few stations, after the union has established continuity.
+    const attachmentFade = smoothstep(0, 0.16, t)
+    const amplitude = node.radius * gnarlWeight * 1.35 * attachmentFade
     const position = add(
       basePosition,
       add(multiply(side, swing * amplitude), multiply(across, twist * amplitude * 0.6)),
@@ -1086,6 +1403,10 @@ function createStructuralRoot(
   trunk: SemanticTreePart,
   majorBranches: readonly SemanticTreePart[],
 ): SemanticTreePart {
+  const ceiba = parameters.species === 'kapok-ceiba'
+  const baobab = parameters.species === 'baobab'
+  const liveOak = parameters.species === 'live-oak'
+  const pandanus = parameters.species === 'screw-pine-pandanus'
   const primaryScaffolds = majorBranches.filter((branch) => branch.branchOrder <= 1)
   const loadBranch = primaryScaffolds[index % Math.max(1, primaryScaffolds.length)]
   const loadVector = loadBranch
@@ -1106,11 +1427,11 @@ function createStructuralRoot(
     Math.atan2(loadDirection.z, loadDirection.x) - habit.leanAzimuth - Math.PI,
   ) * habit.lean * 2.2
   const angle = index < primaryScaffolds.length
-    ? Math.atan2(loadDirection.z, loadDirection.x) + random.range(-0.24, 0.24)
-    : index * GOLDEN_ANGLE + parameters.seed * 0.00013 + random.range(-0.32, 0.32)
+    ? Math.atan2(loadDirection.z, loadDirection.x) + random.range(-0.48, 0.48)
+    : index * GOLDEN_ANGLE + parameters.seed * 0.00013 + random.range(-0.58, 0.58)
   const direction = normalize(vec3(Math.cos(angle), 0, Math.sin(angle)))
   const side = vec3(-direction.z, 0, direction.x)
-  const length = parameters.rootSpread * random.range(0.58, 1.08) *
+  const length = parameters.rootSpread * random.range(0.46, 1.16) *
     lerpNumber(0.82, 1.18, structuralLoad) * (1 + Math.max(0, leanPull) * 0.5)
   const sampleCount = Math.max(14, Math.ceil(length / 0.5))
   // Buttressed roots climb the bole before they spread; sunken ones leave at
@@ -1118,7 +1439,11 @@ function createStructuralRoot(
   // it has to be expressed in metres. As a *fraction of the bole* the same
   // number put a buttress two metres up a tall trunk, and the collar between it
   // and the ground came out as a huge flat sheet.
-  const climbMetres = parameters.trunkRadius * (
+  const climbMetres = pandanus
+    ? parameters.height * random.range(0.13, 0.24)
+    : baobab
+      ? parameters.trunkRadius * random.range(0.45, 0.68)
+    : parameters.trunkRadius * (
     habit.rootForm === 'buttressed'
       ? random.range(0.9, 1.8) * (0.72 + habit.fluting)
       : habit.rootForm === 'stilted'
@@ -1129,17 +1454,41 @@ function createStructuralRoot(
   const attachment = clamp(
     climbMetres / boleHeight + structuralLoad * 0.012,
     0.008,
-    0.2,
+    pandanus ? 0.34 : 0.2,
   )
   const source = samplePart(trunk, attachment)
-  const dominantButtress = index < primaryScaffolds.length
+  // Four load-bearing plates are enough to ground the tree. Making every root
+  // equally broad and equally exposed creates a regular starfish base even
+  // when their paths wander later.
+  // Species that carry their load on pillars, stilts or a braid do not also
+  // stand on broad surface plates. Their few anchoring roots sink at once, the
+  // way a baobab's do, so the base is not littered with flat pressed shims.
+  const rootModel = treeSpeciesDefinition(parameters.species).rootModel
+  const aboveGroundLoad = rootModel === 'aerial-support' ||
+    rootModel === 'prop' ||
+    rootModel === 'wrapping-fused' ||
+    rootModel === 'stilt'
+  const sinking = baobab || aboveGroundLoad
+  const dominantButtress = !sinking && index < Math.min(
+    ceiba ? 6 : liveOak ? 3 : 4,
+    Math.max(1, primaryScaffolds.length),
+  )
   // Sized against the bole's radius *where the root actually leaves it*, not
   // against the nominal trunk radius. A root that starts markedly thinner than
   // the flare it emerges from looks bolted on, which is most of why they read
   // as "suddenly starting" at the base.
   const flareRadius = Math.max(source.radius, parameters.trunkRadius)
   const baseRadius = flareRadius * (
-    dominantButtress ? random.range(0.34, 0.48) : random.range(0.22, 0.31)
+    sinking
+      ? random.range(0.2, 0.29)
+      : pandanus
+        ? random.range(0.2, 0.3)
+      : dominantButtress
+      ? random.range(
+          ceiba ? 0.42 : liveOak ? 0.4 : 0.34,
+          ceiba ? 0.58 : liveOak ? 0.56 : 0.48,
+        )
+      : random.range(0.15, 0.24)
   ) * lerpNumber(0.86, 1.24, structuralLoad)
 
   const phase = random.range(0, Math.PI * 2)
@@ -1159,9 +1508,19 @@ function createStructuralRoot(
   // How far the continuous surface plate runs before the arch rhythm begins.
   // Long on a buttressed or stilted individual, barely present on a sunken one.
   const plateEnd = habit.rootForm === 'sunken'
-    ? random.range(0.06, 0.14)
+    ? random.range(
+        // A baobab does not carry surface plates. Its base is a flare with
+        // shoulder ribs, and every metre of exposed strap on the terrain read
+        // as a flat pressed shim in review. Sink them at once and let the
+        // bole's own foot do the grounding.
+        liveOak ? 0.42 : sinking ? 0.02 : 0.06,
+        liveOak ? 0.58 : sinking ? 0.09 : 0.14,
+      )
     : habit.rootForm === 'buttressed'
-      ? random.range(0.4, 0.62) * lerpNumber(0.82, 1.16, clamp(habit.fluting, 0, 1))
+      ? (dominantButtress
+          ? random.range(ceiba ? 0.58 : 0.38, ceiba ? 0.78 : 0.62)
+          : random.range(0.12, 0.3)) *
+        lerpNumber(0.82, 1.16, clamp(habit.fluting, 0, 1))
       : habit.rootForm === 'stilted'
         ? random.range(0.3, 0.5)
         : random.range(0.18, 0.38)
@@ -1175,8 +1534,8 @@ function createStructuralRoot(
     const wander = multiply(
       side,
       (Math.sin(t * Math.PI * wanderFrequency + phase) * 0.75 +
-        Math.sin(t * Math.PI * wanderFrequency * 2.7 + phase * 1.6) * 0.25) *
-        length * 0.1,
+          Math.sin(t * Math.PI * wanderFrequency * 2.7 + phase * 1.6) * 0.25) *
+        length * (ceiba ? 0.035 : pandanus ? 0.045 : 0.1),
     )
     const horizontal = add(add(source.position, fan), wander)
     const radius = Math.max(0.05, baseRadius * Math.pow(1 - t * 0.94, 0.62))
@@ -1190,20 +1549,27 @@ function createStructuralRoot(
     // By the tip it is round, because a root that has stopped buttressing
     // anything is just a pipe. The old version started flat immediately, so
     // every root left the trunk as a blade.
-    const buttress = smoothstep(0.3, 0.02, t)
+    const buttress = smoothstep(liveOak ? 0.18 : 0.3, 0.02, t)
     // The strap runs as far as the plate does: while a root is still a surface
     // rib it is broad and shallow, and it only rounds off once it sinks.
     const strap = smoothstep(0.06, 0.34, t) * smoothstep(1, plateEnd + 0.3, t)
     // Kept mild. Pushed hard the strap becomes a flat plank with a visible
     // faceted edge, which is worse than a slightly too-round root.
-    const strapWidth = habit.rootForm === 'buttressed' ? 1.44 : 1.32
-    const buttressWidth = habit.rootForm === 'buttressed' ? 0.8 : 0.7
+    const strapWidth = liveOak
+      ? 1.9
+      : habit.rootForm === 'buttressed' ? (ceiba ? 1.16 : 1.44) : 1.32
+    const buttressWidth = habit.rootForm === 'buttressed' ? (ceiba ? 0.5 : 0.8) : 0.7
     const radiusX = radius *
       lerpNumber(1, lerpNumber(1, strapWidth, strap), 1 - buttress) *
       lerpNumber(1, buttressWidth, buttress)
+    const strapDepth = liveOak ? 0.45 : 0.86
     const radiusZ = radius *
-      lerpNumber(1, lerpNumber(1, 0.86, strap), 1 - buttress) *
-      lerpNumber(1, habit.rootForm === 'buttressed' ? 1.9 : 1.65, buttress)
+      lerpNumber(1, lerpNumber(1, strapDepth, strap), 1 - buttress) *
+      lerpNumber(
+        1,
+        habit.rootForm === 'buttressed' ? (ceiba ? 2.8 : 1.9) : 1.65,
+        buttress,
+      )
     const ground = groundHeightAt(
       horizontal.x,
       horizontal.z,
@@ -1223,7 +1589,13 @@ function createStructuralRoot(
     //
     // Past the plate the rhythm takes over: the root breaks the soil again a
     // couple of times, each surfacing lower than the last, and finally commits.
-    const plate = smoothstep(plateEnd, 0.02, t)
+    // Live-oak plates stay broad and exposed until they clear the bell of the
+    // bole, then feather into the soil near the end of their run. Fading them
+    // from the first station left the only above-ground samples hidden inside
+    // the trunk flare even though the root graph itself extended for metres.
+    const plate = liveOak
+      ? smoothstep(plateEnd, plateEnd * 0.72, t)
+      : smoothstep(plateEnd, 0.02, t)
     const remaining = smoothstep(commitAt + 0.16, commitAt - 0.3, t)
     const rhythm = surfacings > 0
       ? Math.pow(
@@ -1248,15 +1620,17 @@ function createStructuralRoot(
     // erosion, and that is what the setting governs. Driving both from the same
     // small number meant the plate emerged a few centimetres proud of the soil
     // while the rib it was supposed to continue stood a metre and a half tall.
-    const plateLift = plate * radiusZ * (0.85 + relief * 0.8)
+    const plateLift = plate * radiusZ *
+      ((liveOak ? 0.45 : 0.85) + relief * 0.8)
     const archLift = rhythm * remaining * Math.pow(1 - t, 0.45) *
       radiusZ * relief * 1.15
     // Anything barely proud of the soil is pushed under instead. A root that
     // clears the ground by a few centimetres over a short run does not read as
     // a root at all — it reads as a chip of bark lying in the grass.
     const exposure = Math.max(plateLift, archLift)
-    const crownAboveGround = exposure *
-      smoothstep(radiusZ * 0.18, radiusZ * 0.45, exposure)
+    const crownAboveGround = liveOak
+      ? exposure
+      : exposure * smoothstep(radiusZ * 0.18, radiusZ * 0.45, exposure)
     const buriedDepth = radiusZ *
       lerpNumber(0.6, 2.2, smoothstep(0.05, 0.75, t)) *
       (1 - arch)
@@ -1267,7 +1641,11 @@ function createStructuralRoot(
     // whole length of the plate, not in the first few centimetres. Completing
     // the handover early dropped the root off the side of the buttress rib in
     // one step — the cliff at the edge of the flare.
-    const departure = smoothstep(0.02, plateEnd + 0.3, t)
+    const departure = smoothstep(
+      0.02,
+      liveOak ? Math.max(0.12, plateEnd * 0.55) : plateEnd + 0.3,
+      t,
+    )
     const centerY = lerpNumber(source.position.y, surfaceCenter, departure)
     spine.push({
       position: vec3(horizontal.x, centerY, horizontal.z),
@@ -1383,12 +1761,15 @@ function branchCrossSection(
   salt: number,
 ): TreeCrossSection {
   const ageCompression = parameters.age * (1 - t) * 0.1
+  const veteranWood = parameters.species === 'ancient-oak' ||
+    parameters.species === 'live-oak'
   return {
     radiusX: radius * (1 + ageCompression + random.signed() * 0.018),
     radiusZ: radius * (1 - ageCompression * 0.5),
     rotation: t * (0.7 + parameters.gnarl * 1.4) + salt * 0.37,
     lobeCount: 3 + (salt % 3),
-    lobeStrength: parameters.gnarl * (1 - t * 0.55) * 0.065,
+    lobeStrength: parameters.gnarl * (1 - t * 0.55) *
+      (veteranWood ? 0.105 : 0.065),
   }
 }
 
@@ -1411,6 +1792,30 @@ function samplePart(part: SemanticTreePart, t: number): TreeSpineSample {
       lobeStrength: lerpNumber(
         a.crossSection.lobeStrength,
         b.crossSection.lobeStrength,
+        amount,
+      ),
+      palmBootPhase: a.crossSection.palmBootPhase === undefined ||
+        b.crossSection.palmBootPhase === undefined
+        ? a.crossSection.palmBootPhase ?? b.crossSection.palmBootPhase
+        : lerpNumber(
+            a.crossSection.palmBootPhase,
+            b.crossSection.palmBootPhase,
+            amount,
+          ),
+      palmRinged: amount < 0.5
+        ? a.crossSection.palmRinged
+        : b.crossSection.palmRinged,
+      palmBootRelief: lerpNumber(
+        a.crossSection.palmBootRelief ?? 0,
+        b.crossSection.palmBootRelief ?? 0,
+        amount,
+      ),
+      palmBootRanks: amount < 0.5
+        ? a.crossSection.palmBootRanks
+        : b.crossSection.palmBootRanks,
+      palmBootRetention: lerpNumber(
+        a.crossSection.palmBootRetention ?? 0,
+        b.crossSection.palmBootRetention ?? 0,
         amount,
       ),
     },
@@ -1455,17 +1860,32 @@ function raiseButtresses(
   habit: TreeHabit,
   parameters: TreeParameters,
 ): void {
+  // A palm's hundreds of hair-scale adventitious roots initiate below grade.
+  // Treating each as a structural lateral fin sums them into a huge artificial
+  // bell around the stipe—the exact opposite of a buried fibrous root plate.
+  if (treeSpeciesDefinition(parameters.species).rootModel === 'fibrous-mat') return
   const roots = parts.filter(
     (part) => part.type === 'root' && part.parentId === trunk.id,
   )
   if (roots.length === 0) return
   const boleHeight = Math.max(0.5, trunk.spine.at(-1)!.position.y)
+  const liveOak = parameters.species === 'live-oak'
+  // A baobab has shoulders, not plates. Every root contributing a sharp rib
+  // sums into a fluted bell around a bole this wide, which is why the species
+  // used to be excluded from buttressing outright; ranking the roots and giving
+  // only the strongest a broad, shallow ridge produces the lumpy asymmetric
+  // spread the base actually has.
+  const baobab = parameters.species === 'baobab'
   // Expressed in bole radii rather than as a fraction of height. A multi-bole
   // stool may be only half a metre tall, but the buttress load still continues
   // up the first couple of metres of every axis that rises from it.
-  const desiredReach = parameters.trunkRadius *
-    lerpNumber(1.45, 3.8, clamp(habit.fluting, 0, 1)) *
-    (habit.rootForm === 'buttressed' ? 1.18 : 1)
+  const desiredReach = liveOak
+    ? parameters.trunkRadius * 1.85
+    : baobab
+      ? parameters.trunkRadius * 1.15
+    : parameters.trunkRadius *
+      lerpNumber(1.45, 3.8, clamp(habit.fluting, 0, 1)) *
+      (habit.rootForm === 'buttressed' ? 1.18 : 1)
 
   interface RootFin {
     direction: TreeVec3
@@ -1473,7 +1893,12 @@ function raiseButtresses(
     width: number
   }
   const rootFins: RootFin[] = []
-  for (const root of roots) {
+  const shoulderRoots = baobab
+    ? [...roots]
+        .sort((a, b) => b.spine[0]!.crossSection.radiusX - a.spine[0]!.crossSection.radiusX)
+        .slice(0, Math.max(3, Math.round(roots.length * 0.55)))
+    : roots
+  for (const root of shoulderRoots) {
     const start = root.spine[0]!
     const outward = normalize(
       subtract(samplePart(root, 0.28).position, trunk.spine[0]!.position),
@@ -1490,8 +1915,10 @@ function raiseButtresses(
       // A major root's rib carries most of the bole's local girth; a minor one
       // barely registers. Scaling by the root's own share is what gives a base
       // two or three dominant plates rather than a uniform fluted collar.
-      strength: share * lerpNumber(0.5, 1.05, clamp(habit.fluting, 0, 1)),
-      width: lerpNumber(0.95, 0.55, share),
+      strength: share * lerpNumber(0.5, 1.05, clamp(habit.fluting, 0, 1)) *
+        (liveOak ? 1.2 : baobab ? 0.62 : 1),
+      width: lerpNumber(0.95, 0.55, share) *
+        (liveOak ? 0.9 : baobab ? 1.35 : 1),
     })
   }
 
@@ -1501,8 +1928,17 @@ function raiseButtresses(
       (part) => part.type === 'trunk' && part.parentId === trunk.id,
     ),
   ]
+  // Ribs are measured from where the roots actually leave, not from the butt.
+  // A deeply buried butt put the whole fade below grade, so a bole that was
+  // supposed to carry shoulders two metres up met the terrain as a bare cone.
+  const rootDatum = roots.reduce(
+    (total, root) => total + root.spine[0]!.position.y,
+    0,
+  ) / roots.length
   for (const axis of basalAxes) {
-    const baseY = axis.spine[0]!.position.y
+    const baseY = axis === trunk
+      ? Math.min(rootDatum, axis.spine[0]!.position.y + 0.05)
+      : axis.spine[0]!.position.y
     const axisHeight = Math.max(0.05, axis.spine.at(-1)!.position.y - baseY)
     const reach = Math.min(
       axisHeight,
@@ -1636,14 +2072,17 @@ function applyLoadSwelling(parts: SemanticTreePart[]): void {
     const parent = byId.get(partId)
     if (!parent) continue
     for (let index = 0; index < parent.spine.length; index += 1) {
-      // Wound wood can double a union's girth; it cannot do more than that,
-      // however many limbs leave at the same place.
+      // The collar mesh carries the visible shoulder. Parent swelling is only
+      // the low, broad reaction-wood mound underneath it; scaling a whole
+      // trunk cross-section by two made a lateral limb extrude a horizontal
+      // shelf around the entire bole.
       const total = clamp(swelling[index]!, 0, 1)
       if (total <= 0) continue
       const sample = parent.spine[index]!
-      sample.radius *= 1 + total * 0.58
-      sample.crossSection.radiusX *= 1 + total
-      sample.crossSection.radiusZ *= 1 + total * 0.42
+      const isTrunk = parent.type === 'trunk'
+      sample.radius *= 1 + total * (isTrunk ? 0.08 : 0.11)
+      sample.crossSection.radiusX *= 1 + total * (isTrunk ? 0.14 : 0.18)
+      sample.crossSection.radiusZ *= 1 + total * (isTrunk ? 0.1 : 0.14)
     }
     // One blended union direction rather than a chain of partial rotations
     // toward each child in turn.
@@ -1661,12 +2100,19 @@ function applyLoadSwelling(parts: SemanticTreePart[]): void {
     const blended = Math.atan2(sine, cosine)
     for (let index = 0; index < parent.spine.length; index += 1) {
       const total = clamp(swelling[index]!, 0, 1)
-      if (total <= 0.15) continue
+      if (total <= 0.01) continue
       const sample = parent.spine[index]!
+      // Rotation used to switch on at an arbitrary threshold and twist a
+      // strongly lobed ring by a third of a turn in one axial segment. The
+      // stitched ring became the giant diagonal "wedge" seen on Baobab.
+      // Reaction wood may bias an ellipse, but it cannot rotate the entire
+      // parent section toward every child.
+      const bias = smoothstep(0.02, 0.85, total) *
+        (parent.type === 'trunk' ? 0.035 : 0.055)
       sample.crossSection.rotation = lerpNumber(
         sample.crossSection.rotation,
         blended,
-        Math.min(0.34, total * 0.34),
+        bias,
       )
     }
   }
@@ -1698,10 +2144,23 @@ function solveRadiusInheritance(parts: SemanticTreePart[]): void {
       if (requestedArea <= availableArea) continue
       const scale = Math.sqrt(availableArea / requestedArea)
       for (const child of group) {
-        for (const sample of child.spine) {
-          sample.radius *= scale
-          sample.crossSection.radiusX *= scale
-          sample.crossSection.radiusZ *= scale
+        const continuation = child.id === parent.continuationChildId
+        const startRadius = Math.max(1e-4, child.spine[0]!.radius)
+        // A continuation's first station is literally the parent's terminal
+        // ring: woodMesher reuses those vertex indices. Scaling that station as
+        // though it were an independent daughter made the next ring drop by a
+        // full Leonardo ratio and produced a visible knuckle at every semantic
+        // part boundary. Preserve the shared ring, then reach the conserved
+        // daughter girth smoothly through its emergence zone.
+        const junctionScale = continuation ? parentRadius / startRadius : scale
+        for (let index = 0; index < child.spine.length; index += 1) {
+          const station = index / Math.max(1, child.spine.length - 1)
+          const emergence = continuation ? smoothstep(0, 0.28, station) : 1
+          const localScale = lerpNumber(junctionScale, scale, emergence)
+          const sample = child.spine[index]!
+          sample.radius *= localScale
+          sample.crossSection.radiusX *= localScale
+          sample.crossSection.radiusZ *= localScale
         }
       }
     }
@@ -1721,12 +2180,30 @@ function createFoliageClusters(
   random: TreeRandom,
 ): FoliageCluster[] {
   if (parameters.foliageDensity <= 0.01 || nodes.length === 0) return []
-  const carriers: number[] = []
+  const carriers: { index: number; weight: number }[] = []
   const threshold = architecture.meshedTipRadius * 3.4
   for (const [index, node] of nodes.entries()) {
     if (node.parent < 0) continue
     if (node.radius > threshold) continue
-    carriers.push(index)
+    // Foliage is concentrated on terminal and near-terminal current growth.
+    // A thin axis deep inside the crown is not automatically leafy: weighting
+    // by exposure and a broad spatial patch field opens real light corridors
+    // and groups the canopy into secondary masses instead of filling the whole
+    // envelope with an even green fog.
+    const exposure = clamp(1 - node.occlusion, 0, 1)
+    const patch = hashUnit(
+      parameters.seed ^ 0x6ac690c5,
+      node.position.x * 0.16,
+      node.position.y * 0.13,
+      node.position.z * 0.16,
+    )
+    if (patch < 0.16 && node.children.length > 0) continue
+    const terminalWeight = node.children.length === 0 ? 2.8 : 0.55
+    carriers.push({
+      index,
+      weight: terminalWeight * lerpNumber(0.18, 1.35, exposure * exposure) *
+        lerpNumber(0.28, 1.45, patch * patch),
+    })
   }
   if (carriers.length === 0) return []
 
@@ -1736,15 +2213,27 @@ function createFoliageClusters(
   // while the hard 5k station ceiling keeps LOD0 below 15k cards and LOD2 still
   // collapses to its existing ~120 cluster budget.
   const target = foliageStationTarget(parameters.foliageDensity)
+  const organModel = treeSpeciesDefinition(parameters.species).organModel
   const clusters: FoliageCluster[] = []
+  const totalWeight = carriers.reduce((sum, carrier) => sum + carrier.weight, 0)
+  let carrierCursor = 0
+  let accumulatedWeight = carriers[0]!.weight
   // Sampling by output index makes the count exact. Above density 1 there may
   // be more stations than carrier twigs; in that case each carrier receives a
   // small deterministic clump with independent scale, seed and card jitter.
   // That is preferable to silently saturating at one station per twig, which
   // made the upper half of the density control visually inert.
   for (let station = 0; station < target; station += 1) {
-    const carrier = Math.floor(station * carriers.length / target)
-    const index = carriers[carrier]!
+    // Systematic weighted resampling is deterministic, exact-count, and
+    // avoids the clumping noise of independent roulette draws. High-exposure
+    // terminal twigs receive several neighbouring sprays while interior axes
+    // remain readable through deliberate voids.
+    const wanted = ((station + 0.5) / target) * totalWeight
+    while (carrierCursor < carriers.length - 1 && accumulatedWeight < wanted) {
+      carrierCursor += 1
+      accumulatedWeight += carriers[carrierCursor]!.weight
+    }
+    const index = carriers[carrierCursor]!.index
     const node = nodes[index]!
     const parent = nodes[node.parent]!
     const axis = normalize(subtract(node.position, parent.position), node.direction)
@@ -1758,6 +2247,7 @@ function createFoliageClusters(
       radius,
       depth: radius * random.range(0.78, 1.22),
       occlusion: node.occlusion,
+      organModel,
       seed: Math.floor(random.unit() * 0x7fffffff),
     })
   }
@@ -1785,6 +2275,13 @@ function graphBounds(graph: SemanticTreeGraph) {
   }
   for (const cluster of graph.foliageClusters) {
     includeInBounds(bounds, cluster.center, cluster.radius)
+    if (cluster.organModel === 'frond' || cluster.organModel === 'terminal-rosette') {
+      includeInBounds(
+        bounds,
+        add(cluster.center, multiply(cluster.axis, cluster.depth)),
+        cluster.radius,
+      )
+    }
   }
   return bounds
 }

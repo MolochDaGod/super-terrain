@@ -3,19 +3,17 @@ import {
   BufferAttribute,
   BufferGeometry,
   Color,
-  DoubleSide,
   IcosahedronGeometry,
   InstancedMesh,
   LineBasicNodeMaterial,
   Matrix4,
   MeshStandardNodeMaterial,
-  Vector2,
 } from 'three/webgpu'
-import { texture } from 'three/tsl'
 import type {
   ProceduralTreeAsset,
   SemanticTreeGraph,
   TreeFoliageData,
+  TreeFruitData,
   TreeLodLevel,
   TreeMeshData,
   TreeSpineSample,
@@ -27,7 +25,13 @@ import {
   type ProceduralTreeTextures,
 } from './materials/proceduralTreeTextures'
 import { bakeProceduralTreeTexturesAsync } from './materials/proceduralTreeTextureClient'
+import { createFoliageMaterial, createFrondMaterial } from './materials/leafMaterial'
 import { createLeafCardGeometry, splitFoliageByVariant } from './materials/leafCardGeometry'
+import { createFrondCardGeometry } from './materials/frondCardGeometry'
+import { createPalmFanGeometry } from './materials/palmFanGeometry'
+import { createSucculentRosetteGeometry } from './materials/succulentRosetteGeometry'
+import { createBarkMaterial } from './materials/bark/material'
+import { createFruitMaterial } from './materials/fruitMaterial'
 
 export interface TreeAssetViewProps {
   asset: ProceduralTreeAsset
@@ -102,20 +106,7 @@ function ReadyTreeAssetView({
   const lod = asset.lods[lodLevel]
   const woodGeometry = useTreeGeometry(lod.wood)
   const woodMaterial = useMemo(
-    () =>
-      new MeshStandardNodeMaterial({
-        name: 'procedural bark pbr',
-        vertexColors: true,
-        map: textures.barkMap,
-        normalMap: textures.barkNormalMap,
-        // The mesh already carries the trunk's macro fluting. The normal map
-        // supplies bark plates and grain only; pushing it beyond unity made
-        // every fissure an ink-black engraved line with no matching silhouette.
-        normalScale: new Vector2(0.85, 0.85),
-        roughnessMap: textures.barkRoughnessMap,
-        roughness: 1,
-        metalness: 0,
-      }),
+    () => createBarkMaterial(textures),
     [textures],
   )
   const topologyMaterial = useMemo(
@@ -194,13 +185,59 @@ function ReadyTreeAssetView({
       )}
       {debugMode === 'contacts' && <ContactMarkers graph={asset.graph} />}
       {showFoliage && debugMode === 'surface' && (
-        <FoliageInstances
-          data={lod.foliage}
-          lodLevel={lodLevel}
-          textures={textures}
-        />
+        <>
+          <FoliageInstances
+            data={lod.foliage}
+            lodLevel={lodLevel}
+            textures={textures}
+          />
+          <FruitInstances data={lod.fruits} lodLevel={lodLevel} />
+        </>
       )}
     </group>
+  )
+}
+
+function FruitInstances({
+  data,
+  lodLevel,
+}: {
+  data: TreeFruitData
+  lodLevel: TreeLodLevel
+}) {
+  const instances = useRef<InstancedMesh>(null)
+  const geometry = useMemo(() => new IcosahedronGeometry(1, 2), [])
+  const material = useMemo(() => createFruitMaterial(), [])
+
+  useEffect(() => {
+    const mesh = instances.current
+    if (!mesh) return
+    const matrix = new Matrix4()
+    const color = new Color()
+    for (let index = 0; index < data.count; index += 1) {
+      mesh.setMatrixAt(index, matrix.fromArray(data.matrices, index * 16))
+      mesh.setColorAt(index, color.fromArray(data.colors, index * 3))
+    }
+    mesh.instanceMatrix.needsUpdate = true
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    mesh.computeBoundingSphere()
+  }, [data])
+
+  useEffect(() => () => {
+    geometry.dispose()
+    material.dispose()
+  }, [geometry, material])
+
+  if (data.count === 0) return null
+  return (
+    <instancedMesh
+      ref={instances}
+      name="fruit-clusters"
+      args={[geometry, material, data.count]}
+      castShadow={lodLevel === 0}
+      receiveShadow
+      frustumCulled
+    />
   )
 }
 
@@ -245,6 +282,7 @@ function FoliageInstances({
         colors={data.colors}
         count={data.count}
         card={undefined}
+        geometryKind="spray"
         lodLevel={lodLevel}
       />
     )
@@ -260,6 +298,8 @@ function FoliageInstances({
             colors={batch.colors}
             count={batch.count}
             card={textures.leafCards[variant] ?? textures.leafCards[0]}
+            geometryKind={data.cardGeometry}
+            geometryVariant={variant}
             lodLevel={lodLevel}
           />
         ),
@@ -274,6 +314,8 @@ function FoliageBatch({
   colors,
   count,
   card,
+  geometryKind,
+  geometryVariant = 0,
   lodLevel,
 }: {
   name: string
@@ -281,14 +323,29 @@ function FoliageBatch({
   colors: Float32Array
   count: number
   card: LeafCardTextures | undefined
+  geometryKind: TreeFoliageData['cardGeometry']
+  geometryVariant?: number
   lodLevel: TreeLodLevel
 }) {
   const instances = useRef<InstancedMesh>(null)
   const geometry = useMemo(
-    () => (card ? createLeafCardGeometry() : new IcosahedronGeometry(1, 1)),
-    [card],
+    () => (card
+      ? geometryKind === 'frond'
+        ? createFrondCardGeometry(geometryVariant)
+        : geometryKind === 'fan-frond'
+          ? createPalmFanGeometry(geometryVariant)
+          : geometryKind === 'rosette'
+            ? createSucculentRosetteGeometry(geometryVariant)
+          : createLeafCardGeometry()
+      : new IcosahedronGeometry(1, 1)),
+    [card, geometryKind, geometryVariant],
   )
-  const material = useMemo(() => createFoliageMaterial(card), [card])
+  const material = useMemo(
+    () => geometryKind === 'frond' || geometryKind === 'fan-frond' || geometryKind === 'rosette'
+      ? createFrondMaterial()
+      : createFoliageMaterial(card),
+    [card, geometryKind],
+  )
 
   useEffect(() => {
     const mesh = instances.current
@@ -322,49 +379,6 @@ function FoliageBatch({
       frustumCulled
     />
   )
-}
-
-function createFoliageMaterial(card: LeafCardTextures | undefined) {
-  if (!card) {
-    return new MeshStandardNodeMaterial({
-      name: 'far foliage mass',
-      color: 0xffffff,
-      vertexColors: true,
-      roughness: 0.92,
-      metalness: 0,
-    })
-  }
-  const material = new MeshStandardNodeMaterial({
-    name: 'leaf spray card',
-    color: 0xffffff,
-    vertexColors: true,
-    map: card.map,
-    normalMap: card.normalMap,
-    // Enough tangent relief to separate the blades within a spray, while the
-    // bowed card still provides the branchlet-scale change in orientation.
-    normalScale: new Vector2(0.42, 0.42),
-    roughness: 1,
-    metalness: 0,
-    side: DoubleSide,
-    // A soft threshold plus alpha-to-coverage: hard-cut leaf edges are the
-    // single most recognisable "game foliage from 2010" artefact, and MSAA
-    // coverage dithering removes it without paying for sorted transparency.
-    alphaTest: 0.3,
-    alphaToCoverage: true,
-    depthWrite: true,
-  })
-  // Roughness in R, blade translucency in G. Reading roughness from a channel
-  // rather than a whole second texture keeps the leaf atlas to three maps.
-  // Use the authored cuticle response directly. The previous remap forced
-  // every value into 0.8–0.95 and made living leaves read as dry construction
-  // paper. Clamping only guards corrupt/legacy atlases.
-  material.roughnessNode = texture(card.surfaceMap).r.clamp(0.38, 0.76)
-
-  // Deliberately no emissive foliage term. The old wrapped-light/transmission
-  // approximation ignored sun visibility, so leaves continued to glow inside
-  // the shadowed crown. Until transmission can consume the actual direct-light
-  // shadow factor, ordinary lit double-sided foliage is the honest result.
-  return material
 }
 
 function createDebugGeometry(

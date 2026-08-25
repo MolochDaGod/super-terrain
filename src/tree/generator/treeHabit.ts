@@ -213,9 +213,12 @@ export function deriveTreeHabit(parameters: TreeParameters): TreeHabit {
       : 0,
     snapHeight: snapped ? random.range(0.45, 0.78) : 1,
     lostLimbs,
+    // Bare spars belong to a visibly retrenched crown. Scattering one or two
+    // above an otherwise full crown reads as procedural whip geometry rather
+    // than as coherent deadwood history.
     deadSparCount: crownForm === 'stagheaded'
       ? 3 + Math.floor(random.unit() * 5)
-      : Math.floor(veteran * random.unit() * 3),
+      : 0,
     retrenchment: crownForm === 'stagheaded' ? random.range(0.14, 0.3) : 0,
     crownBias: crownForm === 'lopsided'
       ? random.range(0.3, 0.52)

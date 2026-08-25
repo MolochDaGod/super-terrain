@@ -19,7 +19,11 @@ export interface FoliageBatch {
  */
 export function createLeafCardGeometry(): BufferGeometry {
   const divisions = 3
-  const bow = 0.38
+  // Keep just enough curvature for a spray to catch a range of light without
+  // turning every leaf blade in the atlas into an inflated, moulded relief.
+  // The texture normal map supplies blade-scale curvature; this mesh only
+  // bends the whole twig spray by a few centimetres.
+  const bow = 0.12
   const positions: number[] = []
   const normals: number[] = []
   const uvs: number[] = []

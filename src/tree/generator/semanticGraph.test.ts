@@ -85,8 +85,61 @@ describe('semantic tree graph', () => {
       if (!child.parentId || child.type === 'root') continue
       const parent = byId.get(child.parentId)!
       const parentRadius = radiusAt(parent, child.attachment)
-      expect(child.spine[0]!.radius ** 2).toBeLessThanOrEqual(parentRadius ** 2 * 0.9)
+      if (child.id === parent.continuationChildId) {
+        // The first station is the shared junction ring. Area conservation is
+        // reached over the emergence zone, not by tearing that ring smaller.
+        expect(child.spine[0]!.radius).toBeCloseTo(parentRadius, 4)
+        const settled = child.spine[Math.min(
+          child.spine.length - 1,
+          Math.max(1, Math.ceil(child.spine.length * 0.3)),
+        )]!
+        expect(settled.radius ** 2).toBeLessThanOrEqual(parentRadius ** 2 * 0.9)
+      } else {
+        expect(child.spine[0]!.radius ** 2).toBeLessThanOrEqual(parentRadius ** 2 * 0.9)
+      }
     }
+  })
+
+  it('preserves load-bearing scaffold girth instead of globally sharing it', () => {
+    const graph = generateSemanticTree(DEFAULT_TREE_PARAMETERS, DEFAULT_TREE_ENVIRONMENT)
+    const trunk = graph.parts.find((part) => part.id === 'trunk')!
+    const scaffolds = graph.parts.filter(
+      (part) =>
+        part.parentId === trunk.id &&
+        part.branchOrder === 1 &&
+        part.id !== trunk.continuationChildId,
+    )
+
+    expect(scaffolds.length).toBeGreaterThanOrEqual(4)
+    expect(Math.max(...scaffolds.map((part) =>
+      part.spine[0]!.radius / radiusAt(trunk, part.attachment),
+    ))).toBeGreaterThan(0.42)
+  })
+
+  it('uses the authored major-branch count for scaffold architecture', () => {
+    const countScaffolds = (branchCount: number) => {
+      const graph = generateSemanticTree(
+        { ...DEFAULT_TREE_PARAMETERS, branchCount, foliageDensity: 0 },
+        DEFAULT_TREE_ENVIRONMENT,
+      )
+      return graph.parts.filter(
+        (part) => part.parentId === 'trunk' && part.branchOrder === 1,
+      ).length
+    }
+
+    // Colonisation can fail to retain a seed that never reaches an attractor,
+    // so the compiled count need not equal the request exactly. It must still
+    // respond monotonically instead of ignoring the authored control.
+    expect(countScaffolds(9)).toBeGreaterThan(countScaffolds(5))
+  })
+
+  it('anchors the leader centreline exactly at the bole continuation', () => {
+    const graph = generateSemanticTree(DEFAULT_TREE_PARAMETERS, DEFAULT_TREE_ENVIRONMENT)
+    const trunk = graph.parts.find((part) => part.id === 'trunk')!
+    const leader = graph.parts.find((part) => part.id === trunk.continuationChildId)!
+
+    expect(distanceBetween(trunk.spine.at(-1)!.position, leader.spine[0]!.position))
+      .toBeLessThan(1e-6)
   })
 
   it('gives every member a unique id and at most one continuation per parent', () => {
@@ -143,6 +196,14 @@ describe('semantic tree graph', () => {
       const parameters = normalizeTreeParameters({
         ...DEFAULT_TREE_PARAMETERS,
         seed: 1000 + index * 7919,
+        // Population variation is the `auto` contract. The default hero recipe
+        // is intentionally pinned so opening the editor always presents one
+        // coherent, art-directed veteran rather than a random damage regime.
+        bolePlan: 'auto',
+        axisForm: 'auto',
+        trunkDamage: 'auto',
+        crownForm: 'auto',
+        rootForm: 'auto',
       })
       const habit = deriveTreeHabit(parameters)
       habits.add(

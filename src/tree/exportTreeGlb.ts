@@ -18,6 +18,9 @@ import {
   type ProceduralTreeTextures,
 } from './materials/proceduralTreeTextures'
 import { createLeafCardGeometry, splitFoliageByVariant } from './materials/leafCardGeometry'
+import { createFrondCardGeometry } from './materials/frondCardGeometry'
+import { createPalmFanGeometry } from './materials/palmFanGeometry'
+import { createSucculentRosetteGeometry } from './materials/succulentRosetteGeometry'
 
 export async function downloadTreeGlb(
   asset: ProceduralTreeAsset,
@@ -75,7 +78,9 @@ function buildExportGroup(
     vertexColors: true,
     map: textures.barkMap,
     normalMap: textures.barkNormalMap,
-    normalScale: new Vector2(0.85, 0.85),
+    normalScale: new Vector2(textures.barkNormalScale, textures.barkNormalScale),
+    aoMap: textures.barkRoughnessMap,
+    aoMapIntensity: 0.45,
     roughnessMap: textures.barkRoughnessMap,
     roughness: 0.92,
     metalness: 0,
@@ -86,6 +91,28 @@ function buildExportGroup(
   wood.receiveShadow = true
   group.add(wood)
 
+  if (lod.fruits.count > 0) {
+    const geometry = new IcosahedronGeometry(1, 2)
+    const material = new MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.58,
+      metalness: 0,
+    })
+    const fruits = new InstancedMesh(geometry, material, lod.fruits.count)
+    fruits.name = 'fruit-clusters'
+    const matrix = new Matrix4()
+    const color = new Color()
+    for (let index = 0; index < lod.fruits.count; index += 1) {
+      fruits.setMatrixAt(index, matrix.fromArray(lod.fruits.matrices, index * 16))
+      fruits.setColorAt(index, color.fromArray(lod.fruits.colors, index * 3))
+    }
+    fruits.instanceMatrix.needsUpdate = true
+    if (fruits.instanceColor) fruits.instanceColor.needsUpdate = true
+    fruits.castShadow = level === 0
+    group.add(fruits)
+  }
+
   // One instanced mesh per atlas spray, matching what the viewport draws — an
   // export that collapses the variants would ship a crown of identical cards.
   for (const [variant, batch] of splitFoliageByVariant(lod.foliage).entries()) {
@@ -94,18 +121,25 @@ function buildExportGroup(
     const card = textures.leafCards[variant] ?? textures.leafCards[0]
     const geometry = clusters
       ? new IcosahedronGeometry(1, 1)
-      : createLeafCardGeometry()
+      : lod.foliage.cardGeometry === 'frond'
+        ? createFrondCardGeometry(variant)
+        : lod.foliage.cardGeometry === 'fan-frond'
+          ? createPalmFanGeometry(variant)
+          : lod.foliage.cardGeometry === 'rosette'
+            ? createSucculentRosetteGeometry(variant)
+          : createLeafCardGeometry()
+    const segmentedFrond = lod.foliage.cardGeometry !== 'spray' && !clusters
     const material = new MeshStandardMaterial({
-      color: 0xffffff,
+      color: segmentedFrond ? 0xaaaaaa : 0xffffff,
       vertexColors: true,
-      map: clusters ? null : card?.map ?? null,
-      normalMap: clusters ? null : card?.normalMap ?? null,
+      map: clusters || segmentedFrond ? null : card?.map ?? null,
+      normalMap: clusters || segmentedFrond ? null : card?.normalMap ?? null,
       normalScale: new Vector2(0.42, 0.42),
-      roughness: clusters ? 0.88 : 0.58,
+      roughness: clusters ? 0.88 : segmentedFrond ? 0.86 : 0.58,
       metalness: 0,
       side: DoubleSide,
-      alphaTest: clusters ? 0 : 0.36,
-      alphaToCoverage: !clusters,
+      alphaTest: clusters || segmentedFrond ? 0 : 0.36,
+      alphaToCoverage: !clusters && !segmentedFrond,
     })
     const foliage = new InstancedMesh(geometry, material, batch.count)
     foliage.name = clusters

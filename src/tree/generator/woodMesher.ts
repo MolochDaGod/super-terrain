@@ -15,6 +15,16 @@ import {
   vec3,
 } from './math'
 import { BARK_TILE_METRES } from '../materials/proceduralTreeTextures'
+import {
+  applyJunctionBlend,
+  junctionNeighbourhood,
+  type JunctionNeighbourhood,
+} from './junctionBlend'
+import {
+  fusedStemRadius,
+  fusedStemSegments,
+  interpolateFusedStems,
+} from './fusedStems'
 import type {
   TreeButtressFin,
   SemanticTreeGraph,
@@ -27,7 +37,7 @@ import type {
   TreeVec3,
 } from './types'
 
-interface CurveSample {
+export interface CurveSample {
   position: TreeVec3
   tangent: TreeVec3
   crossSection: TreeCrossSection
@@ -35,7 +45,7 @@ interface CurveSample {
   distance: number
 }
 
-interface SweepFrame {
+export interface SweepFrame {
   tangent: TreeVec3
   x: TreeVec3
   z: TreeVec3
@@ -56,6 +66,17 @@ interface CompiledPath {
 interface PartEndpoint {
   ring: Ring
   sample: CurveSample
+  /**
+   * World direction from the ring's centre to its vertex zero.
+   *
+   * A continuation is stitched to this ring index for index, so the child has
+   * to start its own sweep with the same angular phase. Its frames are
+   * parallel-transported from a world-up reference, which has no relationship
+   * to the parent's phase at all, and the mismatch shears every quad of the
+   * first band into the repeating triangular fishbone visible at each continued
+   * generation.
+   */
+  vertexZero: TreeVec3
   /** Bark mapping and the v coordinate the parent finished on. */
   bark: BarkMapping
   barkV: number
@@ -273,13 +294,31 @@ function compilePart(
   settings: MeshSettings,
 ): void {
   const samples = adaptiveCurveSamples(part, settings)
-  const frames = parallelTransportFrames(samples)
+  const parentPart = part.parentId ? partById.get(part.parentId) : undefined
+  const inheritedEndpoint = parentPart ? endpoints.get(parentPart.id) : undefined
+  const continuesParent = part.junctionType === 'continuation' && inheritedEndpoint
+  // The child's own cross-section rotation is applied on top of its frame, so
+  // the frame has to be seeded with the parent's vertex-zero direction rotated
+  // *back* by that amount for the two rings to line up index for index.
+  const phaseSeed = continuesParent && inheritedEndpoint
+    ? rotateAroundAxis(
+        inheritedEndpoint.vertexZero,
+        samples[0]!.tangent,
+        -samples[0]!.crossSection.rotation,
+      )
+    : undefined
+  const frames = parallelTransportFrames(samples, phaseSeed)
   const path = { samples, frames }
   paths.set(part.id, path)
+  // Distant LODs never get close enough for a fork to read, and the blend costs
+  // a handful of distance queries per vertex on meshes that exist to be cheap.
+  const neighbourhood = settings.level === 0
+    ? junctionNeighbourhood(part, partById)
+    : undefined
 
-  const parent = part.parentId ? partById.get(part.parentId) : undefined
-  const parentEndpoint = parent ? endpoints.get(parent.id) : undefined
-  const isContinuation = part.junctionType === 'continuation' && parentEndpoint
+  const parent = parentPart
+  const parentEndpoint = inheritedEndpoint
+  const isContinuation = continuesParent
   let previous: Ring | undefined
   let finalRing: Ring | undefined
 
@@ -306,6 +345,7 @@ function compilePart(
         frames[index]!,
         settings,
         1,
+        neighbourhood,
       )
       connectRings(builder, previous, ring)
       previous = ring
@@ -315,17 +355,42 @@ function compilePart(
     const attachment = attachmentFrame(paths.get(parent.id)!, part.attachment)
     const collar = collarStations(samples, frames, attachment)
     const rootCollar = part.type === 'root'
-    const inner = createRing(
+    const primaryFork = part.junctionType === 'bifurcation'
+    if (part.embedded) {
+      // A member whose opening rings are authored inside its parent. Hundreds
+      // of adventitious palm roots begin inside the below-grade initiation
+      // zone; a baobab's trunk-scale divisions originate inside the upper bole;
+      // a dichotomy's daughters are as thick as the axis that made them. The
+      // generic projected collar turns any of these into a circular shelf,
+      // whereas leaving the first rings buried lets the shared junction blend
+      // fuse the two exterior surfaces into one shoulder.
+      for (let index = 0; index < samples.length; index += 1) {
+        const ring = createRing(
+          builder,
+          graph.seed,
+          part,
+          samples[index]!,
+          frames[index]!,
+          settings,
+          1,
+          neighbourhood,
+        )
+        if (previous) connectRings(builder, previous, ring)
+        else capStart(builder, ring, graph.seed, part)
+        previous = ring
+      }
+    } else {
+      const inner = createRing(
       builder,
       graph.seed,
       part,
       collar.inner.sample,
       collar.inner.frame,
       settings,
-      rootCollar ? 0.56 : 0.44,
-    )
-    capStart(builder, inner, graph.seed, part)
-    previous = inner
+      rootCollar ? 0.38 : 0.28,
+      )
+      capStart(builder, inner, graph.seed, part)
+      previous = inner
 
     const footprint = createRing(
       builder,
@@ -334,11 +399,12 @@ function compilePart(
       collar.surface.sample,
       collar.surface.frame,
       settings,
-      rootCollar ? 1.12 : 1.02,
-      // Projecting an entire root ring around the parent's circumference makes
-      // a skirt, not a union. Its inner cap is already buried in the parent and
-      // its broad shoulder overlaps the shared wood.
-      rootCollar ? undefined : attachment,
+      rootCollar ? 1.1 : primaryFork ? 1 : 1.08,
+      neighbourhood,
+      // Only vertices still *inside* the parent are lifted to its surface.
+      // Outside vertices retain the child's round section, producing a local
+      // saddle instead of either an intersecting pipe or a full-width skirt.
+      attachment,
     )
     connectRings(builder, previous, footprint)
     previous = footprint
@@ -351,7 +417,8 @@ function compilePart(
         collar.shoulder.sample,
         collar.shoulder.frame,
         settings,
-        rootCollar ? 1.18 : 1.08,
+        rootCollar ? 1.14 : primaryFork ? 1.01 : 1.07,
+        neighbourhood,
       )
       connectRings(builder, previous, ring)
       previous = ring
@@ -367,7 +434,8 @@ function compilePart(
         collar.release.sample,
         collar.release.frame,
         settings,
-        rootCollar ? 1.04 : 1,
+        rootCollar ? 1.04 : primaryFork ? 1 : 1.025,
+        neighbourhood,
       )
       connectRings(builder, previous, ring)
       previous = ring
@@ -383,9 +451,11 @@ function compilePart(
         frames[index]!,
         settings,
         1,
+        neighbourhood,
       )
       connectRings(builder, previous, ring)
       previous = ring
+    }
     }
     finalRing = previous
   } else {
@@ -398,6 +468,7 @@ function compilePart(
         frames[index]!,
         settings,
         1,
+        neighbourhood,
       )
       if (previous) connectRings(builder, previous, ring)
       else capStart(builder, ring, graph.seed, part)
@@ -407,6 +478,13 @@ function compilePart(
   }
 
   if (!finalRing) return
+  if (
+    settings.level === 0 &&
+    part.type === 'trunk' &&
+    samples.some((sample) => sample.crossSection.palmBootPhase !== undefined)
+  ) {
+    appendPalmBootPlates(builder, graph.seed, part, samples, frames)
+  }
   const hasContinuation = part.continuationChildId
     ? retainedIds.has(part.continuationChildId)
     : false
@@ -421,13 +499,175 @@ function compilePart(
     }
   }
   const finalSample = samples.at(-1)!
+  const finalFrame = finalRing.frame
+  const finalRotation = finalSample.crossSection.rotation
   endpoints.set(part.id, {
     ring: finalRing,
     sample: finalSample,
+    vertexZero: normalize(add(
+      multiply(finalFrame.x, Math.cos(finalRotation)),
+      multiply(finalFrame.z, Math.sin(finalRotation)),
+    ), finalFrame.x),
     bark: barkMapping(part),
     barkV: barkOrigin(part) +
       finalSample.distance / (barkMapping(part).metresPerTile * BARK_TILE_ASPECT),
   })
+}
+
+/**
+ * Individual retained palm leaf bases embedded into the upper bole.
+ *
+ * A cross-section multiplier can only make a complete ring, which is why the
+ * earlier palm trunk looked corrugated. These shallow five-sided wedges sit on
+ * the actual swept surface, follow its transported frame, and can weather or
+ * disappear independently in each phyllotactic rank.
+ */
+function appendPalmBootPlates(
+  builder: MeshBuilder,
+  seed: number,
+  part: SemanticTreePart,
+  samples: readonly CurveSample[],
+  frames: readonly SweepFrame[],
+): void {
+  let previousRow = Number.NEGATIVE_INFINITY
+  const firstBoot = samples.find((sample) => sample.crossSection.palmBootPhase !== undefined)
+  // Coconut scars are interrupted annular ridges displaced directly in the
+  // swept stipe. Separate phyllotactic boot plates belong to date/doum palms
+  // and become conspicuous wooden spikes in a coconut crown.
+  if (firstBoot?.crossSection.palmRinged) return
+  const columns = Math.max(5, Math.round(firstBoot?.crossSection.palmBootRanks ?? 9))
+  const maximumRow = Math.max(...samples.flatMap((sample) =>
+    sample.crossSection.palmBootPhase === undefined
+      ? []
+      : [Math.floor(sample.crossSection.palmBootPhase)],
+  ))
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
+    const sample = samples[sampleIndex]!
+    const phase = sample.crossSection.palmBootPhase
+    if (phase === undefined) continue
+    const row = Math.floor(phase)
+    if (row === previousRow) continue
+    previousRow = row
+    // Mature lower bases have fused into the continuous stipe surface and are
+    // represented by its displaced scar lips. Separate closed shells there
+    // read as polygon chips glued to the trunk. Keep physical boots only in
+    // the youngest crown-adjacent ranks where they genuinely project.
+    if (row < maximumRow - 12) continue
+    // The youngest two ranks are still live petiole sheaths buried within the
+    // crown. Projecting a complete geometric rank at the terminal station made
+    // their aligned top edges read as a horizontal wooden saucer.
+    if (row >= maximumRow - 1) continue
+    const frame = frames[sampleIndex]!
+    const rowRetention = sample.crossSection.palmBootRetention ?? 0.7
+    for (let column = 0; column < columns; column += 1) {
+      const identity = hashUnit(seed + 12011, row, column, 0)
+      if (identity > rowRetention) continue
+      const stagger = (row % 2) * 0.5 +
+        (hashUnit(seed + 13007, row, column, 0) - 0.5) * 0.18
+      const angle = (column + stagger) / columns * Math.PI * 2
+      const cosine = Math.cos(angle)
+      const sine = Math.sin(angle)
+      const outward = normalize(
+        add(multiply(frame.x, cosine), multiply(frame.z, sine)),
+        frame.x,
+      )
+      const side = normalize(cross(frame.tangent, outward), frame.x)
+      const surface = add(
+        sample.position,
+        add(
+          multiply(frame.x, cosine * sample.crossSection.radiusX),
+          multiply(frame.z, sine * sample.crossSection.radiusZ),
+        ),
+      )
+      const radius = Math.max(sample.crossSection.radiusX, sample.crossSection.radiusZ)
+      const width = radius * (0.36 + identity * 0.1)
+      const height = radius * (0.31 + identity * 0.1)
+      const depth = radius * (
+        0.006 + (sample.crossSection.palmBootRelief ?? 0) * (0.9 + identity)
+      )
+      const tilt = (hashUnit(seed + 14009, row, column, 0) - 0.5) * height * 0.18
+      const axialOffset = (hashUnit(seed + 15013, row, column, 0) - 0.5) * height * 0.28
+      const staggeredSurface = add(surface, multiply(frame.tangent, axialOffset))
+      const frontCenter = add(staggeredSurface, multiply(outward, depth))
+      const backCenter = add(staggeredSurface, multiply(outward, -radius * 0.035))
+      const outline = [
+        [-0.5, 0.38],
+        [-0.5, 0.08],
+        [-0.36, -0.2],
+        [-0.1, -0.58],
+        [0.1, -0.58],
+        [0.36, -0.2],
+        [0.5, 0.08],
+        [0.5, 0.38],
+      ] as const
+      const colour = barkColor(frontCenter, part, seed)
+      const front: number[] = []
+      const back: number[] = []
+      for (const [x, y] of outline) {
+        const skewedY = y * height + x * tilt
+        const u = (column + x + 0.5) / columns
+        const v = ((row + y + 0.5) % 18 + 18) % 18 / 18
+        front.push(appendPalmBootVertex(
+          builder,
+          add(frontCenter, add(multiply(side, x * width), multiply(frame.tangent, skewedY))),
+          vec3(colour.x * 1.12, colour.y * 1.02, colour.z * 0.88),
+          u,
+          v,
+        ))
+        back.push(appendPalmBootVertex(
+          builder,
+          add(backCenter, add(multiply(side, x * width * 0.92), multiply(frame.tangent, skewedY * 0.92))),
+          vec3(colour.x * 0.62, colour.y * 0.58, colour.z * 0.5),
+          u,
+          v,
+        ))
+      }
+      // A shallow convex cut face catches a highlight across its fibrous lip;
+      // a planar ngon reads as a flat shield glued onto the cylinder.
+      const frontHub = appendPalmBootVertex(
+        builder,
+        add(frontCenter, multiply(outward, depth * (0.34 + identity * 0.22))),
+        vec3(colour.x * 1.18, colour.y * 1.07, colour.z * 0.9),
+        (column + 0.5) / columns,
+        ((row + 0.5) % 18 + 18) % 18 / 18,
+      )
+      const backHub = appendPalmBootVertex(
+        builder,
+        backCenter,
+        vec3(colour.x * 0.58, colour.y * 0.54, colour.z * 0.46),
+        (column + 0.5) / columns,
+        ((row + 0.5) % 18 + 18) % 18 / 18,
+      )
+      for (let triangle = 0; triangle < outline.length; triangle += 1) {
+        const next = (triangle + 1) % outline.length
+        builder.indices.push(
+          frontHub, front[triangle]!, front[next]!,
+          backHub, back[next]!, back[triangle]!,
+        )
+      }
+      for (let edge = 0; edge < outline.length; edge += 1) {
+        const next = (edge + 1) % outline.length
+        builder.indices.push(
+          front[edge]!, back[edge]!, back[next]!,
+          front[edge]!, back[next]!, front[next]!,
+        )
+      }
+    }
+  }
+}
+
+function appendPalmBootVertex(
+  builder: MeshBuilder,
+  position: TreeVec3,
+  colour: TreeVec3,
+  u: number,
+  v: number,
+): number {
+  const index = builder.positions.length / 3
+  builder.positions.push(position.x, position.y, position.z)
+  builder.colors.push(colour.x, colour.y, colour.z)
+  builder.uvs.push(u, v)
+  return index
 }
 
 function collarStations(
@@ -456,7 +696,11 @@ function collarStations(
     first.crossSection.radiusX,
     first.crossSection.radiusZ,
   )
-  const innerDistance = Math.max(0, surfaceDistance - baseRadius * 0.52)
+  // On a thick or strongly lobed parent, one child radius is not safely
+  // internal: the oblique start cap still cuts through the near surface as a
+  // visible hook or circular wound. Start more than two radii back so every
+  // cap vertex and the first transition triangles remain inside shared wood.
+  const innerDistance = Math.max(0, surfaceDistance - baseRadius * 2.15)
   const shoulderDistance = Math.min(totalDistance, surfaceDistance + baseRadius * 0.52)
   const releaseDistance = Math.min(totalDistance, surfaceDistance + baseRadius * 1.45)
 
@@ -531,7 +775,14 @@ function adaptiveCurveSamples(
   const tolerance = settings.geometricError * (
     part.type === 'trunk' ? 0.36 : part.type === 'root' ? 0.46 : 0.56
   )
-  const spine = simplifySpine(part.spine, tolerance)
+  // Hero palm boots are axial silhouette events, not curve noise. The generic
+  // Douglas-Peucker pass only compares centreline and radius, so it otherwise
+  // deletes every retained leaf-base row before the ring builder can see it.
+  const meshPalmBoots = settings.level === 0 &&
+    part.spine.some((sample) => sample.crossSection.palmBootPhase !== undefined)
+  const spine = meshPalmBoots
+    ? part.spine.map(cloneSpineSample)
+    : simplifySpine(part.spine, tolerance)
   const targetStep = settings.targetStep * (
     part.type === 'trunk' ? 0.78 : part.type === 'root' ? 0.88 : part.type === 'twig' ? 1.16 : 1
   )
@@ -552,14 +803,32 @@ function adaptiveCurveSamples(
       Math.acos(clamp(dot(previousDirection, normalize(segmentVector)), -1, 1)),
       Math.acos(clamp(dot(normalize(segmentVector), nextDirection), -1, 1)),
     )
+    // Ring spacing also has to respect the member's own girth. A tube whose
+    // rings are five radii apart triangulates into long thin quads, and their
+    // diagonals read as a sawtooth running along every curved limb — the
+    // "diamond stepping" visual review kept finding on crown wood. Three radii
+    // is close enough to square that the diagonal disappears.
+    const girth = Math.max(
+      0.02,
+      Math.min(
+        Math.max(a.crossSection.radiusX, a.crossSection.radiusZ),
+        Math.max(b.crossSection.radiusX, b.crossSection.radiusZ),
+      ),
+    )
+    // Twigs are exempt: they are a pixel or two wide, nobody sees a diagonal on
+    // them, and they outnumber the limbs several hundred to one — capping their
+    // spacing doubles a hero mesh and spends the budget where it cannot show.
+    const girthStep = part.type === 'twig' || settings.level > 0
+      ? Infinity
+      : girth * 3.2
     const subdivisions = clamp(
       Math.max(
         1,
-        Math.ceil(segmentLength / Math.max(0.08, targetStep)),
+        Math.ceil(segmentLength / Math.max(0.08, Math.min(targetStep, girthStep))),
         Math.ceil(localTurn / settings.maximumTurn),
       ),
       1,
-      10,
+      settings.level === 0 ? 14 : 10,
     )
     const tangentA = multiply(
       normalize(
@@ -699,7 +968,20 @@ function interpolateCrossSection(
     rotation: lerpNumber(a.rotation, b.rotation, amount),
     lobeCount: amount < 0.5 ? a.lobeCount : b.lobeCount,
     lobeStrength: lerpNumber(a.lobeStrength, b.lobeStrength, amount),
+    palmBootPhase: a.palmBootPhase === undefined || b.palmBootPhase === undefined
+      ? a.palmBootPhase ?? b.palmBootPhase
+      : lerpNumber(a.palmBootPhase, b.palmBootPhase, amount),
+    palmRinged: amount < 0.5 ? a.palmRinged : b.palmRinged,
+    palmBootRelief: lerpNumber(a.palmBootRelief ?? 0, b.palmBootRelief ?? 0, amount),
+    palmBootRanks: amount < 0.5 ? a.palmBootRanks : b.palmBootRanks,
+    palmBootRetention: lerpNumber(
+      a.palmBootRetention ?? 0,
+      b.palmBootRetention ?? 0,
+      amount,
+    ),
     fins: interpolateButtressFins(a.fins, b.fins, amount),
+    fusedStems: interpolateFusedStems(a.fusedStems, b.fusedStems, amount),
+    fusedStemBlend: lerpNumber(a.fusedStemBlend ?? 0, b.fusedStemBlend ?? 0, amount),
   }
 }
 
@@ -724,11 +1006,22 @@ function interpolateButtressFins(
   return fins
 }
 
-function parallelTransportFrames(samples: readonly CurveSample[]): SweepFrame[] {
+export function parallelTransportFrames(
+  samples: readonly CurveSample[],
+  seedX?: TreeVec3,
+): SweepFrame[] {
   const frames: SweepFrame[] = []
   const firstTangent = samples[0]!.tangent
   const reference = Math.abs(firstTangent.y) < 0.82 ? vec3(0, 1, 0) : vec3(0, 0, 1)
-  let x = normalize(cross(reference, firstTangent), vec3(1, 0, 0))
+  // A seeded frame carries a parent's angular phase across a continuation. It
+  // is projected onto the child's own normal plane, so an inherited direction
+  // that is no longer perpendicular still yields a valid orthonormal frame.
+  const seeded = seedX
+    ? subtract(seedX, multiply(firstTangent, dot(seedX, firstTangent)))
+    : undefined
+  let x = seeded && dot(seeded, seeded) > 1e-8
+    ? normalize(seeded)
+    : normalize(cross(reference, firstTangent), vec3(1, 0, 0))
   let z = normalize(cross(x, firstTangent), vec3(0, 0, 1))
   frames.push({ tangent: firstTangent, x, z })
 
@@ -766,6 +1059,7 @@ function createRing(
   frame: SweepFrame,
   settings: MeshSettings,
   radiusScale: number,
+  neighbourhood?: JunctionNeighbourhood,
   projectToParent?: AttachmentFrame,
 ): Ring {
   // Fixed for the whole part at the hero LOD. Choosing it per ring meant
@@ -801,7 +1095,18 @@ function createRing(
       Math.cos(angle * lobeCount + lobePhase) * 0.72 +
       Math.cos(angle * Math.max(1, lobeCount - 2) - lobePhase * 0.63) * 0.2 +
       Math.sin(angle * (lobeCount + 1) + lobePhase * 0.31) * 0.08
-    const lobe = 1 + sample.crossSection.lobeStrength * lobeWave
+    // A fused column's outline is the union of its stems, not a rippled circle.
+    // Where one is authored it replaces the harmonic term outright: adding a
+    // cosine on top of a real union only makes the folds noisy.
+    const fused = sample.crossSection.fusedStems
+    const lobe = fused && fused.length > 0
+      ? fusedStemRadius(
+          fused,
+          Math.cos(rotatedAngle),
+          Math.sin(rotatedAngle),
+          sample.crossSection.fusedStemBlend ?? 0.08,
+        ) || 1
+      : 1 + sample.crossSection.lobeStrength * lobeWave
     const ridge = settings.level === 0
       ? 1 +
         Math.sin(angle * 11 + sample.distance * 0.9 + part.branchOrder) * 0.008 +
@@ -818,7 +1123,8 @@ function createRing(
       multiply(frame.z, Math.sin(rotatedAngle)),
     )
     const buttress = finSwell(sample.crossSection.fins, outward)
-    const swell = lobe * ridge * buttress
+    const palmBoot = palmBootSwell(sample.crossSection, angle, seed)
+    const swell = lobe * ridge * buttress * palmBoot
     const localX = Math.cos(rotatedAngle) * sample.crossSection.radiusX * radiusScale * swell
     const localZ = Math.sin(rotatedAngle) * sample.crossSection.radiusZ * radiusScale * swell
     let position = add(
@@ -826,6 +1132,17 @@ function createRing(
       add(multiply(frame.x, localX), multiply(frame.z, localZ)),
     )
     if (projectToParent) position = projectOntoParentSurface(position, projectToParent)
+    // Fuse the union before the vertex is committed, so the fillet participates
+    // in the smooth normals and the arc-length bark mapping rather than being a
+    // separate patch stitched over the seam afterwards.
+    if (neighbourhood) {
+      position = applyJunctionBlend(
+        position,
+        outward,
+        Math.hypot(localX, localZ),
+        neighbourhood,
+      )
+    }
     indices.push(builder.positions.length / 3)
     positions.push(position)
     builder.positions.push(position.x, position.y, position.z)
@@ -841,12 +1158,48 @@ function createRing(
         barkMapping(part).repeats,
       sample.distance /
         (barkMapping(part).metresPerTile * BARK_TILE_ASPECT) +
-        part.branchOrder * 0.173,
+        barkOrigin(part),
     )
     const color = barkColor(position, part, seed)
     builder.colors.push(color.x, color.y, color.z)
   }
   return { indices, positions, center: sample.position, frame }
+}
+
+/** Localised staggered leaf-base lips baked into the hero palm silhouette. */
+function palmBootSwell(
+  crossSection: TreeCrossSection,
+  angle: number,
+  seed: number,
+): number {
+  const phase = crossSection.palmBootPhase
+  const relief = crossSection.palmBootRelief ?? 0
+  if (phase === undefined || relief <= 0) return 1
+  const row = Math.floor(phase)
+  const localY = phase - row
+  if (crossSection.palmRinged) {
+    const segments = 13
+    const across = angle / (Math.PI * 2) * segments
+    const segment = Math.floor(across)
+    const identity = hashUnit(seed + 6271, segment, row, 0)
+    const missing = hashUnit(seed + 8819, segment, row, 0) < 0.15
+    const lipY = 0.5 + (identity - 0.5) * 0.13
+    const lip = Math.exp(-Math.pow((localY - lipY) / 0.07, 2))
+    return 1 + relief * lip * (missing ? 0.08 : 0.72 + identity * 0.42)
+  }
+  const columns = 8
+  const stagger = (row % 2) * 0.5 +
+    (hashUnit(seed + 1907, row, 0, 0) - 0.5) * 0.22
+  const across = angle / (Math.PI * 2) * columns + stagger
+  const column = Math.floor(across)
+  const localX = across - column
+  const identity = hashUnit(seed + 6271, column, row, 0)
+  const lipY = 0.3 + (identity - 0.5) * 0.09 +
+    Math.abs(localX - 0.5) * (0.42 + identity * 0.12)
+  const distance = Math.abs(localY - lipY)
+  const lip = Math.exp(-Math.pow(distance / 0.075, 2))
+  const worn = hashUnit(seed + 8819, column, row, 0) < 0.2 ? 0.24 : 1
+  return 1 + relief * lip * worn * (0.7 + identity * 0.38)
 }
 
 const radialSegmentCache = new WeakMap<SemanticTreePart, Map<number, number>>()
@@ -952,6 +1305,13 @@ function radialSegmentsFor(
   if (lobeStrength > 0.045) {
     minimum = Math.max(minimum, (part.spine[0]?.crossSection.lobeCount ?? 3) * 2)
   }
+  for (const entry of part.spine) {
+    const fused = entry.crossSection.fusedStems
+    if (fused && fused.length > 0) {
+      minimum = Math.max(minimum, fusedStemSegments(fused))
+      break
+    }
+  }
   // A rib narrower than the ring's angular step simply is not there. Sized from
   // the narrowest rib on the member so the valleys between them stay sharp.
   let narrowestFin = Infinity
@@ -987,6 +1347,10 @@ function projectOntoParentSurface(
     x / Math.max(1e-4, parent.radiusX),
     z / Math.max(1e-4, parent.radiusZ),
   )
+  // The outside half of the collar is already the correct child surface.
+  // Projecting it back to the parent is what stretched thick branches into
+  // horizontal plates around a bole. Only fill the penetrating half.
+  if (ellipseLength >= 1) return position
   if (ellipseLength < 1e-5) {
     x = parent.radiusX
     z = 0
@@ -1121,11 +1485,15 @@ function barkColor(
   part: SemanticTreePart,
   seed: number,
 ): TreeVec3 {
-  const partSalt = part.id.split('').reduce((value, character) => value + character.charCodeAt(0), 0)
-  const variation = hashUnit(seed + partSalt, position.x * 0.31, position.y * 0.18, position.z * 0.31)
+  // Bark belongs to the whole organism. Re-seeding tint from `part.id` made a
+  // trunk change colour and moss pattern at the exact ring where its semantic
+  // leader began, even though the geometry and UVs were continuous. A seeded
+  // world-space field remains deterministic and varied while crossing every
+  // continuation and collar without a material boundary.
+  const variation = hashUnit(seed, position.x * 0.31, position.y * 0.18, position.z * 0.31)
   const verticalGrain = 0.5 + 0.5 * Math.sin(position.y * 2.4 + position.x * 0.7 - position.z * 0.55)
   const mossNoise = hashUnit(
-    seed + partSalt + 9173,
+    seed + 9173,
     position.x * 0.115,
     position.y * 0.085,
     position.z * 0.115,
@@ -1136,6 +1504,12 @@ function barkColor(
   const ageDarkening = 0.98 - part.age * 0.09
   const value = (0.84 + variation * 0.13 + verticalGrain * 0.025) *
     rootDarkening * ageDarkening
+  if (part.id.includes('fruit-stalk') && part.id.includes('-strand-')) {
+    // Date bunches are swept with the woody topology so their individual
+    // fruits retain a real silhouette. A warm vertex tint separates the ripe
+    // tissue from the shared bark material without another draw call.
+    return vec3(value * 1.16, value * 0.68, value * 0.24)
+  }
   return vec3(
     value * (1 - moss * 0.2),
     value * (0.94 + moss * 0.05),

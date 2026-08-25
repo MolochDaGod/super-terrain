@@ -1,4 +1,5 @@
 import { compileFoliage } from './foliageCompiler'
+import { compileFruit } from './fruitCompiler'
 import { generateSemanticTree } from './semanticGraph'
 import {
   DEFAULT_TREE_ENVIRONMENT,
@@ -35,6 +36,7 @@ export function compileProceduralTree(
       level,
       wood: mesh,
       foliage: compileFoliage(graph, parameters, level),
+      fruits: compileFruit(graph, level),
       includedPartCount,
     })
   }
@@ -66,6 +68,8 @@ export function treeAssetTransferables(asset: ProceduralTreeAsset): Transferable
       lod.foliage.matrices.buffer,
       lod.foliage.colors.buffer,
       lod.foliage.variants.buffer,
+      lod.fruits.matrices.buffer,
+      lod.fruits.colors.buffer,
     )
   }
   return transferables

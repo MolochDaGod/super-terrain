@@ -17,6 +17,7 @@ import type {
   TreeSpineSample,
   TreeVec3,
 } from './types'
+import { SpatialIndex } from './spatialIndex'
 
 /**
  * A few cheap relaxation passes are enough for silhouette-level growth. This
@@ -32,7 +33,15 @@ export function resolveTreeSpace(
   for (let iteration = 0; iteration < 3; iteration += 1) {
     const field = buildSampleField(graph.parts)
     for (const part of graph.parts) {
-      if (part.type === 'trunk' || part.id === 'leader') continue
+      // A phyllotactic apical crown is already packed by botanical rank. Treating
+      // its neighbouring petioles as accidental branch collisions makes the
+      // solver kick their tips almost vertically and destroys the authored
+      // crown bowl. The same exclusion keeps pendant fruit strings coherent.
+      if (
+        part.type === 'trunk' ||
+        part.id === 'leader' ||
+        part.id.startsWith('regime-apical-')
+      ) continue
       for (let index = 1; index < part.spine.length; index += 1) {
         if (index === part.spine.length - 1 && part.type === 'root') continue
         const sample = part.spine[index]!
@@ -49,7 +58,9 @@ export function resolveTreeSpace(
           sample.position,
           multiply(add(correction, obstacleCorrection), stiffness / (iteration + 1)),
         )
-        if (part.type === 'root') {
+        // An aerial root's whole point is that it is above the ground for most
+        // of its run; only soil-bound roots follow the surface.
+        if (part.type === 'root' && !part.aerial) {
           sample.position.y = groundHeightAt(
             sample.position.x,
             sample.position.z,
@@ -67,25 +78,34 @@ export function resolveTreeSpace(
 interface FieldSample {
   part: SemanticTreePart
   sample: TreeSpineSample
+  position: TreeVec3
+  radius: number
 }
 
-function buildSampleField(parts: readonly SemanticTreePart[]): FieldSample[] {
+function buildSampleField(parts: readonly SemanticTreePart[]): SpatialIndex<FieldSample> {
   const result: FieldSample[] = []
   for (const part of parts) {
-    for (const sample of part.spine) result.push({ part, sample })
+    for (const sample of part.spine) {
+      result.push({ part, sample, position: sample.position, radius: sample.radius })
+    }
   }
-  return result
+  return new SpatialIndex(result)
 }
 
 function collisionCorrection(
   part: SemanticTreePart,
   sample: TreeSpineSample,
-  field: readonly FieldSample[],
+  field: SpatialIndex<FieldSample>,
   byId: ReadonlyMap<string, SemanticTreePart>,
   parameters: TreeParameters,
 ): TreeVec3 {
   let correction = vec3()
-  for (const candidate of field) {
+  const clearanceFactor = part.type === 'twig' ? 1.7 : 1.28
+  for (const candidate of field.queryContacts(
+    sample.position,
+    sample.radius,
+    clearanceFactor,
+  )) {
     if (candidate.part.id === part.id) continue
     if (structurallyAdjacent(part, candidate.part, byId)) continue
     const delta = subtract(sample.position, candidate.sample.position)
@@ -131,17 +151,49 @@ function obstacleAvoidance(
   return correction
 }
 
+/**
+ * Records where two structurally unrelated members actually touch.
+ *
+ * Every pair against every pair is a fine description of the problem and a
+ * terrible way to compute it: a crown of several hundred shoots turns that into
+ * hundreds of thousands of spine-against-spine comparisons and dominates the
+ * cost of generating the tree. The contact set is sparse — it is the pairs that
+ * are within a radius or so of each other — so it is found by querying the same
+ * sample field the collision pass uses, and only the pairs the field proposes
+ * are measured properly.
+ */
 function buildContactGraph(
   parts: readonly SemanticTreePart[],
   byId: ReadonlyMap<string, SemanticTreePart>,
 ): TreeContact[] {
   const contacts: TreeContact[] = []
   const recorded = new Set<string>()
-  for (let leftIndex = 0; leftIndex < parts.length; leftIndex += 1) {
-    const left = parts[leftIndex]!
-    for (let rightIndex = leftIndex + 1; rightIndex < parts.length; rightIndex += 1) {
-      const right = parts[rightIndex]!
-      if (structurallyAdjacent(left, right, byId)) continue
+  const field = buildSampleField(parts)
+  const candidates = new Map<string, { left: SemanticTreePart; right: SemanticTreePart }>()
+  for (const left of parts) {
+    for (const sample of left.spine) {
+      for (const candidate of field.queryContacts(
+        sample.position,
+        sample.radius,
+        1.18,
+      )) {
+        const right = candidate.part
+        if (right.id === left.id) continue
+        if (structurallyAdjacent(left, right, byId)) continue
+        const key = left.id < right.id
+          ? `${left.id}|${right.id}`
+          : `${right.id}|${left.id}`
+        if (candidates.has(key)) continue
+        candidates.set(
+          key,
+          left.id < right.id ? { left, right } : { left: right, right: left },
+        )
+      }
+    }
+  }
+  for (const [key, pair] of candidates) {
+    const { left, right } = pair
+    {
       let closest:
         | { distance: number; a: TreeSpineSample; b: TreeSpineSample }
         | undefined
@@ -154,7 +206,6 @@ function buildContactGraph(
       if (!closest) continue
       const combinedRadius = closest.a.radius + closest.b.radius
       if (closest.distance > combinedRadius * 1.18) continue
-      const key = `${left.id}|${right.id}`
       if (recorded.has(key)) continue
       recorded.add(key)
       const pressure = clamp(1 - closest.distance / Math.max(1e-5, combinedRadius), 0, 1)

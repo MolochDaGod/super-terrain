@@ -1,0 +1,77 @@
+import { positiveModulo, tiledFbm } from './proceduralNoise'
+
+/**
+ * A tiling fbm evaluated on a coarse lattice and bilinearly resampled.
+ *
+ * A two-megapixel bark map evaluates a dozen or more noise fields per texel,
+ * and most of them are broad weathering and moisture washes running at two to
+ * ten cycles across the whole tile. Evaluating those per texel is pure waste:
+ * a field with a wavelength of two hundred texels is fully described by samples
+ * every eight, and the interpolation error is far below a byte. Moving the
+ * low-frequency half of the bake onto a coarse lattice is most of the
+ * difference between a bake that blocks its worker for fifteen seconds and one
+ * that does not, and it changes nothing anyone can see.
+ *
+ * Only use it for fields whose wavelength is comfortably longer than the
+ * divisor — high-frequency grain sampled this way turns into visible blur.
+ */
+export class CoarseField {
+  private readonly values: Float32Array
+  private readonly lowWidth: number
+  private readonly lowHeight: number
+  private readonly scaleX: number
+  private readonly scaleY: number
+
+  /** Precomputes any tiling scalar field on a lattice `divisor` times coarser. */
+  constructor(
+    width: number,
+    height: number,
+    divisor: number,
+    sample: (u: number, v: number) => number,
+  ) {
+    this.lowWidth = Math.max(4, Math.round(width / divisor))
+    this.lowHeight = Math.max(4, Math.round(height / divisor))
+    this.scaleX = this.lowWidth / width
+    this.scaleY = this.lowHeight / height
+    this.values = new Float32Array(this.lowWidth * this.lowHeight)
+    for (let y = 0; y < this.lowHeight; y += 1) {
+      const v = y / this.lowHeight
+      for (let x = 0; x < this.lowWidth; x += 1) {
+        this.values[y * this.lowWidth + x] = sample(x / this.lowWidth, v)
+      }
+    }
+  }
+
+  /** The common case: a tiling fbm at the given cycle counts. */
+  static fbm(
+    width: number,
+    height: number,
+    cyclesU: number,
+    cyclesV: number,
+    seed: number,
+    octaves: number,
+    divisor: number,
+  ): CoarseField {
+    return new CoarseField(width, height, divisor, (u, v) =>
+      tiledFbm(u * cyclesU, v * cyclesV, seed, octaves, cyclesU, cyclesV))
+  }
+
+  /** Samples at a full-resolution texel. Wraps, preserving both tile seams. */
+  at(x: number, y: number): number {
+    const sourceX = x * this.scaleX
+    const sourceY = y * this.scaleY
+    const left = Math.floor(sourceX)
+    const top = Math.floor(sourceY)
+    const fractionX = sourceX - left
+    const fractionY = sourceY - top
+    const x0 = positiveModulo(left, this.lowWidth)
+    const x1 = positiveModulo(left + 1, this.lowWidth)
+    const y0 = positiveModulo(top, this.lowHeight)
+    const y1 = positiveModulo(top + 1, this.lowHeight)
+    const upper = this.values[y0 * this.lowWidth + x0]! * (1 - fractionX) +
+      this.values[y0 * this.lowWidth + x1]! * fractionX
+    const lower = this.values[y1 * this.lowWidth + x0]! * (1 - fractionX) +
+      this.values[y1 * this.lowWidth + x1]! * fractionX
+    return upper * (1 - fractionY) + lower * fractionY
+  }
+}

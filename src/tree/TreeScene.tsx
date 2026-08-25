@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { OrbitControls } from '@react-three/drei'
+import { OrbitControls, useTexture } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
-import { Euler, MathUtils, MeshBasicNodeMaterial, Vector3 } from 'three/webgpu'
+import {
+  Euler,
+  MathUtils,
+  MeshBasicNodeMaterial,
+  RepeatWrapping,
+  SRGBColorSpace,
+  Vector3,
+} from 'three/webgpu'
 import type { Group } from 'three/webgpu'
 import { float, smoothstep, uv } from 'three/tsl'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
@@ -10,6 +17,9 @@ import type { EditorStore } from '../terrain/editor/EditorStore'
 import { useEditorSnapshot } from '../terrain/react/hooks'
 import { TerrainEnvironment } from '../terrain/react/TerrainEnvironment'
 import { TerrainRenderPipeline } from '../terrain/react/TerrainRenderPipeline'
+import groundArmUrl from '../terrain/react/assets/rock-ground-arm-1k.jpg'
+import groundMapUrl from '../terrain/react/assets/rock-ground-diffuse-1k.jpg'
+import groundNormalUrl from '../terrain/react/assets/rock-ground-normal-gl-1k.jpg'
 import { TreeAssetView } from './TreeAssetView'
 import type { TreeDebugMode, TreeEditorStore } from './TreeEditorStore'
 import {
@@ -112,10 +122,7 @@ export function TreeScene({
           editor renders with. A tree judged under a different rig is judged
           against a look the game will never show. */}
       <TerrainEnvironment mode="full" config={terrain.config} updatePriority={0} />
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.52, 0]} receiveShadow>
-        <planeGeometry args={[GROUND_SIZE, GROUND_SIZE, 1, 1]} />
-        <meshStandardMaterial color={0x3d422f} roughness={0.97} metalness={0} />
-      </mesh>
+      <TreeReviewGround />
       {preparedTrees.map((entry) => (
         <PreparedTreeView
           key={entry.revision}
@@ -141,6 +148,45 @@ export function TreeScene({
         onPrewarmError={failPrewarm}
       />
     </>
+  )
+}
+
+/**
+ * A physically scaled neutral substrate for judging roots and contact shadows.
+ *
+ * The semantic environment solves against y=0, so the rendered soil surface
+ * must live there too. The old half-metre offset made correctly buried roots
+ * hover as loose bark-coloured shards and hid that error in a flat olive fill.
+ */
+function TreeReviewGround() {
+  const [map, normalMap, armMap] = useTexture([
+    groundMapUrl,
+    groundNormalUrl,
+    groundArmUrl,
+  ])
+  useMemo(() => {
+    for (const texture of [map, normalMap, armMap]) {
+      texture.wrapS = RepeatWrapping
+      texture.wrapT = RepeatWrapping
+      texture.repeat.set(80, 80)
+      texture.anisotropy = 8
+      texture.needsUpdate = true
+    }
+    map.colorSpace = SRGBColorSpace
+  }, [armMap, map, normalMap])
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]} receiveShadow>
+      <planeGeometry args={[GROUND_SIZE, GROUND_SIZE, 1, 1]} />
+      <meshStandardMaterial
+        map={map}
+        normalMap={normalMap}
+        aoMap={armMap}
+        aoMapIntensity={0.5}
+        roughnessMap={armMap}
+        roughness={0.95}
+        metalness={0}
+      />
+    </mesh>
   )
 }
 

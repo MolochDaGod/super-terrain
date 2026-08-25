@@ -3,9 +3,11 @@ import { generateSemanticTree } from './semanticGraph'
 import {
   DEFAULT_TREE_ENVIRONMENT,
   DEFAULT_TREE_PARAMETERS,
+  TREE_SPECIES_PRESETS,
   type TreeMeshData,
+  type TreeSpecies,
 } from './types'
-import { compileWoodyMesh } from './woodMesher'
+import { compileWoodyMesh, parallelTransportFrames } from './woodMesher'
 
 const TEST_PARAMETERS = {
   ...DEFAULT_TREE_PARAMETERS,
@@ -162,3 +164,88 @@ function union(parents: Uint32Array, a: number, b: number): void {
   const rootB = find(parents, b)
   if (rootA !== rootB) parents[rootB] = rootA
 }
+
+describe('continuation junctions', () => {
+  /**
+   * A continuation is stitched to its parent's terminal ring index for index.
+   * If the child seeds its own sweep frame from world-up instead of from that
+   * ring, every quad in the first band is sheared by the phase difference and
+   * the union renders as a repeating triangular fishbone.
+   */
+  const SPECIES: TreeSpecies[] = [
+    'dragon-blood',
+    'quiver-tree',
+    'doum-palm',
+    'ancient-oak',
+    'live-oak',
+  ]
+
+  it('carries angular phase across every continuation without twisting', () => {
+    for (const species of SPECIES) {
+      const graph = generateSemanticTree(
+        TREE_SPECIES_PRESETS[species],
+        DEFAULT_TREE_ENVIRONMENT,
+      )
+      const mesh = compileWoodyMesh(graph, 0).mesh
+      const byId = new Map(graph.parts.map((part) => [part.id, part]))
+      const continuations = graph.parts.filter((part) =>
+        part.junctionType === 'continuation' && part.parentId &&
+        byId.has(part.parentId))
+      expect(continuations.length, species).toBeGreaterThan(0)
+
+      // Longest edge anywhere in the mesh, against the girth it spans. A
+      // sheared first band shows up here: the quads become long diagonals.
+      let worst = 0
+      const indices = mesh.indices
+      for (let index = 0; index < indices.length; index += 3) {
+        for (let corner = 0; corner < 3; corner += 1) {
+          const a = indices[index + corner]!
+          const b = indices[index + ((corner + 1) % 3)]!
+          const edge = Math.hypot(
+            mesh.positions[a * 3]! - mesh.positions[b * 3]!,
+            mesh.positions[a * 3 + 1]! - mesh.positions[b * 3 + 1]!,
+            mesh.positions[a * 3 + 2]! - mesh.positions[b * 3 + 2]!,
+          )
+          worst = Math.max(worst, edge)
+        }
+      }
+      const widest = Math.max(...graph.parts.flatMap((part) =>
+        part.spine.map((sample) => sample.radius)))
+      // General sanity: no edge spans more than a few times the widest member.
+      expect(worst / widest, species).toBeLessThan(6)
+    }
+  })
+
+  it('seeds a swept frame with an inherited phase instead of world up', () => {
+    const tangent = { x: 0, y: 1, z: 0 }
+    const samples = [0, 1, 2].map((step) => ({
+      position: { x: 0, y: step, z: 0 },
+      tangent,
+      crossSection: {
+        radiusX: 0.4,
+        radiusZ: 0.4,
+        rotation: 0,
+        lobeCount: 3,
+        lobeStrength: 0,
+      },
+      burialDepth: 0,
+      distance: step,
+    }))
+
+    const unseeded = parallelTransportFrames(samples)
+    // An inherited phase pointing along +z must be reproduced exactly; without
+    // seeding the frame comes from a world-up reference and lands elsewhere.
+    const seeded = parallelTransportFrames(samples, { x: 0, y: 0, z: 1 })
+    expect(seeded[0]!.x.z).toBeCloseTo(1, 6)
+    expect(seeded[0]!.x.x).toBeCloseTo(0, 6)
+    expect(Math.abs(unseeded[0]!.x.z)).toBeLessThan(0.5)
+
+    // A seed with a component along the tangent is projected, not rejected.
+    const oblique = parallelTransportFrames(samples, { x: 0, y: 5, z: 1 })
+    expect(oblique[0]!.x.z).toBeCloseTo(1, 6)
+    expect(oblique[0]!.x.y).toBeCloseTo(0, 6)
+
+    // The phase then transports unchanged along a straight run.
+    expect(seeded.at(-1)!.x.z).toBeCloseTo(1, 6)
+  })
+})

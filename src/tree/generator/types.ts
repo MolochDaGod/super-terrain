@@ -1,10 +1,18 @@
+import type { FusedStemLobe } from './fusedStems'
+import {
+  isTreeSpecies,
+  type TreeOrganModel,
+  type TreeSpecies,
+} from './speciesCatalog'
+
+export type { TreeSpecies } from './speciesCatalog'
+
 export interface TreeVec3 {
   x: number
   y: number
   z: number
 }
 
-export type TreeSpecies = 'ancient-oak' | 'field-oak' | 'windswept-pine'
 export type TreePartType = 'trunk' | 'branch' | 'root' | 'twig'
 export type TreeJunctionType =
   | 'root-flare'
@@ -117,8 +125,28 @@ export interface TreeCrossSection {
   rotation: number
   lobeCount: number
   lobeStrength: number
+  /** Axial leaf-base row phase for true palm-boot mesh relief. */
+  palmBootPhase?: number
+  /** Coconut-style annular scars instead of phyllotactic V-shaped boot lips. */
+  palmRinged?: boolean
+  /** Radial height of persistent palm-boot lips, as a fraction of girth. */
+  palmBootRelief?: number
+  /** Number of phyllotactic leaf-base ranks around this palm stipe. */
+  palmBootRanks?: number
+  /** Fraction of upper leaf bases retained as projecting geometry. */
+  palmBootRetention?: number
   /** Buttress ribs at this station. Shared by reference along a member. */
   fins?: readonly TreeButtressFin[]
+  /**
+   * Offset stems whose union forms this outline, in units of the radius.
+   *
+   * Present only on members that really are several fused columns — a baobab
+   * bole, a banyan's coalesced root trunk. Everything else leaves it undefined
+   * and keeps the cheap elliptical section.
+   */
+  fusedStems?: readonly FusedStemLobe[]
+  /** Fold softness for `fusedStems`, in units of the radius. */
+  fusedStemBlend?: number
 }
 
 export interface TreeSpineSample {
@@ -141,6 +169,27 @@ export interface SemanticTreePart {
   dominance: number
   attachment: number
   junctionType: TreeJunctionType
+  /**
+   * True for a root that carries load through the air before it reaches the
+   * ground: a banyan pillar, a mangrove stilt, a strangler braid.
+   *
+   * The space solver holds ordinary roots at the soil surface, which is right
+   * for a radial root and fatal for these — it flattened the whole descending
+   * span onto the terrain and left only the single segment from the carrier as
+   * a long straight pole through the canopy.
+   */
+  aerial?: boolean
+  /**
+   * True when this member's first stations are authored *inside* its parent.
+   *
+   * The mesher builds a projected collar for an ordinary lateral, which is
+   * correct for a branch on a trunk and wrong for a union as thick as the wood
+   * that carries it: the collar becomes a circular shelf. A member marked here
+   * is compiled as a plain sweep whose opening rings are buried, and the shared
+   * junction blend fuses the two exterior surfaces. It is a structural property
+   * of the union, so it is recorded here rather than inferred from an id.
+   */
+  embedded?: boolean
   spine: TreeSpineSample[]
 }
 
@@ -166,6 +215,27 @@ export interface FoliageCluster {
   depth: number
   /** 0 on the sunlit crown surface, 1 in the shaded interior. Darkens cards. */
   occlusion: number
+  /** 0 for live foliage, 1 for a retained dry or dead organ. */
+  senescence?: number
+  /** 0 for a tightly folded spear leaf, 1 for a fully expanded organ. */
+  development?: number
+  /** Selects the geometry treatment; the atlas profile still comes from species. */
+  organModel: TreeOrganModel
+  seed: number
+}
+
+export interface FruitCluster {
+  id: string
+  model: 'date-bunch' | 'coconut-cluster'
+  partId: string
+  center: TreeVec3
+  axis: TreeVec3
+  radial: TreeVec3
+  strandCount: number
+  spread: number
+  length: number
+  fruitRadius: number
+  count: number
   seed: number
 }
 
@@ -174,6 +244,7 @@ export interface SemanticTreeGraph {
   parts: SemanticTreePart[]
   contacts: TreeContact[]
   foliageClusters: FoliageCluster[]
+  fruitClusters: FruitCluster[]
   bounds: TreeBounds
 }
 
@@ -196,9 +267,12 @@ export interface TreeMeshData {
 }
 
 export type FoliageRepresentation = 'cards' | 'clusters'
+export type FoliageCardGeometry = 'spray' | 'frond' | 'fan-frond' | 'rosette'
 
 export interface TreeFoliageData {
   representation: FoliageRepresentation
+  /** Mesh topology used by card instances; fronds need a real longitudinal arch. */
+  cardGeometry: FoliageCardGeometry
   matrices: Float32Array
   colors: Float32Array
   /** Atlas spray each card draws. Cards are batched one instanced mesh per variant. */
@@ -207,10 +281,17 @@ export interface TreeFoliageData {
   count: number
 }
 
+export interface TreeFruitData {
+  matrices: Float32Array
+  colors: Float32Array
+  count: number
+}
+
 export interface TreeLodAsset {
   level: TreeLodLevel
   wood: TreeMeshData
   foliage: TreeFoliageData
+  fruits: TreeFruitData
   includedPartCount: number
 }
 
@@ -239,11 +320,15 @@ export const DEFAULT_TREE_ENVIRONMENT: TreeEnvironment = {
 export const DEFAULT_TREE_PARAMETERS: TreeParameters = {
   seed: 84721,
   species: 'ancient-oak',
-  bolePlan: 'auto',
-  axisForm: 'auto',
-  trunkDamage: 'auto',
-  crownForm: 'auto',
-  rootForm: 'auto',
+  // The showcase recipe is deliberately art-directed. `auto` remains
+  // available for population generation, but a hero asset must not randomly
+  // choose a retrenched crown or exposed-root regime that requires a different
+  // composition and review camera.
+  bolePlan: 'single',
+  axisForm: 'sinuous',
+  trunkDamage: 'intact',
+  crownForm: 'full',
+  rootForm: 'sunken',
   lean: 6,
   sinuosity: 0.55,
   twist: 0.5,
@@ -253,14 +338,20 @@ export const DEFAULT_TREE_PARAMETERS: TreeParameters = {
   lostLimbs: 3,
   height: 22,
   crownRadius: 13.5,
-  trunkRadius: 1.05,
+  // A veteran oak's bole has to remain visually load-bearing beneath a
+  // thirty-metre crown; the previous metre-wide radius read as an orchard
+  // tree once the scaffold spread was corrected.
+  trunkRadius: 1.34,
   age: 0.9,
   gnarl: 0.72,
-  branchCount: 10,
+  branchCount: 6,
   rootCount: 7,
   rootSpread: 9.5,
   rootExposure: 0.5,
-  foliageDensity: 0.88,
+  // The hero crown uses branchlet-scale sprays. A little over the neutral
+  // density is required to close the major crown masses without inflating the
+  // individual cards back into billboard clumps.
+  foliageDensity: 1.45,
 }
 
 export const TREE_SPECIES_PRESETS: Record<TreeSpecies, TreeParameters> = {
@@ -269,12 +360,17 @@ export const TREE_SPECIES_PRESETS: Record<TreeSpecies, TreeParameters> = {
     ...DEFAULT_TREE_PARAMETERS,
     seed: 31591,
     species: 'field-oak',
+    bolePlan: 'auto',
+    axisForm: 'auto',
+    trunkDamage: 'auto',
+    crownForm: 'auto',
+    rootForm: 'auto',
     height: 21,
     crownRadius: 9,
     trunkRadius: 0.52,
     age: 0.58,
     gnarl: 0.36,
-    branchCount: 11,
+    branchCount: 5,
     rootCount: 6,
     rootSpread: 7,
     rootExposure: 0.42,
@@ -284,16 +380,665 @@ export const TREE_SPECIES_PRESETS: Record<TreeSpecies, TreeParameters> = {
     ...DEFAULT_TREE_PARAMETERS,
     seed: 71023,
     species: 'windswept-pine',
+    bolePlan: 'auto',
+    axisForm: 'auto',
+    trunkDamage: 'auto',
+    crownForm: 'auto',
+    rootForm: 'auto',
     height: 29,
     crownRadius: 6.2,
     trunkRadius: 0.46,
     age: 0.66,
     gnarl: 0.44,
-    branchCount: 13,
+    branchCount: 7,
     rootCount: 7,
     rootSpread: 6.8,
     rootExposure: 0.48,
     foliageDensity: 0.7,
+  },
+  'kapok-ceiba': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 48127,
+    species: 'kapok-ceiba',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'buttressed',
+    twist: 0.18,
+    fluting: 0.48,
+    rootRelief: 0.78,
+    rootSurfacings: 1,
+    lostLimbs: 0,
+    lean: 1,
+    sinuosity: 0.08,
+    height: 48,
+    crownRadius: 13,
+    trunkRadius: 1.65,
+    age: 0.78,
+    gnarl: 0.18,
+    branchCount: 7,
+    rootCount: 8,
+    rootSpread: 12,
+    rootExposure: 0.62,
+    foliageDensity: 1.12,
+  },
+  baobab: {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 90217,
+    species: 'baobab',
+    bolePlan: 'single',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.12,
+    fluting: 0.34,
+    // The base is carried by the bole's own foot and shoulder ribs. Relief and
+    // surfacings here only put flat straps of root back on the terrain.
+    rootRelief: 0.3,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 2,
+    sinuosity: 0.22,
+    height: 21,
+    // A baobab's crown is broader than its bole is tall. The rejected render
+    // had them nearly equal, which is why the tree read as a sandbag with a
+    // shrub balanced on it however good the branch grammar underneath was.
+    crownRadius: 12.5,
+    trunkRadius: 2.95,
+    age: 0.88,
+    gnarl: 0.4,
+    branchCount: 6,
+    rootCount: 7,
+    rootSpread: 11,
+    rootExposure: 0.16,
+    foliageDensity: 0.9,
+  },
+  'coconut-palm': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 66739,
+    species: 'coconut-palm',
+    bolePlan: 'single',
+    axisForm: 'leaning',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.08,
+    fluting: 0.06,
+    rootRelief: 0.12,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 11,
+    sinuosity: 0.28,
+    height: 24,
+    crownRadius: 6.5,
+    trunkRadius: 0.38,
+    age: 0.7,
+    gnarl: 0.08,
+    branchCount: 15,
+    rootCount: 7,
+    rootSpread: 5.2,
+    rootExposure: 0.12,
+    foliageDensity: 1,
+  },
+  'dragon-blood': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 73331,
+    species: 'dragon-blood',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.16,
+    fluting: 0.18,
+    rootRelief: 0.18,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 2,
+    sinuosity: 0.12,
+    height: 11,
+    crownRadius: 7.8,
+    trunkRadius: 0.72,
+    age: 0.82,
+    gnarl: 0.2,
+    branchCount: 6,
+    rootCount: 6,
+    rootSpread: 5.8,
+    rootExposure: 0.16,
+    foliageDensity: 1,
+  },
+  'norway-spruce': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 11837,
+    species: 'norway-spruce',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.12,
+    fluting: 0.12,
+    rootRelief: 0.2,
+    rootSurfacings: 1,
+    lostLimbs: 0,
+    lean: 1,
+    sinuosity: 0.08,
+    height: 34,
+    crownRadius: 7.4,
+    trunkRadius: 0.62,
+    age: 0.68,
+    gnarl: 0.08,
+    branchCount: 10,
+    rootCount: 7,
+    rootSpread: 6.5,
+    rootExposure: 0.2,
+    foliageDensity: 1.06,
+  },
+  'coast-redwood': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 55271,
+    species: 'coast-redwood',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'buttressed',
+    twist: 0.18,
+    fluting: 0.3,
+    rootRelief: 0.42,
+    rootSurfacings: 1,
+    lostLimbs: 0,
+    lean: 1,
+    sinuosity: 0.06,
+    height: 82,
+    crownRadius: 10.5,
+    trunkRadius: 2.3,
+    age: 0.84,
+    gnarl: 0.12,
+    branchCount: 13,
+    rootCount: 9,
+    rootSpread: 11,
+    rootExposure: 0.36,
+    foliageDensity: 1.08,
+  },
+  'monkey-puzzle': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 34819,
+    species: 'monkey-puzzle',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.1,
+    fluting: 0.08,
+    rootRelief: 0.15,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 1,
+    sinuosity: 0.05,
+    height: 28,
+    crownRadius: 6.8,
+    trunkRadius: 0.62,
+    age: 0.72,
+    gnarl: 0.06,
+    branchCount: 9,
+    rootCount: 7,
+    rootSpread: 6.2,
+    rootExposure: 0.12,
+    foliageDensity: 0.9,
+  },
+  'date-palm': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 62039,
+    species: 'date-palm',
+    bolePlan: 'single',
+    axisForm: 'leaning',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.08,
+    fluting: 0.08,
+    rootRelief: 0.14,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 5,
+    sinuosity: 0.22,
+    height: 18,
+    crownRadius: 6.15,
+    trunkRadius: 0.52,
+    age: 0.76,
+    gnarl: 0.08,
+    branchCount: 24,
+    rootCount: 7,
+    rootSpread: 4.8,
+    rootExposure: 0.1,
+    foliageDensity: 1.12,
+  },
+  'tree-fern': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 27449,
+    species: 'tree-fern',
+    bolePlan: 'single',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.04,
+    fluting: 0.04,
+    rootRelief: 0.18,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 4,
+    sinuosity: 0.24,
+    height: 9.5,
+    crownRadius: 4.8,
+    trunkRadius: 0.34,
+    age: 0.64,
+    gnarl: 0.1,
+    branchCount: 18,
+    rootCount: 6,
+    rootSpread: 3.6,
+    rootExposure: 0.16,
+    foliageDensity: 1.04,
+  },
+  'quiver-tree': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 80687,
+    species: 'quiver-tree',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.12,
+    fluting: 0.1,
+    rootRelief: 0.16,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 2,
+    sinuosity: 0.1,
+    height: 8.5,
+    crownRadius: 4.2,
+    trunkRadius: 0.52,
+    age: 0.74,
+    gnarl: 0.14,
+    branchCount: 5,
+    rootCount: 6,
+    rootSpread: 4,
+    rootExposure: 0.12,
+    foliageDensity: 1,
+  },
+  'doum-palm': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 46273,
+    species: 'doum-palm',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.08,
+    fluting: 0.08,
+    rootRelief: 0.16,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 3,
+    sinuosity: 0.12,
+    height: 16,
+    crownRadius: 6.2,
+    trunkRadius: 0.58,
+    age: 0.8,
+    gnarl: 0.12,
+    branchCount: 6,
+    rootCount: 7,
+    rootSpread: 5.5,
+    rootExposure: 0.14,
+    foliageDensity: 1.05,
+  },
+  'joshua-tree': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 59113,
+    species: 'joshua-tree',
+    bolePlan: 'single',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.12,
+    fluting: 0.12,
+    rootRelief: 0.14,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 4,
+    sinuosity: 0.22,
+    height: 9,
+    crownRadius: 4.8,
+    trunkRadius: 0.62,
+    age: 0.76,
+    gnarl: 0.26,
+    branchCount: 5,
+    rootCount: 6,
+    rootSpread: 4.4,
+    rootExposure: 0.12,
+    foliageDensity: 1,
+  },
+  'bristlecone-pine': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 93557,
+    species: 'bristlecone-pine',
+    bolePlan: 'single',
+    axisForm: 'sinuous',
+    trunkDamage: 'snapped',
+    crownForm: 'stagheaded',
+    rootForm: 'buttressed',
+    twist: 1.15,
+    fluting: 0.65,
+    rootRelief: 0.62,
+    rootSurfacings: 1,
+    lostLimbs: 5,
+    lean: 12,
+    sinuosity: 1.3,
+    height: 11,
+    crownRadius: 5.4,
+    trunkRadius: 0.82,
+    age: 0.98,
+    gnarl: 0.95,
+    branchCount: 6,
+    rootCount: 7,
+    rootSpread: 6.2,
+    rootExposure: 0.7,
+    foliageDensity: 0.48,
+  },
+  'screw-pine-pandanus': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 15991,
+    species: 'screw-pine-pandanus',
+    bolePlan: 'single',
+    axisForm: 'leaning',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'stilted',
+    twist: 0.22,
+    fluting: 0.1,
+    rootRelief: 1.6,
+    rootSurfacings: 1,
+    lostLimbs: 0,
+    lean: 6,
+    sinuosity: 0.18,
+    height: 9,
+    crownRadius: 4.4,
+    trunkRadius: 0.42,
+    age: 0.72,
+    gnarl: 0.12,
+    branchCount: 18,
+    rootCount: 9,
+    rootSpread: 4.8,
+    rootExposure: 0.86,
+    foliageDensity: 1.08,
+  },
+  banyan: {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 73133,
+    species: 'banyan',
+    bolePlan: 'codominant',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'reiterated',
+    rootForm: 'braided',
+    twist: 0.42,
+    fluting: 0.5,
+    rootRelief: 0.82,
+    rootSurfacings: 2,
+    lostLimbs: 1,
+    lean: 3,
+    sinuosity: 0.42,
+    height: 25,
+    crownRadius: 18,
+    trunkRadius: 1.4,
+    age: 0.92,
+    gnarl: 0.48,
+    branchCount: 8,
+    rootCount: 9,
+    rootSpread: 13,
+    rootExposure: 0.72,
+    foliageDensity: 1.6,
+  },
+  mangrove: {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 42901,
+    species: 'mangrove',
+    bolePlan: 'multistem',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'lopsided',
+    rootForm: 'stilted',
+    twist: 0.34,
+    fluting: 0.38,
+    rootRelief: 1.8,
+    rootSurfacings: 2,
+    lostLimbs: 1,
+    lean: 7,
+    sinuosity: 0.56,
+    height: 12,
+    crownRadius: 7,
+    trunkRadius: 0.45,
+    age: 0.8,
+    gnarl: 0.42,
+    branchCount: 7,
+    rootCount: 10,
+    rootSpread: 7,
+    rootExposure: 0.95,
+    foliageDensity: 1.1,
+  },
+  'strangler-fig': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 88741,
+    species: 'strangler-fig',
+    bolePlan: 'fused',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'reiterated',
+    rootForm: 'braided',
+    twist: 2.2,
+    fluting: 0.62,
+    rootRelief: 1.25,
+    rootSurfacings: 2,
+    lostLimbs: 1,
+    lean: 4,
+    sinuosity: 0.48,
+    height: 22,
+    crownRadius: 11,
+    trunkRadius: 1,
+    age: 0.9,
+    gnarl: 0.52,
+    branchCount: 7,
+    rootCount: 9,
+    rootSpread: 9,
+    rootExposure: 0.88,
+    foliageDensity: 1.2,
+  },
+  'umbrella-acacia': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 24781,
+    species: 'umbrella-acacia',
+    bolePlan: 'single',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'lopsided',
+    rootForm: 'sunken',
+    twist: 0.46,
+    fluting: 0.22,
+    rootRelief: 0.34,
+    rootSurfacings: 1,
+    lostLimbs: 2,
+    lean: 6,
+    sinuosity: 0.46,
+    height: 12,
+    crownRadius: 9,
+    trunkRadius: 0.48,
+    age: 0.82,
+    gnarl: 0.52,
+    branchCount: 6,
+    rootCount: 6,
+    rootSpread: 6,
+    rootExposure: 0.28,
+    foliageDensity: 0.82,
+  },
+  'rainbow-eucalyptus': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 61813,
+    species: 'rainbow-eucalyptus',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'lopsided',
+    rootForm: 'buttressed',
+    twist: 0.28,
+    fluting: 0.32,
+    rootRelief: 0.42,
+    rootSurfacings: 1,
+    lostLimbs: 1,
+    lean: 3,
+    sinuosity: 0.18,
+    height: 48,
+    crownRadius: 10,
+    trunkRadius: 1.15,
+    age: 0.78,
+    gnarl: 0.18,
+    branchCount: 7,
+    rootCount: 8,
+    rootSpread: 8.5,
+    rootExposure: 0.4,
+    foliageDensity: 0.88,
+  },
+  'gum-eucalyptus': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 37511,
+    species: 'gum-eucalyptus',
+    bolePlan: 'codominant',
+    axisForm: 'sinuous',
+    trunkDamage: 'intact',
+    crownForm: 'lopsided',
+    rootForm: 'sunken',
+    twist: 0.62,
+    fluting: 0.18,
+    rootRelief: 0.32,
+    rootSurfacings: 1,
+    lostLimbs: 2,
+    lean: 8,
+    sinuosity: 0.7,
+    height: 24,
+    crownRadius: 10,
+    trunkRadius: 0.74,
+    age: 0.78,
+    gnarl: 0.46,
+    branchCount: 7,
+    rootCount: 7,
+    rootSpread: 7.5,
+    rootExposure: 0.3,
+    foliageDensity: 0.68,
+  },
+  'giant-sequoia': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 96317,
+    species: 'giant-sequoia',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'buttressed',
+    twist: 0.16,
+    fluting: 0.62,
+    rootRelief: 0.54,
+    rootSurfacings: 1,
+    lostLimbs: 1,
+    lean: 1,
+    sinuosity: 0.05,
+    height: 76,
+    crownRadius: 12,
+    trunkRadius: 3.4,
+    age: 0.9,
+    gnarl: 0.12,
+    branchCount: 12,
+    rootCount: 10,
+    rootSpread: 14,
+    rootExposure: 0.52,
+    foliageDensity: 1.02,
+  },
+  'norfolk-island-pine': {
+    ...DEFAULT_TREE_PARAMETERS,
+    seed: 51437,
+    species: 'norfolk-island-pine',
+    bolePlan: 'single',
+    axisForm: 'straight',
+    trunkDamage: 'intact',
+    crownForm: 'full',
+    rootForm: 'sunken',
+    twist: 0.08,
+    fluting: 0.08,
+    rootRelief: 0.16,
+    rootSurfacings: 0,
+    lostLimbs: 0,
+    lean: 1,
+    sinuosity: 0.04,
+    height: 32,
+    crownRadius: 7,
+    trunkRadius: 0.62,
+    age: 0.68,
+    gnarl: 0.04,
+    branchCount: 10,
+    rootCount: 7,
+    rootSpread: 6,
+    rootExposure: 0.12,
+    foliageDensity: 0.95,
+  },
+  'live-oak': {
+    ...DEFAULT_TREE_PARAMETERS, seed: 82171, species: 'live-oak',
+    bolePlan: 'single', axisForm: 'sinuous', trunkDamage: 'intact',
+    crownForm: 'reiterated', rootForm: 'sunken', twist: 0.34,
+    fluting: 0.72, rootRelief: 0.08, rootSurfacings: 0, lostLimbs: 0,
+    lean: 3.5, sinuosity: 0.28, height: 20, crownRadius: 15,
+    trunkRadius: 1.2, age: 0.94, gnarl: 0.58, branchCount: 7,
+    rootCount: 5, rootSpread: 5.5, rootExposure: 0.03, foliageDensity: 1.42,
+  },
+  'european-beech': {
+    ...DEFAULT_TREE_PARAMETERS, seed: 33049, species: 'european-beech',
+    bolePlan: 'single', axisForm: 'straight', trunkDamage: 'intact',
+    crownForm: 'full', rootForm: 'buttressed', twist: 0.18,
+    fluting: 0.24, rootRelief: 0.46, rootSurfacings: 1, lostLimbs: 1,
+    lean: 2, sinuosity: 0.12, height: 30, crownRadius: 10,
+    trunkRadius: 0.86, age: 0.82, gnarl: 0.18, branchCount: 8,
+    rootCount: 8, rootSpread: 8, rootExposure: 0.42, foliageDensity: 1.38,
+  },
+  'silver-birch': {
+    ...DEFAULT_TREE_PARAMETERS, seed: 77419, species: 'silver-birch',
+    bolePlan: 'multistem', axisForm: 'sinuous', trunkDamage: 'intact',
+    crownForm: 'lopsided', rootForm: 'sunken', twist: 0.16,
+    fluting: 0.08, rootRelief: 0.18, rootSurfacings: 0, lostLimbs: 1,
+    lean: 5, sinuosity: 0.36, height: 19, crownRadius: 5.5,
+    trunkRadius: 0.34, age: 0.62, gnarl: 0.22, branchCount: 8,
+    rootCount: 6, rootSpread: 4.5, rootExposure: 0.12, foliageDensity: 0.86,
+  },
+  'cedar-of-lebanon': {
+    ...DEFAULT_TREE_PARAMETERS, seed: 68227, species: 'cedar-of-lebanon',
+    bolePlan: 'single', axisForm: 'sinuous', trunkDamage: 'intact',
+    crownForm: 'reiterated', rootForm: 'buttressed', twist: 0.44,
+    fluting: 0.46, rootRelief: 0.52, rootSurfacings: 1, lostLimbs: 2,
+    lean: 3, sinuosity: 0.34, height: 27, crownRadius: 13,
+    trunkRadius: 1.05, age: 0.9, gnarl: 0.54, branchCount: 7,
+    rootCount: 8, rootSpread: 9, rootExposure: 0.48, foliageDensity: 0.84,
+  },
+  'japanese-black-pine': {
+    ...DEFAULT_TREE_PARAMETERS, seed: 14593, species: 'japanese-black-pine',
+    bolePlan: 'single', axisForm: 'sinuous', trunkDamage: 'snapped',
+    crownForm: 'lopsided', rootForm: 'buttressed', twist: 0.88,
+    fluting: 0.42, rootRelief: 0.64, rootSurfacings: 2, lostLimbs: 4,
+    lean: 14, sinuosity: 1.15, height: 14, crownRadius: 6.5,
+    trunkRadius: 0.68, age: 0.9, gnarl: 0.88, branchCount: 6,
+    rootCount: 7, rootSpread: 6.5, rootExposure: 0.64, foliageDensity: 0.58,
   },
 }
 
@@ -319,12 +1064,12 @@ export function normalizeTreeParameters(
     rootRelief: finiteInRange(input?.rootRelief, fallback.rootRelief, 0, 3),
     rootSurfacings: integerInRange(input?.rootSurfacings, fallback.rootSurfacings, 0, 5),
     lostLimbs: integerInRange(input?.lostLimbs, fallback.lostLimbs, 0, 8),
-    height: finiteInRange(input?.height, fallback.height, 10, 45),
-    crownRadius: finiteInRange(input?.crownRadius, fallback.crownRadius, 3, 20),
-    trunkRadius: finiteInRange(input?.trunkRadius, fallback.trunkRadius, 0.18, 2.2),
+    height: finiteInRange(input?.height, fallback.height, 4, 120),
+    crownRadius: finiteInRange(input?.crownRadius, fallback.crownRadius, 1.5, 35),
+    trunkRadius: finiteInRange(input?.trunkRadius, fallback.trunkRadius, 0.12, 8),
     age: finiteInRange(input?.age, fallback.age, 0, 1),
     gnarl: finiteInRange(input?.gnarl, fallback.gnarl, 0, 1),
-    branchCount: integerInRange(input?.branchCount, fallback.branchCount, 5, 15),
+    branchCount: integerInRange(input?.branchCount, fallback.branchCount, 5, 30),
     rootCount: integerInRange(input?.rootCount, fallback.rootCount, 5, 10),
     rootSpread: finiteInRange(input?.rootSpread, fallback.rootSpread, 3, 16),
     rootExposure: finiteInRange(input?.rootExposure, fallback.rootExposure, 0, 1),
@@ -359,10 +1104,6 @@ function oneOf<T extends string>(
   fallback: T,
 ): T {
   return allowed.includes(value as T) ? (value as T) : fallback
-}
-
-function isTreeSpecies(value: unknown): value is TreeSpecies {
-  return value === 'ancient-oak' || value === 'field-oak' || value === 'windswept-pine'
 }
 
 function finiteInRange(
