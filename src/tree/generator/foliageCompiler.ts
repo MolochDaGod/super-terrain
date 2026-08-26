@@ -50,32 +50,43 @@ export function compileFoliage(
     return emptyFoliage(level)
   }
   const architecture = speciesArchitecture(parameters)
-  return level === 2
-    ? compileClusterInstances(graph, parameters, architecture)
-    : compileCardInstances(graph, parameters, architecture, level)
+  return compileCardInstances(graph, parameters, architecture, level)
 }
 
 function compileCardInstances(
   graph: SemanticTreeGraph,
   parameters: TreeParameters,
   architecture: SpeciesArchitecture,
-  level: 0 | 1,
+  level: TreeLodLevel,
 ): TreeFoliageData {
   const matrices: number[] = []
   const colors: number[] = []
   const variants: number[] = []
   const crownCenter = crownCentroid(graph.foliageClusters)
+  // Card count, not merely cards-per-station, is what dominates a forest.
+  // Keep a spatially distributed subset of stations at distance: every item
+  // is still genuine authored foliage, but sub-pixel branchlet sprays are not
+  // submitted hundreds of times per tree.
+  const stationBudget = level === 0 ? Number.POSITIVE_INFINITY : level === 1 ? 560 : 112
+  const stationStride = Math.max(
+    1,
+    Math.ceil(graph.foliageClusters.length / stationBudget),
+  )
   const perStation = level === 0
     ? architecture.cardsPerStation
-    : Math.max(1, Math.round(architecture.cardsPerStation * 0.5))
-  // A medium LOD draws fewer, larger cards so the crown keeps its mass instead
-  // of turning to lace the moment the count drops.
+    : level === 1
+      ? Math.max(1, Math.round(architecture.cardsPerStation * 0.5))
+      : Math.max(1, Math.round(architecture.cardsPerStation * 0.18))
+  // Lower LODs draw fewer, larger sprays. Even the far representation remains
+  // real alpha-cut leaf/frond geometry; it only reduces the number of cards.
   const sizeCompensation = level === 0
     ? 1
-    : Math.sqrt(architecture.cardsPerStation / Math.max(1, perStation))
+    : Math.min(level === 1 ? 1.55 : 1.9,
+        Math.sqrt(architecture.cardsPerStation / Math.max(1, perStation)))
   const frondGeometry = parameters.species === 'doum-palm' ? 'fan-frond' : 'frond'
 
-  for (const cluster of graph.foliageClusters) {
+  for (let clusterIndex = 0; clusterIndex < graph.foliageClusters.length; clusterIndex += stationStride) {
+    const cluster = graph.foliageClusters[clusterIndex]!
     const random = new TreeRandom(cluster.seed + level * 7919)
     // Outward from the crown's own centre, not from the world axis: on a
     // lopsided veteran the two are metres apart and the axis version lights the
@@ -214,56 +225,6 @@ function compileCardInstances(
   }
 }
 
-/** Far LOD: the crown collapses to a handful of tinted blobs. */
-function compileClusterInstances(
-  graph: SemanticTreeGraph,
-  parameters: TreeParameters,
-  architecture: SpeciesArchitecture,
-): TreeFoliageData {
-  const matrices: number[] = []
-  const colors: number[] = []
-  const variants: number[] = []
-  const clusters = graph.foliageClusters
-  const stride = Math.max(1, Math.round(clusters.length / 120))
-  for (let index = 0; index < clusters.length; index += stride) {
-    const cluster = clusters[index]!
-    // Hero sprays were reduced to branchlet scale, but far clusters still need
-    // the original broad footprint or the capped ~120 blobs turn the crown to
-    // lace. Preserve each station's authored size jitter while restoring that
-    // species-specific far silhouette.
-    const scale = cluster.radius / architecture.cardSize *
-      architecture.farClusterSize * 2.6
-    appendMatrix(
-      matrices,
-      vec3(1, 0, 0),
-      vec3(0, 1, 0),
-      vec3(0, 0, 1),
-      cluster.center,
-      scale,
-      scale * 0.82,
-      scale,
-    )
-    appendCardColour(
-      colors,
-      parameters,
-      architecture,
-      cluster,
-      cluster.center,
-      index,
-    )
-    variants.push(0)
-  }
-  return {
-    representation: 'clusters',
-    cardGeometry: 'spray',
-    matrices: Float32Array.from(matrices),
-    colors: Float32Array.from(colors),
-    variants: Uint8Array.from(variants),
-    variantCount: 1,
-    count: matrices.length / 16,
-  }
-}
-
 function crownCentroid(clusters: readonly FoliageCluster[]): TreeVec3 {
   if (clusters.length === 0) return vec3(0, 0, 0)
   let sum = vec3(0, 0, 0)
@@ -323,9 +284,9 @@ function randomUnit(random: TreeRandom): TreeVec3 {
   return vec3(Math.cos(azimuth) * ring, z, Math.sin(azimuth) * ring)
 }
 
-function emptyFoliage(level: TreeLodLevel): TreeFoliageData {
+function emptyFoliage(_level: TreeLodLevel): TreeFoliageData {
   return {
-    representation: level === 2 ? 'clusters' : 'cards',
+    representation: 'cards',
     cardGeometry: 'spray',
     matrices: new Float32Array(),
     colors: new Float32Array(),

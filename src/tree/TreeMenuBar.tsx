@@ -1,104 +1,144 @@
-import { Orbit, Plane } from 'lucide-react'
+import {
+  Copy,
+  Eye,
+  Gauge,
+  Leaf,
+  Orbit,
+  Plane,
+  RefreshCw,
+  Trash2,
+  TreePine,
+} from 'lucide-react'
+import {
+  Menu,
+  MenuBar,
+  MenuGroupLabel,
+  MenuItem,
+  MenuSeparator,
+} from '../components/editor/ui/Menu'
 import { WorkspaceToggle, type Workspace } from '../components/editor/WorkspaceToggle'
 import type { CameraMode, EditorStore } from '../terrain/editor/EditorStore'
 import { useEditorSnapshot } from '../terrain/react/hooks'
+import type { TreeEditorStore } from './TreeEditorStore'
+import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 
 interface TreeMenuBarProps {
   editor: EditorStore
+  store: TreeEditorStore
   workspace: Workspace
   onWorkspaceChange: (workspace: Workspace) => void
 }
 
-/** The intentionally spare shell for the tree authoring workspace. */
 export function TreeMenuBar({
   editor,
+  store,
   workspace,
   onWorkspaceChange,
 }: TreeMenuBarProps) {
   const { cameraMode } = useEditorSnapshot(editor)
+  const snapshot = useTreeEditorSnapshot(store)
+  const selected = Boolean(snapshot.selectedPlacementId)
 
   return (
-    <header className="pointer-events-auto absolute inset-x-0 top-0 z-30 flex h-9 items-center border-b border-white/[0.08] bg-[#07100f]/92 px-2.5 backdrop-blur-xl">
-      <div className="flex shrink-0 items-center gap-2">
+    <header className="pointer-events-auto absolute inset-x-0 top-0 z-30 flex h-9 items-center gap-3 border-b border-white/[0.08] bg-[#07100f]/92 pl-2.5 pr-2 backdrop-blur-xl">
+      <div className="flex shrink-0 items-center gap-2 pr-1">
         <span className="grid size-5 place-items-center rounded border border-[#77e8be]/25 bg-[#77e8be]/10 text-[#a6f2d5]">
-          <TreeMark />
+          <TreePine size={11} strokeWidth={1.9} />
         </span>
         <span className="hidden text-[11px] font-semibold tracking-tight text-white/78 sm:inline">
-          Mesh Tree
+          Mesh Forest
         </span>
       </div>
+
+      <MenuBar>
+        <Menu label="Forest">
+          <MenuItem
+            label="Cancel placement"
+            disabled={!snapshot.armedPrototypeId}
+            onSelect={() => store.cancelPlacement()}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Clear forest"
+            icon={Trash2}
+            disabled={snapshot.placements.length === 0}
+            onSelect={() => store.clearForest()}
+          />
+        </Menu>
+        <Menu label="Edit">
+          <MenuItem
+            label="Duplicate instance"
+            shortcut="⌘D"
+            icon={Copy}
+            disabled={!selected}
+            onSelect={() => store.duplicateSelected()}
+          />
+          <MenuItem
+            label="Delete instance"
+            shortcut="Del"
+            icon={Trash2}
+            disabled={!selected}
+            onSelect={() => store.deleteSelected()}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Recompile shared tree"
+            icon={RefreshCw}
+            disabled={!selected}
+            onSelect={() => store.recompileSelected()}
+          />
+        </Menu>
+        <Menu label="View">
+          <MenuGroupLabel>Camera</MenuGroupLabel>
+          <MenuItem
+            label="Orbit camera"
+            icon={Orbit}
+            checked={cameraMode === 'orbit'}
+            onSelect={() => setCameraMode(editor, 'orbit')}
+          />
+          <MenuItem
+            label="Fly camera"
+            icon={Plane}
+            checked={cameraMode === 'fly'}
+            onSelect={() => setCameraMode(editor, 'fly')}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Show foliage"
+            icon={Leaf}
+            checked={snapshot.showFoliage}
+            onSelect={() => store.patch({ showFoliage: !snapshot.showFoliage })}
+          />
+          <MenuItem
+            label="Performance overlay"
+            icon={Gauge}
+            checked={snapshot.showHud}
+            onSelect={() => store.patch({ showHud: !snapshot.showHud })}
+          />
+          <MenuItem
+            label="Surface render mode"
+            icon={Eye}
+            checked={snapshot.debugMode === 'surface'}
+            onSelect={() => store.patch({ debugMode: 'surface' })}
+          />
+        </Menu>
+      </MenuBar>
 
       <WorkspaceToggle workspace={workspace} onChange={onWorkspaceChange} />
 
-      <div className="ml-auto flex items-center rounded-md border border-white/[0.08] bg-black/15 p-0.5">
-        <CameraButton
-          label="Orbit"
-          icon={Orbit}
-          active={cameraMode === 'orbit'}
-          onClick={() => setCameraMode(editor, 'orbit')}
-        />
-        <CameraButton
-          label="Fly"
-          icon={Plane}
-          active={cameraMode === 'fly'}
-          onClick={() => setCameraMode(editor, 'fly')}
-        />
+      <div className="ml-auto hidden items-center gap-3 font-mono text-[9px] text-white/35 md:flex">
+        <span>{snapshot.placements.length} trees</span>
+        <span>{Object.keys(snapshot.prototypes).length} prototypes</span>
       </div>
     </header>
-  )
-}
-
-function CameraButton({
-  label,
-  icon: Icon,
-  active,
-  onClick,
-}: {
-  label: string
-  icon: typeof Orbit
-  active: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      title={`${label} camera`}
-      aria-label={`${label} camera`}
-      aria-pressed={active}
-      data-active={active}
-      className="flex h-6 items-center gap-1.5 rounded-[0.3rem] border border-transparent px-2 text-[10px] text-white/38 transition hover:text-white/75 data-[active=true]:border-white/[0.07] data-[active=true]:bg-white/[0.07] data-[active=true]:text-[#b7f6df]"
-      onClick={onClick}
-    >
-      <Icon size={11} />
-      <span className="hidden sm:inline">{label}</span>
-    </button>
   )
 }
 
 function setCameraMode(editor: EditorStore, cameraMode: CameraMode): void {
   editor.patch({
     cameraMode,
-    status:
-      cameraMode === 'fly'
-        ? 'Fly mode · click the viewport to capture the mouse'
-        : 'Orbit camera active',
+    status: cameraMode === 'fly'
+      ? 'Fly mode · click the viewport to capture the mouse'
+      : 'Orbit camera active',
   })
-}
-
-function TreeMark() {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="0 0 16 16"
-      className="size-3"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M8 14V8.8M8 11l-2.1-1.5M8 9.3l2.4-1.7" />
-      <path d="M8 2 4.7 7.4h2L4.4 11h7.2L9.3 7.4h2L8 2Z" />
-    </svg>
-  )
 }

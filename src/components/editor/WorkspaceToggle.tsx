@@ -12,7 +12,7 @@ export function WorkspaceToggle({
 }: WorkspaceToggleProps) {
   return (
     <div
-      className="absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center rounded-md border border-white/[0.09] bg-black/20 p-0.5 shadow-inner"
+      className="absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center rounded border border-white/[0.08] bg-black/15 p-px shadow-inner"
       role="group"
       aria-label="Workspace"
     >
@@ -44,7 +44,7 @@ function WorkspaceButton({
       type="button"
       aria-pressed={active}
       data-active={active}
-      className="min-w-[68px] rounded-[0.3rem] border border-transparent px-3 py-1 text-[10px] font-medium tracking-wide text-white/42 transition hover:text-white/75 data-[active=true]:border-white/[0.08] data-[active=true]:bg-white/[0.08] data-[active=true]:text-white/88 data-[active=true]:shadow-sm"
+      className="min-w-[48px] rounded-[0.22rem] border border-transparent px-2 py-0.5 text-[9px] font-medium tracking-wide text-white/40 transition hover:text-white/75 data-[active=true]:border-white/[0.07] data-[active=true]:bg-white/[0.08] data-[active=true]:text-white/85"
       onClick={onClick}
     >
       {label}

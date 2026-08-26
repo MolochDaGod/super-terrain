@@ -256,7 +256,10 @@ async function warmSceneObject(
   const previousMrt = renderer.getMRT()
   const renderables: Object3D[] = []
   object.updateMatrixWorld(true)
-  object.traverseVisible((candidate) => {
+  // Warm-up objects are intentionally hidden until compilation completes.
+  // `traverseVisible` therefore skipped the exact staged meshes this function
+  // exists to prepare and moved every pipeline stall into the reveal frame.
+  object.traverse((candidate) => {
     if ('material' in candidate && 'geometry' in candidate) renderables.push(candidate)
   })
   let compiling: Promise<unknown>

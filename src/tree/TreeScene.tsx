@@ -1,14 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { OrbitControls } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
-import {
-  Euler,
-  MathUtils,
-  MeshBasicNodeMaterial,
-  Vector3,
-} from 'three/webgpu'
-import type { Group, Object3D } from 'three/webgpu'
-import { float, smoothstep, uv } from 'three/tsl'
+import { Euler, MathUtils, Plane, Vector2, Vector3 } from 'three/webgpu'
+import type { Object3D } from 'three/webgpu'
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import type { WorldTerrain } from '../terrain/WorldTerrain'
 import type { EditorStore } from '../terrain/editor/EditorStore'
@@ -17,22 +11,29 @@ import { TerrainEnvironment } from '../terrain/react/TerrainEnvironment'
 import { TerrainRenderPipeline } from '../terrain/react/TerrainRenderPipeline'
 import { FoliageLayer } from '../foliage/react/FoliageLayer'
 import type { FoliageEditorStore } from '../foliage/FoliageEditorStore'
-import { TreeAssetView } from './TreeAssetView'
+import {
+  TreeAssetView,
+  TreeForestAssetView,
+  type ForestTreeInstance,
+} from './TreeAssetView'
+import type { ProceduralTreeAsset, TreeLodLevel } from './generator/types'
 import { preloadProceduralTreeTextures } from './materials/proceduralTreeTextureClient'
 import { TreeMaterialPrewarmer } from './materials/TreeMaterialPrewarmer'
-import type { TreeDebugMode, TreeEditorStore } from './TreeEditorStore'
-import {
-  DEFAULT_TREE_ENVIRONMENT,
-  type ProceduralTreeAsset,
-  type TreeLodLevel,
-} from './generator/types'
+import { DEFAULT_TREE_ENVIRONMENT } from './generator/types'
 import { generateTreeAsset } from './treeGeneratorClient'
+import {
+  selectedTreePlacement,
+  selectedTreePrototype,
+  type TreeEditorStore,
+  type TreePrototype,
+} from './TreeEditorStore'
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 
 const FLY_SPEED = 12
 const FLY_BOOST_SPEED = 80
+const MAX_CONCURRENT_TREE_COMPILERS = 1
 
-/** The renderer only consumes compiled assets; generation remains worker-owned. */
+/** Forest authoring scene: prototypes compile once and placements render in batches. */
 export function TreeScene({
   editor,
   store,
@@ -45,8 +46,7 @@ export function TreeScene({
   terrain: WorldTerrain
 }) {
   const snapshot = useTreeEditorSnapshot(store)
-  const [presented, setPresented] = useState<PreparedTree | null>(null)
-  const [prewarmObject, setPrewarmObject] = useState<Group | null>(null)
+  const raycaster = useThree((state) => state.raycaster)
   const [warmupObject, setWarmupObject] = useState<
     ((object: Object3D) => Promise<void>) | undefined
   >(undefined)
@@ -54,217 +54,374 @@ export function TreeScene({
     (warm: (object: Object3D) => Promise<void>) => setWarmupObject(() => warm),
     [],
   )
-  useEffect(() => {
-    const revision = snapshot.buildRevision
-    if (snapshot.compiledRevision === revision) return
-    const abort = new AbortController()
-    if (!store.beginBuild(revision)) return
-    // Material generation is independent of the semantic graph. Starting it
-    // beside the geometry worker makes a cold tree pay the slower of the two
-    // jobs instead of their sum; TreeAssetView later joins the same cache entry.
-    void preloadProceduralTreeTextures(
-      snapshot.parameters.species,
-      snapshot.parameters.seed,
-      { signal: abort.signal },
-    ).catch((error: unknown) => {
-      if (!(error instanceof DOMException && error.name === 'AbortError')) {
-        console.error('Tree material preload failed', error)
-      }
-    })
-    void generateTreeAsset(snapshot.parameters, DEFAULT_TREE_ENVIRONMENT, {
-      signal: abort.signal,
-      onProgress: (status, amount) => store.reportProgress(revision, status, amount),
-    }).then(
-      (asset) => store.finishBuild(revision, asset),
-      (error: unknown) => {
-        if (error instanceof DOMException && error.name === 'AbortError') return
-        store.failBuild(revision, error)
-      },
+  const prototypes = Object.values(snapshot.prototypes)
+  const activeCompilers = prototypes.filter((prototype) => prototype.building)
+  const queuedCompilers = prototypes
+    .filter((prototype) =>
+      !prototype.building && prototype.compiledRevision !== prototype.buildRevision,
     )
-    return () => abort.abort()
-  }, [snapshot.buildRevision, snapshot.compiledRevision, snapshot.parameters, store])
+    .slice(0, Math.max(0, MAX_CONCURRENT_TREE_COMPILERS - activeCompilers.length))
+  const compilingPrototypes = [...activeCompilers, ...queuedCompilers]
+  const selectedPlacement = selectedTreePlacement(snapshot)
+  const selectedPrototype = selectedTreePrototype(snapshot)
+  const targetY = selectedPrototype ? selectedPrototype.parameters.height * 0.3 : 8
 
-  // A generated asset is only a candidate until its actual material variants
-  // have been compiled against the post pipeline's multisampled scene target.
-  // Keep the previous asset mounted and visible while that asynchronous work
-  // proceeds; on the first build the stable fallback is simply sky + ground.
-  const candidateRevision =
-    snapshot.asset && snapshot.compiledRevision === snapshot.buildRevision &&
-      snapshot.compiledRevision !== presented?.revision
-      ? snapshot.compiledRevision
-      : undefined
-  const candidateAsset = candidateRevision === undefined ? undefined : snapshot.asset
-  const prewarmKey = candidateRevision === undefined
-    ? undefined
-    : [
-        candidateRevision,
-        snapshot.lod,
-        snapshot.debugMode,
-        snapshot.showFoliage ? 1 : 0,
-      ].join(':')
-  const finishPrewarm = useCallback((key: string) => {
-    if (
-      candidateRevision === undefined ||
-      !candidateAsset ||
-      key !== prewarmKey
-    ) {
-      return
-    }
-    const current = store.getSnapshot()
-    if (
-      current.buildRevision !== candidateRevision ||
-      current.compiledRevision !== candidateRevision ||
-      current.asset !== candidateAsset
-    ) {
-      return
-    }
-    setPresented({ revision: candidateRevision, asset: candidateAsset })
-    store.finishMaterialWarmup(candidateRevision)
-  }, [candidateAsset, candidateRevision, prewarmKey, store])
-  const failPrewarm = useCallback((key: string, error: unknown) => {
-    if (candidateRevision === undefined || key !== prewarmKey) return
-    store.failMaterialWarmup(candidateRevision, error)
-  }, [candidateRevision, prewarmKey, store])
-  const failRenderResources = useCallback((error: unknown) => {
-    if (prewarmKey !== undefined) failPrewarm(prewarmKey, error)
-  }, [failPrewarm, prewarmKey])
-
-  const preparedTrees: PreparedTree[] = []
-  if (presented) preparedTrees.push(presented)
-  if (candidateRevision !== undefined && candidateAsset) {
-    preparedTrees.push({ revision: candidateRevision, asset: candidateAsset })
-  }
+  useEffect(() => {
+    const previous = raycaster.firstHitOnly
+    raycaster.firstHitOnly = true
+    return () => { raycaster.firstHitOnly = previous }
+  }, [raycaster])
 
   return (
     <>
-      {/* Same physical daylight, sky dome and cascaded shadows the terrain
-          editor renders with. A tree judged under a different rig is judged
-          against a look the game will never show. */}
       <TerrainEnvironment mode="full" config={terrain.config} updatePriority={0} />
-      {/* The soil under the tree is the foliage layer's ground: it carries the
-          painted species mask and the far-field canopy, so there is only ever
-          one surface at y=0 and nothing to z-fight with. */}
       <FoliageLayer store={foliage} warmup={warmupObject} />
       <TreeMaterialPrewarmer warmup={warmupObject} />
-      {preparedTrees.map((entry) => (
-        <PreparedTreeView
-          key={entry.revision}
-          entry={entry}
-          active={entry.revision === presented?.revision}
-          lodLevel={snapshot.lod}
-          debugMode={snapshot.debugMode}
-          showFoliage={snapshot.showFoliage}
-          prewarmRef={entry.revision === candidateRevision ? setPrewarmObject : undefined}
-          onResourceError={
-            entry.revision === candidateRevision ? failRenderResources : undefined
-          }
-        />
+
+      {compilingPrototypes.map((prototype) => (
+        <PrototypeCompiler key={prototype.id} prototype={prototype} store={store} />
       ))}
-      <TreeCamera editor={editor} targetY={snapshot.parameters.height * 0.3} />
+
+      {prototypes.map((prototype) => {
+        if (!prototype.asset) return null
+        const placements = snapshot.placements.filter(
+          (placement) => placement.prototypeId === prototype.id,
+        )
+        if (placements.length === 0) return null
+        return (
+          <DistanceLodForest
+            key={`${prototype.id}:${prototype.compiledRevision ?? 0}`}
+            asset={prototype.asset}
+            instances={placements}
+            lodBias={snapshot.lod}
+            showFoliage={snapshot.showFoliage}
+            selectedId={snapshot.selectedPlacementId}
+            warmup={warmupObject}
+          />
+        )
+      })}
+
+      {snapshot.debugMode !== 'surface' && selectedPrototype?.asset && selectedPlacement && (
+        <group
+          position={selectedPlacement.position}
+          rotation={[0, selectedPlacement.rotation, 0]}
+          scale={selectedPlacement.scale}
+        >
+          <TreeAssetView
+            asset={selectedPrototype.asset}
+            lodLevel={snapshot.lod}
+            debugMode={snapshot.debugMode}
+            showFoliage={false}
+          />
+        </group>
+      )}
+
+      <ForestPointerController store={store} />
+      <TreeCamera editor={editor} targetY={targetY} />
       <TreeDevHandle store={store} />
       <TerrainRenderPipeline
         mode="full"
         look="tree"
-        prewarmObject={candidateRevision === undefined ? null : prewarmObject}
-        prewarmKey={prewarmKey}
-        onPrewarmComplete={finishPrewarm}
-        onPrewarmError={failPrewarm}
         onWarmupReady={publishWarmup}
       />
     </>
   )
 }
 
-interface PreparedTree {
-  revision: number
+type ForestLodGroups = readonly [
+  readonly ForestTreeInstance[],
+  readonly ForestTreeInstance[],
+  readonly ForestTreeInstance[],
+]
+
+/**
+ * Keeps instancing while assigning every placement its own distance LOD.
+ * Reclassification is throttled and only commits React state when a tree
+ * crosses a boundary, so orbiting does not rebuild foliage buffers per frame.
+ */
+function DistanceLodForest({
+  asset,
+  instances,
+  lodBias,
+  showFoliage,
+  selectedId,
+  warmup,
+}: {
   asset: ProceduralTreeAsset
+  instances: readonly ForestTreeInstance[]
+  lodBias: TreeLodLevel
+  showFoliage: boolean
+  selectedId?: string
+  warmup?: (object: Object3D) => Promise<void>
+}) {
+  const camera = useThree((state) => state.camera)
+  const lastCamera = useRef(new Vector3(Number.POSITIVE_INFINITY, 0, 0))
+  const observedCamera = useRef(camera.position.clone())
+  const stationaryTime = useRef(0)
+  const groupKey = useRef('')
+  const [groups, setGroups] = useState<ForestLodGroups>(() =>
+    classifyForestLods(asset, instances, camera.position, lodBias, selectedId),
+  )
+
+  const reclassify = useCallback(() => {
+    const next = classifyForestLods(asset, instances, camera.position, lodBias, selectedId)
+    const nextKey = forestLodGroupsKey(next)
+    if (nextKey !== groupKey.current) {
+      groupKey.current = nextKey
+      setGroups((current) => [
+        sameForestInstances(current[0], next[0]) ? current[0] : next[0],
+        sameForestInstances(current[1], next[1]) ? current[1] : next[1],
+        sameForestInstances(current[2], next[2]) ? current[2] : next[2],
+      ])
+    }
+    lastCamera.current.copy(camera.position)
+  }, [asset, camera, instances, lodBias, selectedId])
+
+  useEffect(() => {
+    groupKey.current = ''
+    reclassify()
+  }, [reclassify])
+
+  useFrame((_, delta) => {
+    if (observedCamera.current.distanceToSquared(camera.position) > 0.01) {
+      observedCamera.current.copy(camera.position)
+      stationaryTime.current = 0
+      return
+    }
+    stationaryTime.current += delta
+    if (stationaryTime.current < 0.16) return
+    stationaryTime.current = 0
+    if (lastCamera.current.distanceToSquared(camera.position) < 16) return
+    reclassify()
+  })
+
+  const selectionOwner = groups.findIndex((group) => group.length > 0)
+  return groups.map((group, level) => group.length > 0 ? (
+    <TreeForestAssetView
+      key={level}
+      asset={asset}
+      instances={group}
+      lodLevel={level as TreeLodLevel}
+      showFoliage={showFoliage}
+      selectedId={selectedId}
+      selectionProxyInstances={level === selectionOwner ? instances : null}
+      warmup={warmup}
+    />
+  ) : null)
 }
 
-function PreparedTreeView({
-  entry,
-  active,
-  lodLevel,
-  debugMode,
-  showFoliage,
-  prewarmRef,
-  onResourceError,
-}: {
-  entry: PreparedTree
-  active: boolean
-  lodLevel: TreeLodLevel
-  debugMode: TreeDebugMode
-  showFoliage: boolean
-  prewarmRef?: (object: Group | null) => void
-  onResourceError?: (error: unknown) => void
-}) {
-  const stagedObject = useRef<Group>(null)
-  const publishForWarmup = useCallback(() => {
-    if (stagedObject.current) prewarmRef?.(stagedObject.current)
-  }, [prewarmRef])
-  useEffect(() => () => prewarmRef?.(null), [prewarmRef])
+function sameForestInstances(
+  current: readonly ForestTreeInstance[],
+  next: readonly ForestTreeInstance[],
+): boolean {
+  if (current.length !== next.length) return false
+  return current.every((tree, index) => {
+    const candidate = next[index]
+    return candidate !== undefined &&
+      tree.id === candidate.id &&
+      tree.position[0] === candidate.position[0] &&
+      tree.position[1] === candidate.position[1] &&
+      tree.position[2] === candidate.position[2] &&
+      tree.rotation === candidate.rotation &&
+      tree.scale === candidate.scale
+  })
+}
 
-  return (
-    // The outer group keeps the staged asset out of normal scene traversal.
-    // compileAsync receives the visible inner group directly, so it still sees
-    // every relevant tree and contact-shadow material without ever presenting
-    // them to the user before the pipelines are ready.
-    <group visible={active}>
-      <group ref={stagedObject}>
-        <TreeGroundingShadow height={entry.asset.parameters.height} />
-        <TreeAssetView
-          asset={entry.asset}
-          lodLevel={lodLevel}
-          debugMode={debugMode}
-          showFoliage={showFoliage}
-          onRenderResourcesReady={prewarmRef ? publishForWarmup : undefined}
-          onRenderResourcesError={onResourceError}
-        />
-      </group>
-    </group>
-  )
+function forestLodGroupsKey(groups: ForestLodGroups): string {
+  return groups.map((group) => group.map((tree) => [
+    tree.id,
+    tree.position[0],
+    tree.position[1],
+    tree.position[2],
+    tree.rotation,
+    tree.scale,
+  ].join(':')).join(',')).join('|')
+}
+
+function classifyForestLods(
+  asset: ProceduralTreeAsset,
+  instances: readonly ForestTreeInstance[],
+  camera: Vector3,
+  lodBias: TreeLodLevel,
+  selectedId?: string,
+): ForestLodGroups {
+  const groups: [ForestTreeInstance[], ForestTreeInstance[], ForestTreeInstance[]] = [[], [], []]
+  const height = asset.parameters.height
+  const crown = asset.parameters.crownRadius
+  const nearDistance = MathUtils.clamp(height * 0.75 + crown * 2.5, 24, 55)
+  const farDistance = MathUtils.clamp(height * 2.4 + crown * 5, 75, 180)
+
+  for (const instance of instances) {
+    let level: TreeLodLevel
+    if (instance.id === selectedId) {
+      level = 0
+    } else {
+      const dx = camera.x - instance.position[0]
+      const dy = camera.y - (instance.position[1] + height * instance.scale * 0.45)
+      const dz = camera.z - instance.position[2]
+      const distanceSquared = dx * dx + dy * dy + dz * dz
+      const scaledNear = nearDistance * instance.scale
+      const scaledFar = farDistance * instance.scale
+      level = distanceSquared < scaledNear * scaledNear
+        ? 0
+        : distanceSquared < scaledFar * scaledFar ? 1 : 2
+      level = Math.max(level, lodBias) as TreeLodLevel
+    }
+    groups[level].push(instance)
+  }
+  return groups
+}
+
+function PrototypeCompiler({
+  prototype,
+  store,
+}: {
+  prototype: TreePrototype
+  store: TreeEditorStore
+}) {
+  const { id, buildRevision: revision, compiledRevision, parameters } = prototype
+  useEffect(() => {
+    if (compiledRevision === revision || !store.beginBuild(id, revision)) return
+    const abort = new AbortController()
+    const materialReady = preloadProceduralTreeTextures(
+      parameters.species,
+      parameters.seed,
+      { resolution: 'forest', signal: abort.signal },
+    ).catch((error: unknown) => {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        console.error('Tree material preload failed', error)
+      }
+    })
+    const geometryReady = generateTreeAsset(parameters, DEFAULT_TREE_ENVIRONMENT, {
+      signal: abort.signal,
+      onProgress: (status, amount) => store.reportProgress(id, revision, status, amount),
+    })
+    void Promise.all([geometryReady, materialReady]).then(
+      ([asset]) => store.finishBuild(id, revision, asset),
+      (error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return
+        store.failBuild(id, revision, error)
+      },
+    )
+    return () => abort.abort()
+  }, [compiledRevision, id, parameters, revision, store])
+  return null
 }
 
 /**
- * Tight, art-directed grounding under the root plate.
- *
- * The sun still supplies the real directional and canopy shadows. This single
- * translucent disc only restores the high-frequency contact term that a wide
- * cascaded shadow map tends to soften away. It is one tiny mesh and one cheap
- * unlit fragment expression, rather than a screen-space AO pass over the frame.
+ * Selection is deliberately outside R3F's event manager. Interactive meshes
+ * are otherwise raycast for every pointer move, including every orbit frame.
+ * A stationary gesture performs two explicit BVH queries at pointer-up and is
+ * accepted only when both endpoints hit the same tree.
  */
-function TreeGroundingShadow({ height }: { height: number }) {
-  const radius = Math.max(1.15, height * 0.058)
-  return (
-    <mesh
-      name="root-contact-shadow"
-      material={TREE_GROUNDING_SHADOW_MATERIAL}
-      position={[0, -0.012, 0]}
-      rotation={[-Math.PI / 2, 0, 0]}
-      scale={[radius * 1.45, radius, 1]}
-      renderOrder={1}
-    >
-      <circleGeometry args={[1, 48]} />
-    </mesh>
-  )
-}
+function ForestPointerController({ store }: { store: TreeEditorStore }) {
+  const canvas = useThree((state) => state.gl.domElement)
+  const camera = useThree((state) => state.camera)
+  const scene = useThree((state) => state.scene)
+  const raycaster = useThree((state) => state.raycaster)
+  const pointer = useRef(new Vector2())
+  const ground = useRef(new Plane(new Vector3(0, 1, 0), 0))
+  const groundHit = useRef(new Vector3())
 
-const TREE_GROUNDING_SHADOW_MATERIAL = createTreeGroundingShadowMaterial()
+  useEffect(() => {
+    let gesture: {
+      pointerId: number
+      x: number
+      y: number
+      camera: readonly number[]
+    } | undefined
 
-function createTreeGroundingShadowMaterial(): MeshBasicNodeMaterial {
-  const material = new MeshBasicNodeMaterial({
-    name: 'tree root contact shadow',
-    color: 0x020302,
-    transparent: true,
-    depthWrite: false,
-    depthTest: true,
-    toneMapped: false,
-  })
-  const local = uv().sub(0.5).mul(2)
-  const radiusSquared = local.x.mul(local.x).add(local.y.mul(local.y))
-  material.opacityNode = smoothstep(1, 0, radiusSquared)
-    .pow(1.65)
-    .mul(float(0.24))
-  return material
+    const setRay = (x: number, y: number) => {
+      const bounds = canvas.getBoundingClientRect()
+      pointer.current.set(
+        ((x - bounds.left) / bounds.width) * 2 - 1,
+        -((y - bounds.top) / bounds.height) * 2 + 1,
+      )
+      raycaster.setFromCamera(pointer.current, camera)
+    }
+
+    const treeAt = (x: number, y: number): string | undefined => {
+      setRay(x, y)
+      const targets: Object3D[] = []
+      scene.traverse((object) => {
+        if (object.name === 'forest-selection-volumes') targets.push(object)
+      })
+      const hit = raycaster.intersectObjects(targets, false)[0]
+      if (!hit || hit.instanceId === undefined) return undefined
+      const ids = hit.object.userData.treeInstanceIds as string[] | undefined
+      return ids?.[hit.instanceId]
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0) return
+      gesture = {
+        pointerId: event.pointerId,
+        x: event.clientX,
+        y: event.clientY,
+        camera: [
+          camera.position.x,
+          camera.position.y,
+          camera.position.z,
+          camera.quaternion.x,
+          camera.quaternion.y,
+          camera.quaternion.z,
+          camera.quaternion.w,
+        ],
+      }
+    }
+    const onPointerUp = (event: PointerEvent) => {
+      const start = gesture
+      gesture = undefined
+      if (!start || event.pointerId !== start.pointerId || event.button !== 0) return
+      const dx = event.clientX - start.x
+      const dy = event.clientY - start.y
+      const currentCamera = [
+        camera.position.x,
+        camera.position.y,
+        camera.position.z,
+        camera.quaternion.x,
+        camera.quaternion.y,
+        camera.quaternion.z,
+        camera.quaternion.w,
+      ]
+      const cameraMoved = currentCamera.some(
+        (value, index) => Math.abs(value - start.camera[index]!) > 1e-7,
+      )
+      // Even a sub-pixel camera drag is navigation, not a click.
+      if (cameraMoved || dx * dx + dy * dy > 4) return
+
+      const downTree = treeAt(start.x, start.y)
+      const upTree = treeAt(event.clientX, event.clientY)
+      if (downTree && downTree === upTree) {
+        store.selectPlacement(downTree)
+        return
+      }
+      // Crossing a tree boundary is never a click on either side.
+      if (downTree || upTree) return
+
+      const snapshot = store.getSnapshot()
+      if (snapshot.armedPrototypeId) {
+        setRay(event.clientX, event.clientY)
+        const point = raycaster.ray.intersectPlane(ground.current, groundHit.current)
+        if (point) store.placeArmed([point.x, 0, point.z])
+      } else if (snapshot.selectedPlacementId) {
+        store.selectPlacement(undefined)
+      }
+    }
+    const cancelGesture = () => { gesture = undefined }
+
+    canvas.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', cancelGesture)
+    window.addEventListener('blur', cancelGesture)
+    return () => {
+      canvas.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', cancelGesture)
+      window.removeEventListener('blur', cancelGesture)
+    }
+  }, [camera, canvas, raycaster, scene, store])
+  return null
 }
 
 function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number }) {
@@ -281,10 +438,6 @@ function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number 
   const right = useRef(new Vector3())
   const movement = useRef(new Vector3())
 
-  // The review harness moves the camera directly, but orbit controls re-aim it
-  // at their own target on the very next frame — so every close-up came back
-  // pointing at the middle of the crown. Publishing the controller lets a
-  // capture move the target with the camera.
   useEffect(() => {
     if (!import.meta.env.DEV) return
     const globals = globalThis as Record<string, unknown>
@@ -293,10 +446,6 @@ function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number 
   })
 
   useLayoutEffect(() => {
-    // The WebGPU canvas resolves asynchronously. On a cold load the controls
-    // ref can still be empty during this layout effect, but the camera itself
-    // already exists. Aim it explicitly so the first submitted frame cannot
-    // inherit Three's default straight-ahead quaternion and miss the asset.
     camera.lookAt(0, targetY, 0)
     camera.updateMatrixWorld()
     const controller = controls.current
@@ -351,9 +500,7 @@ function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number 
     if (document.pointerLockElement === canvas) document.exitPointerLock()
     if (hasFlown.current) {
       camera.getWorldDirection(forward.current)
-      controller.target
-        .copy(camera.position)
-        .addScaledVector(forward.current, orbitDistance.current)
+      controller.target.copy(camera.position).addScaledVector(forward.current, orbitDistance.current)
     }
     controller.enabled = true
     controller.update()
@@ -365,9 +512,7 @@ function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number 
         event.button !== 0 ||
         editor.getSnapshot().cameraMode !== 'fly' ||
         document.pointerLockElement === canvas
-      ) {
-        return
-      }
+      ) return
       event.preventDefault()
       void canvas.requestPointerLock().catch(() => {
         editor.patch({ status: 'Mouse capture was blocked · click the viewport again' })
@@ -381,11 +526,7 @@ function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number 
       if (!pointerLocked.current || editor.getSnapshot().cameraMode !== 'fly') return
       const next = rotation.current
       next.y -= event.movementX * 0.0018
-      next.x = MathUtils.clamp(
-        next.x - event.movementY * 0.0018,
-        -Math.PI * 0.495,
-        Math.PI * 0.495,
-      )
+      next.x = MathUtils.clamp(next.x - event.movementY * 0.0018, -Math.PI * 0.495, Math.PI * 0.495)
       camera.quaternion.setFromEuler(next)
     }
     canvas.addEventListener('pointerdown', onPointerDown)
@@ -414,18 +555,14 @@ function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number 
     if (keys.current.has('KeyD')) movement.current.add(right.current)
     if (keys.current.has('KeyA')) movement.current.sub(right.current)
     if (keys.current.has('KeyE') || keys.current.has('Space')) movement.current.y += 1
-    if (
-      keys.current.has('KeyQ') ||
-      keys.current.has('ControlLeft') ||
-      keys.current.has('ControlRight')
-    ) {
+    if (keys.current.has('KeyQ') || keys.current.has('ControlLeft') || keys.current.has('ControlRight')) {
       movement.current.y -= 1
     }
     if (movement.current.lengthSq() === 0) return
     const boosted = keys.current.has('ShiftLeft') || keys.current.has('ShiftRight')
-    movement.current
-      .normalize()
-      .multiplyScalar((boosted ? FLY_BOOST_SPEED : FLY_SPEED) * Math.min(delta, 0.1))
+    movement.current.normalize().multiplyScalar(
+      (boosted ? FLY_BOOST_SPEED : FLY_SPEED) * Math.min(delta, 0.1),
+    )
     camera.position.add(movement.current)
   })
 
@@ -450,24 +587,10 @@ function TreeCamera({ editor, targetY }: { editor: EditorStore; targetY: number 
 }
 
 const FLY_KEYS = new Set([
-  'KeyW',
-  'KeyA',
-  'KeyS',
-  'KeyD',
-  'KeyQ',
-  'KeyE',
-  'Space',
-  'ControlLeft',
-  'ControlRight',
-  'ShiftLeft',
-  'ShiftRight',
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'Space',
+  'ControlLeft', 'ControlRight', 'ShiftLeft', 'ShiftRight',
 ])
 
-/**
- * Publishes the tree workspace on `window.__meshtree` in development. The
- * review harness drives parameters through the store and reads `ready` to know
- * a frame shows the compiled asset rather than the previous build.
- */
 function TreeDevHandle({ store }: { store: TreeEditorStore }) {
   const gl = useThree((state) => state.gl)
   const scene = useThree((state) => state.scene)
@@ -476,9 +599,7 @@ function TreeDevHandle({ store }: { store: TreeEditorStore }) {
     if (!import.meta.env.DEV) return
     const globals = globalThis as Record<string, unknown>
     globals.__meshtree = { store, gl, scene, camera }
-    return () => {
-      delete globals.__meshtree
-    }
+    return () => { delete globals.__meshtree }
   }, [camera, gl, scene, store])
   return null
 }

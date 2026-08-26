@@ -58,6 +58,7 @@ import {
   paintChannelIndex,
   type TerrainMaterialSettings,
 } from './materialSettings'
+import { retireGpuResource } from './gpuResourceRetirement'
 
 interface RuntimeBrick extends TerrainBrickGeometry {
   id: string
@@ -319,7 +320,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
       this.applyMaterial(runtime)
     }
     this.refreshBatchMaterials()
-    previous.dispose()
+    retireGpuResource(() => previous.dispose())
     invalidateTerrainShadows()
     return this.materialReadiness()
   }
@@ -341,7 +342,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     )
     for (const runtime of this.runtime.values()) this.applyMaterial(runtime)
     this.refreshBatchMaterials()
-    previous.dispose()
+    retireGpuResource(() => previous.dispose())
     invalidateTerrainShadows()
   }
 
@@ -556,7 +557,7 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const pending of this.deferredDisposals) {
       pending.framesRemaining -= 1
       if (pending.framesRemaining <= 0 && disposed < maxCount) {
-        pending.geometry.dispose()
+        retireGpuResource(() => pending.geometry.dispose())
         disposed += 1
       } else {
         retained.push(pending)
@@ -622,12 +623,15 @@ export class ThreeTerrainRenderBackend implements TerrainRenderBackend {
     for (const batch of this.batches.values()) {
       if (batch.mesh) {
         this.surfaceRoot.remove(batch.mesh)
-        batch.mesh.geometry.dispose()
+        const geometry = batch.mesh.geometry
+        retireGpuResource(() => geometry.dispose())
       }
     }
     this.batches.clear()
     this.batchOfSection.clear()
-    for (const pending of this.deferredDisposals) pending.geometry.dispose()
+    for (const pending of this.deferredDisposals) {
+      retireGpuResource(() => pending.geometry.dispose())
+    }
     this.deferredDisposals.length = 0
     this.root.remove(this.surfaceRoot)
     this.terrainMaterial.dispose()

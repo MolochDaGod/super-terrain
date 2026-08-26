@@ -57,7 +57,10 @@ export interface LeafSprayTextureData extends LeafSprayMaps {
   }
 }
 
-const LEAF_CARD_SIZE = 512
+export type TreeTextureResolution = 'hero' | 'forest'
+
+const HERO_LEAF_CARD_SIZE = 512
+const FOREST_LEAF_CARD_SIZE = 256
 
 /**
  * Alpha-test threshold the foliage material uses. The mip builder needs it to
@@ -74,7 +77,7 @@ export function bakeProceduralTreeTextures(
   _seed: number,
 ): ProceduralTreeTextures {
   return createProceduralTreeTextures(
-    bakeProceduralTreeTextureData(species, treeMaterialSeed(species)),
+    bakeProceduralTreeTextureData(species, treeMaterialSeed(species), 'hero'),
   )
 }
 
@@ -103,12 +106,20 @@ export function treeMaterialSeed(species: TreeSpecies): number {
 export function bakeProceduralTreeTextureData(
   species: TreeSpecies,
   seed: number,
+  resolution: TreeTextureResolution = 'hero',
 ): ProceduralTreeTextureData {
-  const bark = bakeBarkMaps(seed, species)
+  const forest = resolution === 'forest'
+  const bark = bakeBarkMaps(
+    seed,
+    species,
+    forest ? 1024 : 2048,
+    forest ? 2048 : 4096,
+  )
+  const leafCardSize = forest ? FOREST_LEAF_CARD_SIZE : HERO_LEAF_CARD_SIZE
   const leafCards: LeafSprayTextureData[] = []
   for (let variant = 0; variant < LEAF_CARD_VARIANTS; variant += 1) {
     const spray = bakeLeafSpray(
-      seed ^ 0x5f3759df, species, variant, LEAF_CARD_SIZE,
+      seed ^ 0x5f3759df, species, variant, leafCardSize,
     )
     leafCards.push({
       ...spray,

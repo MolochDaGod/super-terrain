@@ -1,6 +1,7 @@
 import { ExternalStore } from '../terrain/core/ExternalStore'
 import {
   DEFAULT_TREE_PARAMETERS,
+  MAX_FOLIAGE_DENSITY,
   TREE_SPECIES_PRESETS,
   normalizeTreeParameters,
   type ProceduralTreeAsset,
@@ -8,7 +9,10 @@ import {
   type TreeParameters,
   type TreeSpecies,
 } from './generator/types'
-import { loadTreeDraft, saveTreeDraft } from './treePersistence'
+import {
+  generateForestLayout,
+  type ForestPresetId,
+} from './forestPresets'
 
 export type TreeDebugMode =
   | 'surface'
@@ -20,34 +24,175 @@ export type TreeDebugMode =
   | 'burial'
   | 'topology'
 
-export interface TreeEditorSnapshot {
+export type ForestPosition = readonly [number, number, number]
+
+export interface TreePrototype {
+  id: string
+  species: TreeSpecies
+  variation: number
+  variationName: string
   parameters: TreeParameters
   asset?: ProceduralTreeAsset
-  lod: TreeLodLevel
-  debugMode: TreeDebugMode
-  showFoliage: boolean
+  dirty: boolean
   building: boolean
   warmingMaterials: boolean
-  dirty: boolean
   buildRevision: number
   compiledRevision?: number
   buildProgress: number
   status: string
 }
 
+export interface TreePlacement {
+  id: string
+  prototypeId: string
+  position: ForestPosition
+  rotation: number
+  scale: number
+}
+
+export interface TreeEditorSnapshot {
+  prototypes: Readonly<Record<string, TreePrototype>>
+  placements: readonly TreePlacement[]
+  selectedPlacementId?: string
+  armedPrototypeId?: string
+  lod: TreeLodLevel
+  debugMode: TreeDebugMode
+  showFoliage: boolean
+  showHud: boolean
+  forestPreset: ForestPresetId
+  forestSeed: number
+  forestDensity: number
+  forestRadius: number
+  status: string
+}
+
+export const TREE_VARIATION_NAMES = [
+  'Signature',
+  'High canopy',
+  'Open grown',
+  'Wind shaped',
+  'Veteran',
+  'Young stand',
+  'Multi stem',
+  'Storm relic',
+] as const
+
+export function treePrototypeId(species: TreeSpecies, variation: number): string {
+  return `${species}:${variation}`
+}
+
+/** Eight deterministic topology recipes per species, not cosmetic presets. */
+export function parametersForTreeVariation(
+  species: TreeSpecies,
+  variation: number,
+): TreeParameters {
+  const base = TREE_SPECIES_PRESETS[species]
+  const seed = variationSeed(base.seed, species, variation)
+  const common = { ...base, seed }
+  switch (variation) {
+    case 1:
+      return normalizeTreeParameters({
+        ...common,
+        height: base.height * 1.14,
+        crownRadius: base.crownRadius * 0.78,
+        axisForm: 'straight',
+        crownForm: 'full',
+        branchCount: base.branchCount + 2,
+        age: Math.max(0.52, base.age * 0.88),
+      })
+    case 2:
+      return normalizeTreeParameters({
+        ...common,
+        height: base.height * 0.82,
+        crownRadius: base.crownRadius * 1.28,
+        bolePlan: 'codominant',
+        crownForm: 'reiterated',
+        branchCount: base.branchCount + 1,
+        rootSpread: base.rootSpread * 1.18,
+      })
+    case 3:
+      return normalizeTreeParameters({
+        ...common,
+        axisForm: 'leaning',
+        crownForm: 'lopsided',
+        lean: Math.max(12, base.lean * 1.8),
+        sinuosity: Math.max(0.65, base.sinuosity * 1.45),
+        crownRadius: base.crownRadius * 1.08,
+        lostLimbs: Math.max(1, base.lostLimbs),
+      })
+    case 4:
+      return normalizeTreeParameters({
+        ...common,
+        age: Math.max(0.92, base.age),
+        gnarl: Math.max(0.72, base.gnarl),
+        crownForm: 'stagheaded',
+        bolePlan: base.bolePlan === 'single' ? 'fused' : base.bolePlan,
+        lostLimbs: Math.max(4, base.lostLimbs),
+        twist: base.twist + 0.7,
+        rootExposure: Math.max(0.55, base.rootExposure),
+      })
+    case 5:
+      return normalizeTreeParameters({
+        ...common,
+        age: Math.min(0.48, base.age),
+        height: base.height * 0.68,
+        crownRadius: base.crownRadius * 0.72,
+        trunkRadius: base.trunkRadius * 0.62,
+        branchCount: Math.max(5, base.branchCount - 1),
+        foliageDensity: Math.min(MAX_FOLIAGE_DENSITY, base.foliageDensity * 1.2),
+        lostLimbs: 0,
+      })
+    case 6:
+      return normalizeTreeParameters({
+        ...common,
+        bolePlan: 'multistem',
+        axisForm: 'sinuous',
+        crownForm: 'reiterated',
+        rootForm: 'braided',
+        sinuosity: Math.max(0.5, base.sinuosity),
+        twist: base.twist + 0.45,
+        crownRadius: base.crownRadius * 1.16,
+      })
+    case 7:
+      return normalizeTreeParameters({
+        ...common,
+        trunkDamage: 'snapped',
+        crownForm: 'lopsided',
+        axisForm: 'sinuous',
+        lostLimbs: Math.max(5, base.lostLimbs),
+        gnarl: Math.max(0.82, base.gnarl),
+        sinuosity: Math.max(0.9, base.sinuosity),
+        foliageDensity: base.foliageDensity * 0.58,
+      })
+    default:
+      return normalizeTreeParameters(common)
+  }
+}
+
 export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
+  private nextPlacement = 2
+
   constructor() {
+    const initial = createPrototype(DEFAULT_TREE_PARAMETERS.species, 0)
     super({
-      parameters: loadTreeDraft() ?? DEFAULT_TREE_PARAMETERS,
+      prototypes: { [initial.id]: initial },
+      placements: [{
+        id: 'tree-1',
+        prototypeId: initial.id,
+        position: [0, 0, 0],
+        rotation: 0,
+        scale: 1,
+      }],
+      selectedPlacementId: 'tree-1',
       lod: 0,
       debugMode: 'surface',
       showFoliage: true,
-      building: false,
-      warmingMaterials: false,
-      dirty: false,
-      buildRevision: 1,
-      buildProgress: 0,
-      status: 'Tree workspace ready',
+      showHud: false,
+      forestPreset: 'temperate-mixed',
+      forestSeed: 42017,
+      forestDensity: 1,
+      forestRadius: 70,
+      status: 'Forest workspace ready',
     })
   }
 
@@ -55,60 +200,181 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
     this.update((current) => ({ ...current, ...values }))
   }
 
-  patchParameters(values: Partial<TreeParameters>): void {
+  armPlacement(species: TreeSpecies, variation: number): void {
+    const id = treePrototypeId(species, variation)
     this.update((current) => ({
       ...current,
-      parameters: normalizeTreeParameters({ ...current.parameters, ...values }),
-      dirty: true,
-      status: 'Recipe changed · regenerate to compile geometry',
+      prototypes: current.prototypes[id]
+        ? current.prototypes
+        : { ...current.prototypes, [id]: createPrototype(species, variation) },
+      armedPrototypeId: id,
+      status: `${TREE_VARIATION_NAMES[variation] ?? 'Variation'} ${species.replaceAll('-', ' ')} armed · click the ground to place`,
     }))
   }
 
-  applySpecies(species: TreeSpecies): void {
-    const parameters = { ...TREE_SPECIES_PRESETS[species] }
-    saveTreeDraft(parameters)
-    this.update((current) => ({
-      ...current,
-      parameters,
-      dirty: false,
-      buildRevision: current.buildRevision + 1,
-      warmingMaterials: false,
-      status: `Generating ${species.replaceAll('-', ' ')}…`,
-    }))
+  cancelPlacement(): void {
+    this.patch({ armedPrototypeId: undefined, status: 'Placement cancelled' })
   }
 
-  regenerate(): void {
-    const parameters = this.getSnapshot().parameters
-    saveTreeDraft(parameters)
-    this.update((current) => ({
-      ...current,
-      dirty: false,
-      buildRevision: current.buildRevision + 1,
-      warmingMaterials: false,
-      status: 'Regenerating tree…',
-    }))
-  }
-
-  randomize(): void {
-    const seed = 1 + Math.floor(Math.random() * 0x7ffffffe)
-    const parameters = normalizeTreeParameters({
-      ...this.getSnapshot().parameters,
-      seed,
-    })
-    saveTreeDraft(parameters)
-    this.update((current) => ({
-      ...current,
-      parameters,
-      dirty: false,
-      buildRevision: current.buildRevision + 1,
-      warmingMaterials: false,
-      status: `Generating seed ${seed}…`,
-    }))
-  }
-
-  beginBuild(revision: number): boolean {
-    if (revision !== this.getSnapshot().buildRevision) return false
+  placeArmed(position: ForestPosition): void {
+    const current = this.getSnapshot()
+    if (!current.armedPrototypeId) return
+    const id = `tree-${this.nextPlacement++}`
+    const placement: TreePlacement = {
+      id,
+      prototypeId: current.armedPrototypeId,
+      position,
+      rotation: deterministicRotation(id, position),
+      scale: 1,
+    }
     this.patch({
+      placements: [...current.placements, placement],
+      selectedPlacementId: id,
+      armedPrototypeId: undefined,
+      status: 'Tree placed · edit it in the inspector to update every match',
+    })
+  }
+
+  selectPlacement(id?: string): void {
+    this.patch({
+      selectedPlacementId: id,
+      armedPrototypeId: undefined,
+      status: id ? 'Tree selected' : 'Selection cleared',
+    })
+  }
+
+  patchSelectedParameters(values: Partial<TreeParameters>): void {
+    const snapshot = this.getSnapshot()
+    const placement = selectedTreePlacement(snapshot)
+    if (!placement) return
+    const prototype = snapshot.prototypes[placement.prototypeId]
+    if (!prototype) return
+    const parameters = normalizeTreeParameters({ ...prototype.parameters, ...values })
+    this.replacePrototype(prototype.id, {
+      ...prototype,
+      parameters,
+      dirty: true,
+      status: 'Appearance changed · recompile to update every matching tree',
+    }, 'Appearance changed · recompile when ready')
+  }
+
+  recompileSelected(): void {
+    const snapshot = this.getSnapshot()
+    const prototype = selectedTreePrototype(snapshot)
+    if (!prototype) return
+    this.replacePrototype(prototype.id, {
+      ...prototype,
+      dirty: false,
+      buildRevision: prototype.buildRevision + 1,
+      warmingMaterials: false,
+      status: 'Queued for compilation',
+    }, `Recompiling ${matchingCount(snapshot, prototype.id)} matching trees…`)
+  }
+
+  randomizeSelected(): void {
+    const prototype = selectedTreePrototype(this.getSnapshot())
+    if (!prototype) return
+    const parameters = normalizeTreeParameters({
+      ...prototype.parameters,
+      seed: 1 + Math.floor(Math.random() * 0x7ffffffe),
+    })
+    this.replacePrototype(prototype.id, {
+      ...prototype,
+      parameters,
+      dirty: false,
+      buildRevision: prototype.buildRevision + 1,
+      warmingMaterials: false,
+      status: 'Random topology queued',
+    }, 'Generating a new shared topology…')
+  }
+
+  duplicateSelected(): void {
+    const snapshot = this.getSnapshot()
+    const source = selectedTreePlacement(snapshot)
+    if (!source) return
+    const id = `tree-${this.nextPlacement++}`
+    const placement: TreePlacement = {
+      ...source,
+      id,
+      position: [source.position[0] + 2.5, source.position[1], source.position[2] + 2.5],
+      rotation: source.rotation + 0.38,
+    }
+    this.patch({
+      placements: [...snapshot.placements, placement],
+      selectedPlacementId: id,
+      status: 'Tree instance duplicated',
+    })
+  }
+
+  deleteSelected(): void {
+    const snapshot = this.getSnapshot()
+    if (!snapshot.selectedPlacementId) return
+    this.patch({
+      placements: snapshot.placements.filter(
+        (placement) => placement.id !== snapshot.selectedPlacementId,
+      ),
+      selectedPlacementId: undefined,
+      status: 'Tree instance removed',
+    })
+  }
+
+  clearForest(): void {
+    this.patch({ placements: [], selectedPlacementId: undefined, status: 'Forest cleared' })
+  }
+
+  generateForest(options: Partial<Pick<
+    TreeEditorSnapshot,
+    'forestPreset' | 'forestSeed' | 'forestDensity' | 'forestRadius'
+  >> = {}): void {
+    const current = this.getSnapshot()
+    const forestPreset = options.forestPreset ?? current.forestPreset
+    const forestSeed = options.forestSeed ?? current.forestSeed
+    const forestDensity = options.forestDensity ?? current.forestDensity
+    const forestRadius = options.forestRadius ?? current.forestRadius
+    const layout = generateForestLayout(
+      forestPreset,
+      forestSeed,
+      forestRadius,
+      forestDensity,
+    )
+    const prototypes: Record<string, TreePrototype> = {}
+    const placements = layout.map((tree) => {
+      const prototypeId = treePrototypeId(tree.species, tree.variation)
+      prototypes[prototypeId] = current.prototypes[prototypeId]
+        ?? createPrototype(tree.species, tree.variation)
+      return {
+        id: `tree-${this.nextPlacement++}`,
+        prototypeId,
+        position: tree.position,
+        rotation: tree.rotation,
+        scale: tree.scale,
+      } satisfies TreePlacement
+    })
+    this.patch({
+      prototypes,
+      placements,
+      selectedPlacementId: undefined,
+      armedPrototypeId: undefined,
+      forestPreset,
+      forestSeed,
+      forestDensity,
+      forestRadius,
+      lod: 0,
+      status: `Generated ${placements.length} trees across ${Object.keys(prototypes).length} instanced prototypes`,
+    })
+  }
+
+  randomizeForest(): void {
+    this.generateForest({
+      forestSeed: 1 + Math.floor(Math.random() * 0x7ffffffe),
+    })
+  }
+
+  beginBuild(id: string, revision: number): boolean {
+    const prototype = this.getSnapshot().prototypes[id]
+    if (!prototype || revision !== prototype.buildRevision || prototype.building) return false
+    this.replacePrototype(id, {
+      ...prototype,
       building: true,
       warmingMaterials: false,
       buildProgress: 0,
@@ -117,50 +383,106 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
     return true
   }
 
-  reportProgress(revision: number, status: string, buildProgress: number): void {
-    if (revision !== this.getSnapshot().buildRevision) return
-    this.patch({ status, buildProgress })
+  reportProgress(id: string, revision: number, status: string, buildProgress: number): void {
+    const prototype = this.getSnapshot().prototypes[id]
+    if (!prototype || revision !== prototype.buildRevision) return
+    this.replacePrototype(id, { ...prototype, status, buildProgress })
   }
 
-  finishBuild(revision: number, asset: ProceduralTreeAsset): void {
-    if (revision !== this.getSnapshot().buildRevision) return
-    this.patch({
+  finishBuild(id: string, revision: number, asset: ProceduralTreeAsset): void {
+    const prototype = this.getSnapshot().prototypes[id]
+    if (!prototype || revision !== prototype.buildRevision) return
+    this.replacePrototype(id, {
+      ...prototype,
       asset,
       compiledRevision: revision,
       building: false,
-      warmingMaterials: true,
-      buildProgress: 0.96,
-      status: 'Geometry ready · preparing WebGPU materials…',
-    })
-  }
-
-  finishMaterialWarmup(revision: number): void {
-    const snapshot = this.getSnapshot()
-    if (revision !== snapshot.buildRevision || revision !== snapshot.compiledRevision) return
-    this.patch({
       warmingMaterials: false,
       buildProgress: 1,
-      status: `Tree ready · ${((snapshot.asset?.stats.generationMs ?? 0) / 1000).toFixed(1)} s`,
-    })
+      status: 'Ready',
+    }, `${prototype.variationName} ${prototype.species.replaceAll('-', ' ')} ready`)
   }
 
-  failMaterialWarmup(revision: number, error: unknown): void {
-    const snapshot = this.getSnapshot()
-    if (revision !== snapshot.buildRevision || revision !== snapshot.compiledRevision) return
-    this.patch({
-      warmingMaterials: false,
-      status: `WebGPU material preparation failed · ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    })
-  }
-
-  failBuild(revision: number, error: unknown): void {
-    if (revision !== this.getSnapshot().buildRevision) return
-    this.patch({
+  failBuild(id: string, revision: number, error: unknown): void {
+    const prototype = this.getSnapshot().prototypes[id]
+    if (!prototype || revision !== prototype.buildRevision) return
+    const message = error instanceof Error ? error.message : String(error)
+    this.replacePrototype(id, {
+      ...prototype,
       building: false,
       warmingMaterials: false,
-      status: `Tree generation failed · ${error instanceof Error ? error.message : String(error)}`,
-    })
+      status: `Compilation failed · ${message}`,
+    }, `Tree compilation failed · ${message}`)
   }
+
+  /** Compatibility helpers retained for the development handle. */
+  applySpecies(species: TreeSpecies): void { this.armPlacement(species, 0) }
+  regenerate(): void { this.recompileSelected() }
+  randomize(): void { this.randomizeSelected() }
+  finishMaterialWarmup(): void {}
+  failMaterialWarmup(): void {}
+
+  private replacePrototype(id: string, prototype: TreePrototype, status?: string): void {
+    this.update((current) => ({
+      ...current,
+      prototypes: { ...current.prototypes, [id]: prototype },
+      status: status ?? current.status,
+    }))
+  }
+}
+
+export function selectedTreePlacement(
+  snapshot: TreeEditorSnapshot,
+): TreePlacement | undefined {
+  return snapshot.placements.find(
+    (placement) => placement.id === snapshot.selectedPlacementId,
+  )
+}
+
+export function selectedTreePrototype(
+  snapshot: TreeEditorSnapshot,
+): TreePrototype | undefined {
+  const placement = selectedTreePlacement(snapshot)
+  return placement ? snapshot.prototypes[placement.prototypeId] : undefined
+}
+
+function createPrototype(species: TreeSpecies, variation: number): TreePrototype {
+  return {
+    id: treePrototypeId(species, variation),
+    species,
+    variation,
+    variationName: TREE_VARIATION_NAMES[variation] ?? `Variation ${variation + 1}`,
+    parameters: parametersForTreeVariation(species, variation),
+    dirty: false,
+    building: false,
+    warmingMaterials: false,
+    buildRevision: 1,
+    buildProgress: 0,
+    status: 'Queued',
+  }
+}
+
+function variationSeed(base: number, species: string, variation: number): number {
+  let hash = (base ^ Math.imul(variation + 1, 0x45d9f3b)) >>> 0
+  for (let index = 0; index < species.length; index += 1) {
+    hash = Math.imul(hash ^ species.charCodeAt(index), 0x01000193) >>> 0
+  }
+  return (hash & 0x7fffffff) || variation + 1
+}
+
+function deterministicRotation(id: string, position: ForestPosition): number {
+  let hash = Math.imul(
+    Math.round(position[0] * 31) ^ Math.round(position[2] * 47),
+    2654435761,
+  )
+  for (let index = 0; index < id.length; index += 1) {
+    hash = Math.imul(hash ^ id.charCodeAt(index), 16777619)
+  }
+  return ((hash >>> 0) / 0xffffffff) * Math.PI * 2
+}
+
+function matchingCount(snapshot: TreeEditorSnapshot, prototypeId: string): number {
+  return snapshot.placements.filter(
+    (placement) => placement.prototypeId === prototypeId,
+  ).length
 }

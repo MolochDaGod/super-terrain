@@ -6,6 +6,7 @@ import {
   treeMaterialSeed,
   type ProceduralTreeTextureData,
   type ProceduralTreeTextures,
+  type TreeTextureResolution,
 } from './proceduralTreeTextures'
 import type {
   ProceduralTreeTextureBakeReply,
@@ -14,6 +15,7 @@ import type {
 
 export interface ProceduralTreeTextureBakeOptions {
   signal?: AbortSignal
+  resolution?: TreeTextureResolution
 }
 
 interface CacheEntry {
@@ -49,7 +51,12 @@ export async function bakeProceduralTreeTexturesAsync(
   seed: number,
   options: ProceduralTreeTextureBakeOptions = {},
 ): Promise<ProceduralTreeTextures> {
-  const textures = await acquireTextures(species, seed, options.signal)
+  const textures = await acquireTextures(
+    species,
+    seed,
+    options.signal,
+    options.resolution,
+  )
   if (options.signal?.aborted) {
     textures.dispose()
     throw abortError()
@@ -80,13 +87,14 @@ function acquireTextures(
   species: TreeSpecies,
   _seed: number,
   signal?: AbortSignal,
+  resolution: TreeTextureResolution = 'hero',
 ): Promise<ProceduralTreeTextures> {
   if (signal?.aborted) return Promise.reject(abortError())
-  const key = treeMaterialKey(species)
+  const key = `${treeMaterialKey(species)}:${resolution}`
   const seed = treeMaterialSeed(species)
   let entry = textureCache.get(key)
   if (!entry) {
-    entry = createEntry(key, species, seed)
+    entry = createEntry(key, species, seed, resolution)
     textureCache.set(key, entry)
   }
   entry.consumers += 1
@@ -121,8 +129,9 @@ function createEntry(
   key: string,
   species: TreeSpecies,
   seed: number,
+  resolution: TreeTextureResolution,
 ): CacheEntry {
-  const job = startBake(species, seed)
+  const job = startBake(species, seed, resolution)
   const entry: CacheEntry = {
     key,
     promise: undefined!,
@@ -152,8 +161,9 @@ function createEntry(
 function startBake(
   species: TreeSpecies,
   seed: number,
+  resolution: TreeTextureResolution,
 ): { promise: Promise<ProceduralTreeTextureData>; cancel(): void } {
-  if (typeof Worker === 'undefined') return bakeWithoutWorker(species, seed)
+  if (typeof Worker === 'undefined') return bakeWithoutWorker(species, seed, resolution)
 
   const worker = new Worker(
     new URL('./proceduralTreeTexture.worker.ts', import.meta.url),
@@ -183,7 +193,7 @@ function startBake(
     worker.onmessageerror = () => {
       finish(() => reject(new Error('Tree texture bake worker returned unreadable data')))
     }
-    const request: ProceduralTreeTextureBakeRequest = { species, seed }
+    const request: ProceduralTreeTextureBakeRequest = { species, seed, resolution }
     worker.postMessage(request)
   })
   return {
@@ -195,6 +205,7 @@ function startBake(
 function bakeWithoutWorker(
   species: TreeSpecies,
   seed: number,
+  resolution: TreeTextureResolution,
 ): { promise: Promise<ProceduralTreeTextureData>; cancel(): void } {
   let timer = 0
   let rejectJob: (reason: unknown) => void = () => undefined
@@ -203,7 +214,7 @@ function bakeWithoutWorker(
     // Yield once for SSR/tests and old browsers. The production viewport has
     // Worker support; this fallback preserves correctness, not responsiveness.
     timer = globalThis.setTimeout(
-      () => resolve(bakeProceduralTreeTextureData(species, seed)),
+      () => resolve(bakeProceduralTreeTextureData(species, seed, resolution)),
       0,
     ) as unknown as number
   })

@@ -1,14 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  CENTER,
+  ObjectBVH,
+  acceleratedRaycast,
+  computeBoundsTree,
+  disposeBoundsTree,
+} from 'three-mesh-bvh'
+import type { BVHOptions } from 'three-mesh-bvh'
+import {
   BufferAttribute,
   BufferGeometry,
+  Group,
   IcosahedronGeometry,
   InstancedBufferAttribute,
   InstancedBufferGeometry,
   InstancedInterleavedBuffer,
+  InstancedMesh,
   InterleavedBufferAttribute,
   LineBasicNodeMaterial,
+  Matrix4,
+  Mesh,
   MeshStandardNodeMaterial,
+  Quaternion,
+  SphereGeometry,
+  Vector3,
+  type Object3D,
   type Texture,
 } from 'three/webgpu'
 import type {
@@ -31,6 +47,15 @@ import { createPalmFanGeometry } from './materials/palmFanGeometry'
 import { createSucculentRosetteGeometry } from './materials/succulentRosetteGeometry'
 import { createBarkMaterial } from './materials/bark/material'
 import { createFruitMaterial } from './materials/fruitMaterial'
+import { retireGpuResource } from '../terrain/rendering/gpuResourceRetirement'
+
+// MeshBVH's extension is intentionally installed once at the tree renderer
+// boundary. Geometries without a bounds tree retain Three's stock fallback.
+Mesh.prototype.raycast = acceleratedRaycast
+
+function disposeAfterGpuSubmission(dispose: () => void): void {
+  retireGpuResource(dispose)
+}
 
 export interface TreeAssetViewProps {
   asset: ProceduralTreeAsset
@@ -40,6 +65,13 @@ export interface TreeAssetViewProps {
   /** Fires after textures, materials, meshes and instance buffers are committed. */
   onRenderResourcesReady?: () => void
   onRenderResourcesError?: (error: unknown) => void
+}
+
+export interface ForestTreeInstance {
+  id: string
+  position: readonly [number, number, number]
+  rotation: number
+  scale: number
 }
 
 export function TreeAssetView({
@@ -77,7 +109,9 @@ export function TreeAssetView({
     return () => abort.abort()
   }, [asset.parameters.seed, asset.parameters.species])
 
-  useEffect(() => () => textures?.dispose(), [textures])
+  useEffect(() => () => {
+    if (textures) disposeAfterGpuSubmission(() => textures.dispose())
+  }, [textures])
 
   if (!textures) return null
   return (
@@ -90,6 +124,356 @@ export function TreeAssetView({
       onRenderResourcesReady={onRenderResourcesReady}
     />
   )
+}
+
+/**
+ * A complete shared tree prototype rendered across many forest placements.
+ * Wood is one native instanced draw; foliage and fruit multiply their authored
+ * local instance buffers by the placement transforms and remain one draw per
+ * geometry/material batch regardless of how many copies are planted.
+ */
+interface TreeForestAssetViewProps {
+  asset: ProceduralTreeAsset
+  instances: readonly ForestTreeInstance[]
+  lodLevel: TreeLodLevel
+  showFoliage: boolean
+  selectedId?: string
+  /** Override the picking batch, or pass null when another LOD owns it. */
+  selectionProxyInstances?: readonly ForestTreeInstance[] | null
+  warmup?: (object: Object3D) => Promise<void>
+}
+
+export function TreeForestAssetView(props: TreeForestAssetViewProps) {
+  if (props.instances.length === 0) return null
+  return <TexturedTreeForestAssetView {...props} />
+}
+
+function TexturedTreeForestAssetView({
+  asset,
+  instances,
+  lodLevel,
+  showFoliage,
+  selectedId,
+  selectionProxyInstances,
+  warmup,
+}: TreeForestAssetViewProps) {
+  const [textures, setTextures] = useState<ProceduralTreeTextures>()
+  useEffect(() => {
+    const abort = new AbortController()
+    void bakeProceduralTreeTexturesAsync(
+      asset.parameters.species,
+      asset.parameters.seed,
+      { signal: abort.signal, resolution: 'forest' },
+    ).then((created) => {
+      if (abort.signal.aborted) created.dispose()
+      else setTextures(created)
+    }).catch((error: unknown) => {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        console.error('Forest tree textures failed', error)
+      }
+    })
+    return () => abort.abort()
+  }, [asset.parameters.seed, asset.parameters.species])
+  useEffect(() => () => {
+    if (textures) disposeAfterGpuSubmission(() => textures.dispose())
+  }, [textures])
+  if (!textures) return null
+  return (
+    <ReadyTreeForestAssetView
+      asset={asset}
+      instances={instances}
+      lodLevel={lodLevel}
+      showFoliage={showFoliage}
+      selectedId={selectedId}
+      selectionProxyInstances={selectionProxyInstances}
+      warmup={warmup}
+      textures={textures}
+    />
+  )
+}
+
+function ReadyTreeForestAssetView({
+  asset,
+  instances,
+  lodLevel,
+  showFoliage,
+  selectedId,
+  selectionProxyInstances,
+  warmup,
+  textures,
+}: {
+  asset: ProceduralTreeAsset
+  instances: readonly ForestTreeInstance[]
+  lodLevel: TreeLodLevel
+  showFoliage: boolean
+  selectedId?: string
+  selectionProxyInstances?: readonly ForestTreeInstance[] | null
+  warmup?: (object: Object3D) => Promise<void>
+  textures: ProceduralTreeTextures
+}) {
+  const group = useRef<Group>(null)
+  const [ready, setReady] = useState(false)
+  const lod = asset.lods[lodLevel]
+  const woodGeometry = useTreeGeometry(lod.wood)
+  const materialLease = useMemo(() => acquireTreeMaterials(textures), [textures])
+  const forestFoliage = useMemo(
+    () => multiplyFoliageInstances(lod.foliage, instances),
+    [instances, lod.foliage],
+  )
+  const forestFruits = useMemo(
+    () => multiplyFruitInstances(lod.fruits, instances),
+    [instances, lod.fruits],
+  )
+  useEffect(
+    () => () => disposeAfterGpuSubmission(() => materialLease.release()),
+    [materialLease],
+  )
+  useEffect(() => {
+    const object = group.current
+    setReady(false)
+    if (!object || !warmup) return
+    let cancelled = false
+    void warmup(object).then(
+      () => {
+        if (!cancelled) setReady(true)
+      },
+      (error: unknown) => {
+        if (cancelled) return
+        console.error('Forest tree pipeline warm-up failed', error)
+        // A failed asynchronous warm-up must not permanently hide the tree.
+        // The renderer can still compile it through its normal fallback path.
+        setReady(true)
+      },
+    )
+    return () => { cancelled = true }
+  }, [forestFoliage, forestFruits, materialLease, warmup, woodGeometry])
+
+  return (
+    <group
+      ref={group}
+      name={`forest-prototype-${asset.parameters.species}`}
+      visible={ready}
+    >
+      <ForestWoodInstances
+        geometry={woodGeometry}
+        material={materialLease.materials.bark}
+        instances={instances}
+        castShadow={lodLevel === 0}
+      />
+      {selectionProxyInstances !== null && (
+        <ForestSelectionInstances
+          asset={asset}
+          instances={selectionProxyInstances ?? instances}
+        />
+      )}
+      {showFoliage && (
+        <>
+          <FoliageInstances
+            data={forestFoliage}
+            lodLevel={lodLevel}
+            textures={textures}
+            materials={materialLease.materials}
+          />
+          <FruitInstances
+            data={forestFruits}
+            lodLevel={lodLevel}
+            material={materialLease.materials.fruit}
+          />
+        </>
+      )}
+      {instances.map((instance) => instance.id === selectedId ? (
+        <mesh
+          key={instance.id}
+          position={instance.position}
+          rotation={[-Math.PI / 2, 0, instance.rotation]}
+          scale={Math.max(1.25, asset.parameters.trunkRadius * 2.4) * instance.scale}
+        >
+          <ringGeometry args={[0.72, 1, 48]} />
+          <meshBasicMaterial color={0x77e8be} transparent opacity={0.72} depthWrite={false} />
+        </mesh>
+      ) : null)}
+    </group>
+  )
+}
+
+function ForestWoodInstances({
+  geometry,
+  material,
+  instances,
+  castShadow,
+}: {
+  geometry: BufferGeometry
+  material: MeshStandardNodeMaterial
+  instances: readonly ForestTreeInstance[]
+  castShadow: boolean
+}) {
+  const mesh = useRef<InstancedMesh>(null)
+  useEffect(() => {
+    const target = mesh.current
+    if (!target) return
+    const matrix = new Matrix4()
+    for (let index = 0; index < instances.length; index += 1) {
+      placementMatrix(instances[index]!, matrix)
+      target.setMatrixAt(index, matrix)
+    }
+    target.instanceMatrix.needsUpdate = true
+    target.computeBoundingSphere()
+  }, [instances])
+  return (
+    <instancedMesh
+      ref={mesh}
+      name="forest-instanced-wood"
+      args={[geometry, material, instances.length]}
+      castShadow={castShadow}
+      receiveShadow
+      frustumCulled={false}
+    />
+  )
+}
+
+function ForestSelectionInstances({
+  asset,
+  instances,
+}: {
+  asset: ProceduralTreeAsset
+  instances: readonly ForestTreeInstance[]
+}) {
+  const mesh = useRef<InstancedMesh>(null)
+  const geometry = useMemo(() => {
+    const created = new SphereGeometry(1, 10, 8)
+    computeBoundsTree.call(created, {
+      strategy: CENTER,
+      targetLeafSize: 4,
+      verbose: false,
+    })
+    return created
+  }, [])
+  useEffect(() => () => {
+    disposeBoundsTree.call(geometry)
+    disposeAfterGpuSubmission(() => geometry.dispose())
+  }, [geometry])
+  useEffect(() => {
+    const target = mesh.current
+    if (!target) return
+    const matrix = new Matrix4()
+    const position = new Vector3()
+    const scale = new Vector3()
+    const rotation = new Quaternion()
+    for (let index = 0; index < instances.length; index += 1) {
+      const instance = instances[index]!
+      position.set(
+        instance.position[0],
+        instance.position[1] + asset.parameters.height * instance.scale * 0.46,
+        instance.position[2],
+      )
+      rotation.setFromAxisAngle(PLACEMENT_AXIS, instance.rotation)
+      scale.set(
+        asset.parameters.crownRadius * instance.scale,
+        asset.parameters.height * instance.scale * 0.5,
+        asset.parameters.crownRadius * instance.scale,
+      )
+      target.setMatrixAt(index, matrix.compose(position, rotation, scale))
+    }
+    target.instanceMatrix.needsUpdate = true
+    target.computeBoundingSphere()
+    target.updateMatrixWorld(true)
+    target.userData.treeInstanceIds = instances.map((instance) => instance.id)
+
+    // MeshBVH accelerates the proxy surface; ObjectBVH is the important outer
+    // level that prevents InstancedMesh.raycast from walking every planted
+    // tree before it can reject distant crowns.
+    const objectBvh = new ObjectBVH(target, {
+      strategy: CENTER,
+      includeInstances: true,
+      targetLeafSize: 4,
+      precise: false,
+      verbose: false,
+    } as BVHOptions & { includeInstances: boolean; precise: boolean })
+    const defaultRaycast = target.raycast
+    target.raycast = (raycaster, intersections) => {
+      objectBvh.raycast(raycaster, intersections)
+    }
+    return () => {
+      target.raycast = defaultRaycast
+      delete target.userData.treeInstanceIds
+    }
+  }, [asset.parameters.crownRadius, asset.parameters.height, instances])
+  return (
+    <instancedMesh
+      ref={mesh}
+      name="forest-selection-volumes"
+      args={[geometry, undefined, instances.length]}
+      frustumCulled={false}
+    >
+      <meshBasicMaterial
+        transparent
+        opacity={0}
+        depthWrite={false}
+        colorWrite={false}
+      />
+    </instancedMesh>
+  )
+}
+
+function multiplyFoliageInstances(
+  source: TreeFoliageData,
+  placements: readonly ForestTreeInstance[],
+): TreeFoliageData {
+  const count = source.count * placements.length
+  const matrices = new Float32Array(count * 16)
+  const colors = new Float32Array(count * 3)
+  const variants = new Uint8Array(count)
+  const outer = new Matrix4()
+  const local = new Matrix4()
+  const combined = new Matrix4()
+  for (let placementIndex = 0; placementIndex < placements.length; placementIndex += 1) {
+    placementMatrix(placements[placementIndex]!, outer)
+    for (let localIndex = 0; localIndex < source.count; localIndex += 1) {
+      const targetIndex = placementIndex * source.count + localIndex
+      local.fromArray(source.matrices, localIndex * 16)
+      combined.multiplyMatrices(outer, local).toArray(matrices, targetIndex * 16)
+      colors.set(
+        source.colors.subarray(localIndex * 3, localIndex * 3 + 3),
+        targetIndex * 3,
+      )
+      variants[targetIndex] = source.variants[localIndex] ?? 0
+    }
+  }
+  return { ...source, matrices, colors, variants, count }
+}
+
+function multiplyFruitInstances(
+  source: TreeFruitData,
+  placements: readonly ForestTreeInstance[],
+): TreeFruitData {
+  const count = source.count * placements.length
+  const matrices = new Float32Array(count * 16)
+  const colors = new Float32Array(count * 3)
+  const outer = new Matrix4()
+  const local = new Matrix4()
+  const combined = new Matrix4()
+  for (let placementIndex = 0; placementIndex < placements.length; placementIndex += 1) {
+    placementMatrix(placements[placementIndex]!, outer)
+    for (let localIndex = 0; localIndex < source.count; localIndex += 1) {
+      const targetIndex = placementIndex * source.count + localIndex
+      local.fromArray(source.matrices, localIndex * 16)
+      combined.multiplyMatrices(outer, local).toArray(matrices, targetIndex * 16)
+      colors.set(source.colors.subarray(localIndex * 3, localIndex * 3 + 3), targetIndex * 3)
+    }
+  }
+  return { matrices, colors, count }
+}
+
+const PLACEMENT_AXIS = new Vector3(0, 1, 0)
+const PLACEMENT_POSITION = new Vector3()
+const PLACEMENT_QUATERNION = new Quaternion()
+const PLACEMENT_SCALE = new Vector3()
+
+function placementMatrix(instance: ForestTreeInstance, target: Matrix4): Matrix4 {
+  PLACEMENT_POSITION.fromArray(instance.position)
+  PLACEMENT_QUATERNION.setFromAxisAngle(PLACEMENT_AXIS, instance.rotation)
+  PLACEMENT_SCALE.setScalar(instance.scale)
+  return target.compose(PLACEMENT_POSITION, PLACEMENT_QUATERNION, PLACEMENT_SCALE)
 }
 
 function ReadyTreeAssetView({
@@ -136,14 +520,17 @@ function ReadyTreeAssetView({
     [],
   )
   useEffect(
-    () => () => {
+    () => () => disposeAfterGpuSubmission(() => {
       materialLease.release()
       topologyMaterial.dispose()
       debugMaterial.dispose()
-    },
+    }),
     [debugMaterial, materialLease, topologyMaterial],
   )
-  useEffect(() => () => debugGeometry.dispose(), [debugGeometry])
+  useEffect(
+    () => () => disposeAfterGpuSubmission(() => debugGeometry.dispose()),
+    [debugGeometry],
+  )
   useEffect(() => {
     let cancelled = false
     // Instance transforms are populated in child passive effects. Publishing
@@ -216,7 +603,10 @@ function FruitInstances({
     ),
     [data.colors, data.count, data.matrices],
   )
-  useEffect(() => () => geometry.dispose(), [geometry])
+  useEffect(
+    () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
+    [geometry],
+  )
 
   if (data.count === 0) return null
   return (
@@ -242,7 +632,10 @@ function useTreeGeometry(mesh: TreeMeshData): BufferGeometry {
     created.computeBoundingSphere()
     return created
   }, [mesh])
-  useEffect(() => () => geometry.dispose(), [geometry])
+  useEffect(
+    () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
+    [geometry],
+  )
   return geometry
 }
 
@@ -343,7 +736,10 @@ function FoliageAtlasBatch({
     const base = foliageBaseGeometry('spray', 0, true)
     return createAttributeInstancedGeometry(base, matrices, colors, count, variants)
   }, [colors, count, matrices, variants])
-  useEffect(() => () => geometry.dispose(), [geometry])
+  useEffect(
+    () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
+    [geometry],
+  )
   return (
     <mesh
       name={name}
@@ -390,9 +786,7 @@ function FoliageBatch({
   )
 
   useEffect(
-    () => () => {
-      geometry.dispose()
-    },
+    () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
     [geometry],
   )
 
@@ -445,9 +839,14 @@ function createAttributeInstancedGeometry(
   variants?: Uint8Array,
 ): InstancedBufferGeometry {
   const geometry = new InstancedBufferGeometry()
-  geometry.setIndex(base.getIndex())
+  // WebGPURenderer treats BufferGeometry disposal as ownership of every bound
+  // attribute. Sharing the cached base attributes between LOD batches means
+  // disposing one batch destroys GPU buffers still used by all the others.
+  // Each render batch therefore owns a small clone of its base vertex data;
+  // the large per-card transform payload remains instanced and is not copied.
+  geometry.setIndex(base.getIndex()?.clone() ?? null)
   for (const name of Object.keys(base.attributes)) {
-    geometry.setAttribute(name, base.getAttribute(name))
+    geometry.setAttribute(name, base.getAttribute(name).clone())
   }
   const matrixBuffer = new InstancedInterleavedBuffer(matrices, 16, 1)
   for (let column = 0; column < 4; column += 1) {

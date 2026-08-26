@@ -28,6 +28,7 @@ import { createBarkMaterial } from './bark/material'
 import { createFoliageMaterial, createFrondMaterial } from './leafMaterial'
 import { createFruitMaterial } from './fruitMaterial'
 import type { ProceduralTreeTextures } from './proceduralTreeTextures'
+import { retireGpuResource } from '../../terrain/rendering/gpuResourceRetirement'
 
 export function TreeMaterialPrewarmer({
   warmup,
@@ -35,7 +36,10 @@ export function TreeMaterialPrewarmer({
   warmup?: (object: Object3D) => Promise<void>
 }) {
   const resources = useMemo(createWarmupResources, [])
-  useEffect(() => () => resources.dispose(), [resources])
+  useEffect(
+    () => () => retireGpuResource(() => resources.dispose()),
+    [resources],
+  )
   useEffect(() => {
     if (!warmup) return
     let cancelled = false

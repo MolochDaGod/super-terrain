@@ -178,6 +178,7 @@ function App() {
         <>
           <TreeMenuBar
             editor={editor}
+            store={treeEditor}
             workspace={workspace}
             onWorkspaceChange={changeWorkspace}
           />

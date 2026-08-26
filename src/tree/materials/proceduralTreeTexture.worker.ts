@@ -4,11 +4,13 @@ import type { TreeSpecies } from '../generator/types'
 import {
   bakeProceduralTreeTextureData,
   type ProceduralTreeTextureData,
+  type TreeTextureResolution,
 } from './proceduralTreeTextures'
 
 export interface ProceduralTreeTextureBakeRequest {
   species: TreeSpecies
   seed: number
+  resolution: TreeTextureResolution
 }
 
 export type ProceduralTreeTextureBakeReply =
@@ -24,6 +26,7 @@ workerScope.onmessage = (
     const data = bakeProceduralTreeTextureData(
       event.data.species,
       event.data.seed,
+      event.data.resolution,
     )
     const reply: ProceduralTreeTextureBakeReply = { kind: 'complete', data }
     workerScope.postMessage(reply, textureDataTransferables(data))
