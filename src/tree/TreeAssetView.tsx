@@ -10,6 +10,7 @@ import type { BVHOptions } from 'three-mesh-bvh'
 import {
   BufferAttribute,
   BufferGeometry,
+  Color,
   Euler,
   Group,
   IcosahedronGeometry,
@@ -59,6 +60,67 @@ Mesh.prototype.raycast = acceleratedRaycast
 
 function disposeAfterGpuSubmission(dispose: () => void): void {
   retireGpuResource(dispose)
+}
+
+/**
+ * Which LODs cast into the sun's shadow map.
+ *
+ * Not the same question as which LOD to draw, and tying the two together was a
+ * bug: `castShadow` was `lodLevel === 0` everywhere, so a tree stopped casting
+ * the instant it crossed the near LOD boundary. Its shadow did not fade, it
+ * vanished — and once the near band was retuned to a stand-sized 21 metres,
+ * that meant 26 of 158 trees cast anything at all, and a stand viewed from
+ * outside cast nothing whatsoever.
+ *
+ * The distances are unrelated. The near LOD boundary is about when a crown's
+ * individual leaves stop being resolvable; the shadow question is whether the
+ * caster lands inside the cascades, which reach 260 metres. A reduced LOD is a
+ * *better* shadow caster, not a disqualified one — the same silhouette for a
+ * fraction of the geometry.
+ *
+ * Measured at an eye-level interior station, production, DPR 2, with the
+ * camera moving so the cascade maps actually redraw each frame:
+ *
+ *   wood only, 316 casters        56ms
+ *   previous rule, 171k casters   59ms
+ *   every LOD casting, 243k       73ms
+ *
+ * So trunks are close to free and are always worth casting — they carry the
+ * long floor shadows that give a stand its depth. Foliage is where the cost
+ * is, and the third LOD starts beyond 62 metres, where a crown's dapple is
+ * too small and too far to be worth 14ms. Hence: all wood, foliage to LOD 1.
+ */
+const WOOD_CASTS_SHADOW = true
+
+function foliageCastsShadow(lodLevel: TreeLodLevel): boolean {
+  return lodLevel <= 1
+}
+
+/**
+ * An opaque carrier for instance buffers that cross a React prop boundary.
+ *
+ * React's development build renders a performance track by diffing the props
+ * of every fiber it re-renders, descending three levels into any object it
+ * finds — and a typed array is just an object with a few million enumerable
+ * indices. Handing `Float32Array`s to a component therefore costs time
+ * proportional to the number of floats on every update: a forest LOD
+ * reclassification spent 14 seconds there. Production strips the instrument
+ * entirely, so this is not a rendering cost; it is a development one, and the
+ * editor is where the trees are actually looked at.
+ *
+ * The payload lives behind a non-enumerable property, so the inspector walks
+ * this object, finds nothing, and stops.
+ */
+class BulkInstanceSource<T> {
+  declare readonly value: T
+  constructor(value: T) {
+    Object.defineProperty(this, 'value', { value, enumerable: false })
+  }
+}
+
+/** Memoises the carrier so a stable payload keeps a stable prop identity. */
+function useBulkInstanceSource<T>(value: T): BulkInstanceSource<T> {
+  return useMemo(() => new BulkInstanceSource(value), [value])
 }
 
 /**
@@ -247,14 +309,14 @@ function ReadyTreeForestAssetView({
   const lod = asset.lods[lodLevel]
   const woodGeometry = useTreeGeometry(lod.wood)
   const materialLease = useMemo(() => acquireTreeMaterials(textures), [textures])
-  const forestFoliage = useMemo(
+  const forestFoliage = useBulkInstanceSource(useMemo(
     () => multiplyFoliageInstances(lod.foliage, instances),
     [instances, lod.foliage],
-  )
-  const forestFruits = useMemo(
+  ))
+  const forestFruits = useBulkInstanceSource(useMemo(
     () => multiplyFruitInstances(lod.fruits, instances),
     [instances, lod.fruits],
-  )
+  ))
   useEffect(
     () => () => disposeAfterGpuSubmission(() => materialLease.release()),
     [materialLease],
@@ -301,7 +363,7 @@ function ReadyTreeForestAssetView({
         geometry={woodGeometry}
         material={materialLease.materials.bark}
         instances={instances}
-        castShadow={lodLevel === 0}
+        castShadow={WOOD_CASTS_SHADOW}
       />
       {selectionProxyInstances !== null && (
         <ForestSelectionInstances
@@ -312,13 +374,13 @@ function ReadyTreeForestAssetView({
       {showFoliage && (
         <>
           <FoliageInstances
-            data={forestFoliage}
+            source={forestFoliage}
             lodLevel={lodLevel}
             textures={textures}
             materials={materialLease.materials}
           />
           <FruitInstances
-            data={forestFruits}
+            source={forestFruits}
             lodLevel={lodLevel}
             material={materialLease.materials.fruit}
           />
@@ -355,11 +417,15 @@ function ForestWoodInstances({
     const target = mesh.current
     if (!target) return
     const matrix = new Matrix4()
+    const tint = new Color()
     for (let index = 0; index < instances.length; index += 1) {
-      placementMatrix(instances[index]!, matrix)
+      const instance = instances[index]!
+      placementMatrix(instance, matrix)
       target.setMatrixAt(index, matrix)
+      target.setColorAt(index, trunkTint(instance, tint))
     }
     target.instanceMatrix.needsUpdate = true
+    if (target.instanceColor) target.instanceColor.needsUpdate = true
     target.computeBoundingSphere()
   }, [instances])
   return (
@@ -507,6 +573,51 @@ function multiplyFruitInstances(
   return { matrices, colors, count }
 }
 
+/**
+ * A deterministic per-trunk tint, multiplied into the bark albedo.
+ *
+ * Every stem of a species shares one baked bark tile, which is what keeps a
+ * forest to one draw call and one bake — and also what made a stand read as a
+ * cloned prop: a hundred boles in exactly the same value and exactly the same
+ * cast. Real neighbouring trunks differ far more than their bark does, because
+ * what varies is not the cork but everything on it. Age, which side the
+ * prevailing weather hits, how long the base stays wet, how much algal film has
+ * taken — all of it lands as a broad shift in value and a small one in hue.
+ *
+ * Three multiplies `instanceColor` into the material's colour node for free, so
+ * this costs one vec3 per tree and nothing per pixel. The hash is taken from
+ * the placement rather than from the draw order, so a tree keeps its tint when
+ * the stand is reclassified into different LOD batches around it.
+ */
+function trunkTint(instance: ForestTreeInstance, target: Color): Color {
+  const noise = hashPlacement(instance)
+  // Biased downward on purpose. The swing has to be wide enough that
+  // neighbouring boles read as different trees, but a stand whose brightest
+  // member sits above its own baked albedo is a stand with a cream trunk in
+  // it, and one cream trunk pulls the eye harder than every dark one together.
+  const value = 0.6 + fract(noise * 71.3) * 0.44
+  // Damp trunks green out, dry ones go warm and grey. A quarter of the value
+  // swing: bark chroma is low, and matching the two turns a stand into a
+  // paint chart.
+  const cast = fract(noise * 197.7) - 0.5
+  target.setRGB(
+    value * (1 + cast * 0.07),
+    value * (1 + cast * 0.012),
+    value * (1 - cast * 0.085),
+  )
+  return target
+}
+
+function hashPlacement(instance: ForestTreeInstance): number {
+  const x = instance.position[0] * 12.9898
+  const z = instance.position[2] * 78.233
+  return fract(Math.sin(x + z + instance.rotation * 3.771) * 43758.5453)
+}
+
+function fract(value: number): number {
+  return value - Math.floor(value)
+}
+
 const PLACEMENT_AXIS = new Vector3(0, 1, 0)
 const PLACEMENT_POSITION = new Vector3()
 const PLACEMENT_QUATERNION = new Quaternion()
@@ -538,6 +649,8 @@ function ReadyTreeAssetView({
 }) {
   const lod = asset.lods[lodLevel]
   const woodGeometry = useTreeGeometry(lod.wood)
+  const singleTreeFoliage = useBulkInstanceSource(lod.foliage)
+  const singleTreeFruits = useBulkInstanceSource(lod.fruits)
   const materialLease = useMemo(() => acquireTreeMaterials(textures), [textures])
   const woodMaterial = materialLease.materials.bark
   const surfaceVisible = debugMode === 'surface' || debugMode === 'topology'
@@ -627,13 +740,13 @@ function ReadyTreeAssetView({
       {showFoliage && debugMode === 'surface' && (
         <>
           <FoliageInstances
-            data={lod.foliage}
+            source={singleTreeFoliage}
             lodLevel={lodLevel}
             textures={textures}
             materials={materialLease.materials}
           />
           <FruitInstances
-            data={lod.fruits}
+            source={singleTreeFruits}
             lodLevel={lodLevel}
             material={materialLease.materials.fruit}
           />
@@ -644,14 +757,15 @@ function ReadyTreeAssetView({
 }
 
 function FruitInstances({
-  data,
+  source,
   lodLevel,
   material,
 }: {
-  data: TreeFruitData
+  source: BulkInstanceSource<TreeFruitData>
   lodLevel: TreeLodLevel
   material: MeshStandardNodeMaterial
 }) {
+  const data = source.value
   const geometry = useMemo(
     () => createAttributeInstancedGeometry(
       fruitBaseGeometry(), data.matrices, data.colors, data.count,
@@ -670,7 +784,7 @@ function FruitInstances({
       name="fruit-clusters"
       geometry={geometry}
       material={material}
-      castShadow={lodLevel === 0}
+      castShadow={foliageCastsShadow(lodLevel)}
       receiveShadow
       frustumCulled={false}
     />
@@ -695,168 +809,106 @@ function useTreeGeometry(mesh: TreeMeshData): BufferGeometry {
   return geometry
 }
 
+/**
+ * Every instanced foliage draw a compiled LOD needs, as ready geometry.
+ *
+ * Built here rather than inside a child component on purpose. React's
+ * development build walks the props of every fiber whose props changed, three
+ * levels deep, to render its performance track — and it walks a `Float32Array`
+ * the same way it walks a plain object, one enumerated index at a time. A
+ * forest LOD reclassification hands these components a few million floats, so
+ * passing the buffers as props cost 14 seconds of main thread per camera move
+ * in `bun dev` while costing production nothing at all. Only geometry crosses
+ * a prop boundary now; the bulk data never leaves this module.
+ */
+interface FoliageRenderBatch {
+  name: string
+  geometry: InstancedBufferGeometry
+  material: MeshStandardNodeMaterial
+}
+
+function buildFoliageBatches(
+  data: TreeFoliageData,
+  textures: ProceduralTreeTextures,
+  materials: TreeMaterialSet,
+): FoliageRenderBatch[] {
+  if (data.count === 0) return []
+  if (data.representation === 'clusters') {
+    return [{
+      name: 'foliage-clusters',
+      geometry: createAttributeInstancedGeometry(
+        foliageBaseGeometry('spray', 0, false), data.matrices, data.colors, data.count,
+      ),
+      material: materials.cluster,
+    }]
+  }
+  if (data.cardGeometry === 'spray' && textures.leafAtlas) {
+    return [{
+      name: 'leaf-cards-atlas',
+      geometry: createAttributeInstancedGeometry(
+        foliageBaseGeometry('spray', 0, true),
+        data.matrices, data.colors, data.count, data.variants,
+      ),
+      material: materials.leafAtlas,
+    }]
+  }
+  const material = data.cardGeometry === 'frond' ||
+    data.cardGeometry === 'fan-frond' ||
+    data.cardGeometry === 'rosette'
+    ? materials.frond
+    : materials.leafAtlas
+  const batches: FoliageRenderBatch[] = []
+  for (const [variant, batch] of splitFoliageByVariant(data).entries()) {
+    if (batch.count === 0) continue
+    batches.push({
+      name: `leaf-cards-${variant}`,
+      geometry: createAttributeInstancedGeometry(
+        foliageBaseGeometry(data.cardGeometry, variant, true),
+        batch.matrices, batch.colors, batch.count,
+      ),
+      material,
+    })
+  }
+  return batches
+}
+
 /** One attribute-instanced batch covers every authored atlas spray variant. */
 function FoliageInstances({
-  data,
+  source,
   lodLevel,
   textures,
   materials,
 }: {
-  data: TreeFoliageData
+  source: BulkInstanceSource<TreeFoliageData>
   lodLevel: TreeLodLevel
   textures: ProceduralTreeTextures
   materials: TreeMaterialSet
 }) {
-  const atlas = data.cardGeometry === 'spray' && textures.leafAtlas
   const batches = useMemo(
-    () => atlas ? [] : splitFoliageByVariant(data),
-    [atlas, data],
+    () => buildFoliageBatches(source.value, textures, materials),
+    [materials, source, textures],
   )
-  if (data.count === 0) return null
-  if (data.representation === 'clusters') {
-    return (
-      <FoliageBatch
-        key="clusters"
-        name="foliage-clusters"
-        matrices={data.matrices}
-        colors={data.colors}
-        count={data.count}
-        cardGeometryEnabled={false}
-        geometryKind="spray"
-        lodLevel={lodLevel}
-        material={materials.cluster}
-      />
-    )
-  }
-  if (atlas) {
-    return (
-      <group name="leaf-cards">
-        <FoliageAtlasBatch
-          name="leaf-cards-atlas"
-          matrices={data.matrices}
-          colors={data.colors}
-          variants={data.variants}
-          count={data.count}
-          lodLevel={lodLevel}
-          material={materials.leafAtlas}
-        />
-      </group>
-    )
-  }
+  useEffect(
+    () => () => disposeAfterGpuSubmission(() => {
+      for (const batch of batches) batch.geometry.dispose()
+    }),
+    [batches],
+  )
+  if (batches.length === 0) return null
   return (
     <group name="leaf-cards">
-      {batches.map((batch, variant) =>
-        batch.count === 0 ? null : (
-          <FoliageBatch
-            key={variant}
-            name={`leaf-cards-${variant}`}
-            matrices={batch.matrices}
-            colors={batch.colors}
-            count={batch.count}
-            cardGeometryEnabled
-            geometryKind={data.cardGeometry}
-            geometryVariant={variant}
-            lodLevel={lodLevel}
-            material={
-              data.cardGeometry === 'frond' ||
-                data.cardGeometry === 'fan-frond' ||
-                data.cardGeometry === 'rosette'
-                ? materials.frond
-                : materials.leafAtlas
-            }
-          />
-        ),
-      )}
+      {batches.map((batch) => (
+        <mesh
+          key={geometryKey(batch.geometry)}
+          name={batch.name}
+          geometry={batch.geometry}
+          material={batch.material}
+          castShadow={foliageCastsShadow(lodLevel)}
+          receiveShadow
+          frustumCulled={false}
+        />
+      ))}
     </group>
-  )
-}
-
-function FoliageAtlasBatch({
-  name,
-  matrices,
-  colors,
-  variants,
-  count,
-  lodLevel,
-  material,
-}: {
-  name: string
-  matrices: Float32Array
-  colors: Float32Array
-  variants: Uint8Array
-  count: number
-  lodLevel: TreeLodLevel
-  material: MeshStandardNodeMaterial
-}) {
-  const geometry = useMemo(() => {
-    const base = foliageBaseGeometry('spray', 0, true)
-    return createAttributeInstancedGeometry(base, matrices, colors, count, variants)
-  }, [colors, count, matrices, variants])
-  useEffect(
-    () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
-    [geometry],
-  )
-  return (
-    <mesh
-      key={geometryKey(geometry)}
-      name={name}
-      geometry={geometry}
-      material={material}
-      castShadow={lodLevel === 0}
-      receiveShadow
-      frustumCulled={false}
-    />
-  )
-}
-
-function FoliageBatch({
-  name,
-  matrices,
-  colors,
-  variants,
-  count,
-  cardGeometryEnabled,
-  geometryKind,
-  geometryVariant = 0,
-  lodLevel,
-  material,
-}: {
-  name: string
-  matrices: Float32Array
-  colors: Float32Array
-  variants?: Uint8Array
-  count: number
-  cardGeometryEnabled: boolean
-  geometryKind: TreeFoliageData['cardGeometry']
-  geometryVariant?: number
-  lodLevel: TreeLodLevel
-  material: MeshStandardNodeMaterial
-}) {
-  const geometry = useMemo(
-    () => {
-      const base = foliageBaseGeometry(
-        geometryKind, geometryVariant, cardGeometryEnabled,
-      )
-      return createAttributeInstancedGeometry(base, matrices, colors, count, variants)
-    },
-    [cardGeometryEnabled, colors, count, geometryKind, geometryVariant, matrices, variants],
-  )
-
-  useEffect(
-    () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
-    [geometry],
-  )
-
-  return (
-    <mesh
-      key={geometryKey(geometry)}
-      name={name}
-      geometry={geometry}
-      material={material}
-      castShadow={lodLevel === 0}
-      receiveShadow
-      frustumCulled={false}
-    />
   )
 }
 

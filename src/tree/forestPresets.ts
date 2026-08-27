@@ -68,7 +68,7 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
     id: 'mossy-old-growth',
     label: 'Mossy old-growth beech',
     description:
-      'Closed southern-beech interior: crowded slim stems under a few veterans, tree-fern understory.',
+      'Closed southern-beech interior: crowded slim stems under a few veterans, suppressed saplings below.',
     // A closed stand, and the number that matters most in the whole file.
     //
     // At a hundred and twenty stems a hectare — a parkland density — an
@@ -95,9 +95,23 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       // The veterans the eye reads scale from: fewer, far heavier, buttressed.
       { species: 'european-beech', weight: 10, variations: [4], scale: [1.15, 1.45] },
       { species: 'field-oak', weight: 8, variations: [4], scale: [1.0, 1.3] },
-      // Understory. Nothing in a forest photograph sells the floor like the
-      // layer between knee height and the lowest canopy branch.
-      { species: 'tree-fern', weight: 22, variations: [0, 5], scale: [0.5, 0.92] },
+      // Understory.
+      //
+      // This was a fifth of the stand as full-height tree ferns, and it was
+      // the loudest wrong note in the frame: a southern-beech interior is a
+      // dark, near-monochrome green, and a tree fern's fronds are the one
+      // thing in the catalogue that renders as bright yellow-green. Twenty-two
+      // of them at eye level turned every view into a fernery. What a closed
+      // beech stand actually has between the floor and the canopy is mostly
+      // nothing — that is what "closed" means — plus suppressed saplings of
+      // its own species waiting for a gap, and a few ferns low enough to read
+      // as ground cover rather than as a second canopy.
+      // No tree ferns at all in the end. Even at a sixth of their original
+      // weight and half their height they were the brightest thing in every
+      // frame: a frond renders as a near-saturated lime green, and against an
+      // interior graded to a mean luminance of about 0.2 a single one takes
+      // the whole exposure with it. There are none in the reference.
+      { species: 'european-beech', weight: 22, variations: [5], scale: [0.28, 0.46] },
     ],
     // Storm relics: snapped stems, so the fallen end reads as a broken bole
     // rather than as a tree that was picked up and set down sideways.

@@ -114,9 +114,32 @@ const LIGHT_RIGS: Record<TerrainEnvironmentLook, LightRig> = {
     // mid-ground and its long floor shadows.
     sun: { elevation: 24, azimuth: 152, colour: 0xffeccb, intensity: 5.2 },
     shadow: { mapSize: 2048, maxFar: 260, lightMargin: 120, cascades: 3 },
-    hemisphere: { sky: 0x77878a, ground: 0x362e24, intensity: 0.7 },
-    ambient: { colour: 0x2b332f, intensity: 0.1 },
-    frontFill: { colour: 0x86948f, intensity: 0.32 },
+    // Fill sized to what a closed canopy actually does to light rather than to
+    // what it blocks.
+    //
+    // The first pass of this rig reasoned only about occlusion — the canopy
+    // shuts the sky out, so the fill came down — and produced an interior whose
+    // mean luminance was 0.098 with half of every frame crushed flat to black.
+    // That is not what the inside of a wet forest looks like: the canopy is a
+    // diffuser, not a lid, and the light it does pass has been scattered by
+    // leaves and bounced off litter so many times that shade there carries far
+    // more fill than shade in the open does. Photographically the interior is
+    // low-key and *low-contrast*, not low-key and clipped.
+    //
+    // So the sky term is green-grey rather than blue, the ground term is the
+    // brown of wet leaf litter, and both are strong enough that a surface
+    // facing away from every gap still resolves its own texture.
+    //
+    // Raised a second time when the canopy started casting shadows properly.
+    // Until then most of the stand was excluded from the shadow map, so the
+    // interior was being lit by sunlight that a real canopy would have stopped;
+    // fixing that took the measured mean from 0.166 down to 0.118 in one step.
+    // The light has to come back as *fill* rather than as exposure, because
+    // fill is what the canopy actually supplies and because exposure would
+    // take the sky gaps with it.
+    hemisphere: { sky: 0x93a596, ground: 0x54432f, intensity: 1.72 },
+    ambient: { colour: 0x3f4c3d, intensity: 0.62 },
+    frontFill: { colour: 0x9aa79b, intensity: 0.6 },
     sky: {
       turbidity: 5.4,
       rayleigh: 1.05,

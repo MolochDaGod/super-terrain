@@ -116,7 +116,11 @@ const treeGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   // gives the same contrast and leaves the hue where the lighting put it.
   const grey = luminance(rgb).max(float(0.0001)).toVar('treeGradeLuma')
   const curved = grey.mul(grey).mul(3).sub(grey.mul(grey).mul(grey).mul(2))
-  const contrastGrey = mix(curved, grey, float(0.26))
+  // Only lightly curved. A full smoothstep is a strong S, and the subject here
+  // is a scene whose interesting half already sits in the bottom two stops:
+  // at 0.26 it drove almost every trunk and every square metre of litter into
+  // the toe, which is how a forest that is merely dim turns into a silhouette.
+  const contrastGrey = mix(curved, grey, float(0.62))
   const contrasted = rgb.mul(contrastGrey.div(grey)) as any
 
   // Chroma recovery, weighted toward the greens. `leafiness` is how much of
@@ -141,7 +145,10 @@ const treeGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   ))
   // A small toe lift. Photographic blacks are never zero, and an interior with
   // clipped shadows loses the trunk separation that carries the depth.
-  const lifted = toned.add(smoothstep(0.16, 0, contrastGrey).mul(0.014))
+  // A real toe, not a token one. Shade under a canopy is full of scattered
+  // green light, so its floor is a long way above zero — and separation
+  // between overlapping dark trunks is the entire depth cue in this frame.
+  const lifted = toned.add(smoothstep(0.3, 0, contrastGrey).mul(0.05))
 
   // A deeper vignette than the landscape's. A closed canopy genuinely is
   // darker at the frame edge, and it is what keeps the eye in the clearing.
@@ -150,7 +157,7 @@ const treeGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
     .mul(0.82)
     .add(lens.y.mul(lens.y).mul(1.08))
   const vignette = smoothstep(0.12, 0.62, radius)
-  const vignetted = lifted.mul(mix(float(1), float(0.84), vignette))
+  const vignetted = lifted.mul(mix(float(1), float(0.93), vignette))
   return vec4(vignetted.clamp(0, 1), colour.a)
 })
 

@@ -88,7 +88,13 @@ export function bakeBarkMaps(
     roughness,
     width,
     height,
-    normalScale: profile.runtimeNormalScale ?? 0.12,
+    // 0.12 was the default here, and at that strength the normal map may as
+    // well not have been bound: every hardwood bark in the catalogue rendered
+    // as a smooth painted cylinder, with all the fissure and grain relief the
+    // bake spends most of its time producing attenuated to nothing. Only the
+    // palms ever overrode it, which is why they were the only barks that
+    // caught a raking light. The maps themselves were always fine.
+    normalScale: profile.runtimeNormalScale ?? 0.7,
     projection: profile.projection ?? 'world-triplanar',
     mossiness: profile.mossiness ?? mossinessForStructure(profile.structure),
   }

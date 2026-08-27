@@ -592,24 +592,56 @@ const BEECH_SMOOTH: BarkProfile = {
   linkHalfWidth: 0.06,
   furrowDepth: 0.04,
   furrowStrength: 0.18,
-  normalStrength: 2.6,
+  // High, because the fields it differentiates are fine and low-contrast.
+  // `normalStrength` scales the *gradient* of the relief field, so a surface
+  // made of granulation and striation rather than of fissures needs several
+  // times the gain of a plated bark to produce the same slope.
+  normalStrength: 14,
+  // Above the new default. A smooth bark's relief is low-amplitude by
+  // definition — fine cork grain and lenticel scars, no fissures — so it needs
+  // more gain than a plated one to show the same amount of surface.
+  runtimeNormalScale: 0.95,
   // Beech has no plates and no scales. What little tonal structure it carries
   // is a fine algal mottle a few centimetres across, so the scale tier runs
   // three times finer than it did and contributes almost no per-cell tint:
   // at the old density and mosaic strength the tile came out as a wall of
   // hand-sized polygons, which is a reptile or a flagstone, not a beech.
-  scaleDensity: 9,
+  scaleDensity: 20,
   scaleAspect: 1.6,
-  scaleLift: 0.04,
-  lichenAmount: 0.4,
+  // Zero, and the review that got here is worth recording.
+  //
+  // `scaleLift` is how far a scale stands proud of its neighbours, and every
+  // downstream pass reads the relief it produces: exposure shades each cell,
+  // occlusion draws a line round it, and the albedo mosaic tints it. On a
+  // scaled bark that stack is the whole material. On a smooth one it is a
+  // liability — the tile came out as a wall of outlined polygons, the single
+  // loudest procedural tell in a stand of beeches, and turning `mosaicAmount`
+  // down never touched it because the mosaic was not what drew them.
+  //
+  // Two intermediate values looked like they fixed it and did not. Both were
+  // judged from 512-wide preview bakes, and the cells are about 2cm on a
+  // 1.6-metre tile: under 512 they fall below a texel and dissolve into mush
+  // that reads as a soft mottle. At the 1024 the renderer actually bakes they
+  // came straight back, unchanged. Any bark judgement taken below the shipping
+  // resolution is a judgement about the downsample.
+  //
+  // Beech is genuinely smooth. What it has instead is vertical cork grain and
+  // an algal film, which is what `grainAmount` and `lichenAmount` below carry.
+  scaleLift: 0,
+  lichenAmount: 0.55,
   // The baked map covers the whole tile at every height, so the green in it
   // is the algal film a beech carries everywhere, not the moss colony. The
   // colony is height-dependent and belongs to the material, which is why this
   // came down when the runtime one went in: both at full strength painted a
   // thirty-metre bole green to its crown.
   mossAmount: 0.24,
-  grainAmount: 0.45,
-  mosaicAmount: 0.08,
+  // Grain and mosaic carry the character the relief no longer does: vertical
+  // cork streaking, and per-patch tint that is now free to be visible because
+  // it is no longer riding on top of an outlined cell.
+  grainAmount: 1.1,
+  // Nothing to tint. Per-cell colour without per-cell relief is a flat
+  // patchwork, which is the same tell arriving by a different route.
+  mosaicAmount: 0,
   // Wet-forest beech, not a specimen tree on a dry lawn.
   //
   // The old palette sat around 0.6, which is close to fresh concrete, and

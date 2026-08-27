@@ -49,7 +49,7 @@ const FULL_EXPOSURE = 1.18
  * exposure sits below the landscape's — printing an interior at landscape
  * exposure is what turns a stand into an overlit model of one.
  */
-const TREE_EXPOSURE = 1.02
+const TREE_EXPOSURE = 1.4
 
 export function TerrainRenderPipeline({
   mode,

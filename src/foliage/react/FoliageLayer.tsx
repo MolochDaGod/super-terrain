@@ -37,6 +37,12 @@ const SOIL_TINTS: Record<FoliageFloor, readonly [number, number, number]> = {
   forest: [0.3, 0.255, 0.205],
 }
 
+/** How much fallen leaf covers each floor. See `FoliageGroundTextures.litter`. */
+const LITTER: Record<FoliageFloor, number> = {
+  meadow: 0,
+  forest: 0.88,
+}
+
 export interface FoliageLayerProps {
   store: FoliageEditorStore
   /** Which ground cover the layer opens on, and how dark its soil reads. */
@@ -82,6 +88,7 @@ export function FoliageLayer({ store, floor = 'meadow', warmup }: FoliageLayerPr
         armMap,
         tileSize: SOIL_TILE_SIZE,
         soilTint: SOIL_TINTS[floor],
+        litter: LITTER[floor],
       }),
     [armMap, floor, map, normalMap],
   )

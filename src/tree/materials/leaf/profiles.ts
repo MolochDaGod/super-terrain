@@ -349,13 +349,24 @@ const BEECH_LEAF: LeafProfile = {
   lobePairs: [0, 0],
   leaflets: [1, 1],
   baseRoughness: 0.5,
-  translucency: 0.96,
+  // Well down from 0.96. Translucency is what makes a backlit leaf glow, and
+  // it is the right effect — but at nearly one, every leaf in the canopy glows
+  // whether it is backlit or not, and a closed stand seen from its own floor
+  // is looking at the *shaded* side of almost all of them.
+  translucency: 0.72,
   damage: 0.9,
+  // The same correction the bark palette needed, for the same reason. These
+  // were the greens of a sunlit specimen tree photographed against the sky:
+  // under a closed canopy they rendered as a bright yellow-green ceiling that
+  // sat two stops above everything beneath it and pulled the eye straight out
+  // of the frame. Foliage in an interior is dark and slightly blue; the warm
+  // yellow-green only appears where a gap backlights it, which is what the
+  // translucency term is for.
   palette: {
-    shade: [0.19, 0.3, 0.155],
-    sun: [0.318, 0.452, 0.216],
-    weathered: [0.33, 0.31, 0.15],
-    necrosis: [0.32, 0.27, 0.15],
+    shade: [0.113, 0.181, 0.094],
+    sun: [0.203, 0.297, 0.131],
+    weathered: [0.214, 0.196, 0.09],
+    necrosis: [0.203, 0.166, 0.088],
   },
 }
 

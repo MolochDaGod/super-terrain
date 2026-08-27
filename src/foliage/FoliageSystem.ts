@@ -91,17 +91,25 @@ const FLOOR_SEEDS: Record<FoliageFloor, readonly FloorSeed[]> = {
     ['woodland-fern', -34, -6, 13, 0.42],
     ['woodland-fern', 41, -6, 11, 0.36],
     ['woodland-fern', -40, 33, 12, 0.38],
-    // The moss beds. A hundred-millimetre mat is the closest thing in the
-    // species table to sphagnum, and it is the element that makes a wet
-    // forest floor read as one: broad soft green sheets running between the
-    // trunks and up over everything lying on the ground, with bare litter
-    // showing through wherever the beds have not closed.
-    ['clover-mat', 2, 4, 22, 0.34],
-    ['clover-mat', -22, 24, 18, 0.3],
-    ['clover-mat', 26, -27, 19, 0.32],
-    ['clover-mat', 14, 34, 15, 0.26],
-    ['clover-mat', -30, -20, 16, 0.3],
-    ['clover-mat', 38, 12, 13, 0.24],
+    // Low herbs between the fern stands.
+    //
+    // The moss is deliberately not here. A clover mat was standing in for it,
+    // and a mat of blades is the wrong model twice over: moss is a film on a
+    // surface rather than a stand of individuals, and the clover came with a
+    // one-in-nine chance of a pale flower, which scattered white confetti
+    // across a forest floor that should be the darkest thing in the frame.
+    // The moss now lives in the ground material, where a film belongs, and
+    // this layer is just the scattered broadleaf herbs that grow between the
+    // ferns — dark-flowered, coarse enough to break the litter's silhouette.
+    // Scattered, not a sward. Painted at full flow these read as a layer of
+    // pale plastic leaves over the litter — the floor of a closed stand is
+    // mostly bare, and the herbs are the exception on it rather than the rule.
+    ['broadleaf-weed', 2, 4, 20, 0.24],
+    ['broadleaf-weed', -22, 24, 16, 0.2],
+    ['broadleaf-weed', 26, -27, 17, 0.22],
+    ['broadleaf-weed', 14, 34, 13, 0.17],
+    ['broadleaf-weed', -30, -20, 14, 0.2],
+    ['broadleaf-weed', 38, 12, 12, 0.15],
   ],
 }
 

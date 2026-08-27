@@ -292,8 +292,20 @@ function classifyForestLods(
   const groups: [ForestTreeInstance[], ForestTreeInstance[], ForestTreeInstance[]] = [[], [], []]
   const height = asset.parameters.height
   const crown = asset.parameters.crownRadius
-  const nearDistance = MathUtils.clamp(height * 0.75 + crown * 2.5, 24, 55)
-  const farDistance = MathUtils.clamp(height * 2.4 + crown * 5, 75, 180)
+  // Distances sized to a stand, not to a landscape.
+  //
+  // These used to hold LOD 0 out to 55m and LOD 1 out to 180m, which are sane
+  // numbers for a tree standing alone on a hillside and useless for a closed
+  // forest: a 30m-radius stand fits entirely inside the near band, so every
+  // placement classified as LOD 0 and the whole mechanism did nothing but pay
+  // for itself. Measured from inside such a stand, that was 537k leaf cards on
+  // screen at once.
+  //
+  // A full-detail crown is only worth its cards while its individual leaves
+  // subtend more than a pixel or so, which for these card sizes is closer to a
+  // couple of crown radii than to five.
+  const nearDistance = MathUtils.clamp(height * 0.32 + crown * 1.15, 9, 21)
+  const farDistance = MathUtils.clamp(height * 1.0 + crown * 2.4, 26, 62)
 
   for (const instance of instances) {
     let level: TreeLodLevel

@@ -553,12 +553,23 @@ export function bakeBarkFields(
           flake * 0.012 - fineCrack * 0.02 -
           furrow * profile.furrowDepth
         : mottledStructure
-        // A smooth bark is not flat, but everything on it is broad: shallow
-        // shedding patches and a faint swell over the wood beneath. Any crisp
-        // relief at all reads as damage on a surface the eye expects to be
-        // continuous.
-        ? 0.45 + scaleRelief * 0.16 + plate * 0.06 + grain * 0.05 +
-          granule * 0.035 + striation * 0.02 + lenticel * 0.02
+        // A smooth bark is not flat, and it is not featureless either.
+        //
+        // The first version of this line read "any crisp relief at all reads as
+        // damage" and weighted the fine tiers at 0.02-0.035, which combined
+        // with a zero `scaleLift` produced a normal map whose mean deviation
+        // from flat was 0.8 of 128 — a map that may as well not have been
+        // baked. What that reasoning missed is that the *broad* structure it
+        // wanted is exactly the part a normal map cannot deliver: a swell a
+        // handspan across is carried by the mesh. What is left for the map is
+        // precisely the fine stuff — cork granulation, vertical striation and
+        // lenticel scars — and on a bark with no fissures to look at, that
+        // fine tier is the entire surface.
+        //
+        // Still well under the fissured recipes: no furrow term, and the
+        // scale tier stays where it is so the polygon mosaic does not return.
+        ? 0.45 + scaleRelief * 0.16 + plate * 0.08 + grain * 0.15 +
+          granule * 0.13 + striation * 0.17 + lenticel * 0.1
         : paperyStructure
         ? 0.44 + peel * 0.05 + peelEdge * 0.16 + grain * 0.05 +
           granule * 0.04 + lenticelDash * 0.05 + scarReliefValue * 0.18 -

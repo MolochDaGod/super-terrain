@@ -4,7 +4,7 @@ import * as TSL from 'three/tsl'
 import { FOLIAGE_SPECIES } from './foliageSpecies'
 import type { FoliageMaskField } from './FoliageMaskField'
 import { FOLIAGE_INSTANCED_RANGE } from './FoliagePopulation'
-import { fbm2, valueNoise2 } from './foliageNoise'
+import { fbm2, hash21, valueNoise2 } from './foliageNoise'
 import {
   foliageCameraPosition,
   foliageTime,
@@ -76,7 +76,127 @@ export interface FoliageGroundTextures {
    * lawn that has been turned down rather than on their own leaf litter.
    */
   soilTint?: readonly [number, number, number]
+  /**
+   * How much fallen leaf litter covers the soil, 0..1.
+   *
+   * The shared soil map is a single tiling photograph of mineral ground, and
+   * darkening it (see `soilTint`) buys the right value but none of the right
+   * structure: a forest floor is not dim earth, it is a loose layer of
+   * individual dead leaves lying at every angle, a few centimetres across,
+   * whose colour runs the whole way from black rot to bleached ochre within a
+   * handspan. That per-leaf break-up is most of what the eye uses to read
+   * ground as forest floor rather than as brown paint, and it is completely
+   * absent from a 5-metre tile seen from 1.7 metres up.
+   */
+  litter?: number
 }
+
+/**
+ * The moss sheet, laid over whatever the floor is otherwise made of.
+ *
+ * Moss is a film, not a plant with a silhouette. Modelling it as ground-cover
+ * blades — which is what a mat of clover was standing in for — gets the colour
+ * right and everything else wrong: it stands proud of the litter instead of
+ * following it, it has individuals where moss has none, and it needs a flower
+ * model that moss does not have. As a term in the surface it can do what the
+ * real thing does, which is run continuously over the ground, over the roots
+ * and over anything that has been lying still long enough, thinning out
+ * wherever the floor is dry or recently disturbed.
+ *
+ * Two frequencies: where the beds are, and how ragged their edges are.
+ */
+const mossed = /*@__PURE__*/ TSL.Fn((
+  [base, ground, amount]: [ShaderValue, ShaderValue, ShaderValue],
+) => {
+  const beds = fbm2(ground.mul(0.16))
+  const edge = fbm2(ground.mul(0.9))
+  const cover = clamp(
+    smoothstep(0.42, 0.78, beds).mul(smoothstep(0.3, 0.62, edge)).mul(amount),
+    0,
+    1,
+  )
+  // Two greens, because a moss bed is never one: the sheet itself is a dark
+  // blue-green, and the growing tips on top of it are a full stop lighter and
+  // markedly more yellow.
+  const sheet = vec3(0.042, 0.086, 0.036)
+  const tips = vec3(0.117, 0.171, 0.061)
+  const colour = mix(sheet, tips, smoothstep(0.4, 0.85, valueNoise2(ground.mul(7.5))))
+  return mix(base, colour, cover.mul(0.88))
+})
+
+/**
+ * A height field for the litter, in metres of leaf standing above the soil.
+ *
+ * Sampled three times per axis to make a normal, so it has to be cheap and it
+ * has to be continuous — the cell hashes that give the litter its *colour*
+ * are neither, and differencing them produces a field of white sparkle rather
+ * than a surface. This is the smooth companion to them: the same frequencies,
+ * interpolated, so the relief agrees with the colour break-up about where one
+ * leaf ends and the next begins without being derived from it.
+ */
+const litterHeight = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
+  return valueNoise2(ground.mul(20)).mul(0.4)
+    .add(valueNoise2(ground.mul(11).add(vec2(37.1, 11.7))).mul(0.36))
+    .add(valueNoise2(ground.mul(6.2).add(vec2(5.3, 91.2))).mul(0.24))
+})
+
+/**
+ * How completely the litter covers the soil at a point.
+ *
+ * Not uniform: litter drifts. It piles against anything standing up, thins on
+ * a rise, and leaves the bare mineral ground showing in the scuffs — and a
+ * cover of exactly 1 everywhere is the flat brown carpet this pass exists to
+ * avoid.
+ */
+const litterCover = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
+  const drift = fbm2(ground.mul(0.21))
+  const scuff = valueNoise2(ground.mul(1.4))
+  // Close to complete. The bare mineral soil underneath is a pale dry tile,
+  // and every square metre of it that shows through reads as a scuff of sand
+  // on a floor that should be continuous leaf.
+  return clamp(
+    smoothstep(0.18, 0.6, drift).mul(0.36).add(0.64).sub(scuff.mul(0.1)),
+    0,
+    1,
+  )
+})
+
+/**
+ * The colour of the litter itself.
+ *
+ * Dead leaves do not share a colour, they share a *range*: the newest are
+ * ochre and rust, the ones under them have gone dark chocolate, and the layer
+ * below that is nearly black rot. Each cell picks a point on that ramp
+ * independently of its neighbours, which is why the result reads as many
+ * leaves rather than as one mottled surface — and why the hash driving the
+ * ramp must not be the same one driving anything spatial.
+ */
+const litterColour = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
+  // 5cm, 9cm and 16cm cells. Real leaves overlap at every scale at once.
+  const fine = hash21(ground.mul(20).floor())
+  const mid = hash21(ground.mul(11).floor().add(vec2(37.1, 11.7)))
+  const broad = hash21(ground.mul(6.2).floor().add(vec2(5.3, 91.2)))
+  const age = clamp(fine.mul(0.44).add(mid.mul(0.36)).add(broad.mul(0.2)), 0, 1)
+
+  // Judged against the reference rather than against a leaf held in the hand.
+  // A single dead beech leaf really is ochre; a hundred of them lying wet and
+  // packed on a shaded floor are not, and the first pass at these values gave
+  // the stand a bright tan carpet that read as sawdust. Damp litter under a
+  // closed canopy is close to the darkest surface in the frame.
+  const rot = vec3(0.026, 0.02, 0.014)
+  const dark = vec3(0.062, 0.042, 0.025)
+  const ochre = vec3(0.124, 0.083, 0.042)
+  const bleached = vec3(0.183, 0.139, 0.083)
+  const lower = mix(rot, dark, smoothstep(0.0, 0.46, age))
+  const upper = mix(ochre, bleached, smoothstep(0.72, 1.0, age))
+  const base = mix(lower, upper, smoothstep(0.4, 0.78, age))
+
+  // Damp shows as a darker, slightly greener leaf; it runs in patches that
+  // have nothing to do with which leaf is which.
+  const damp = smoothstep(0.35, 0.78, fbm2(ground.mul(0.55)))
+  return base.mul(mix(float(1), float(0.62), damp))
+    .mul(mix(vec3(1, 1, 1), vec3(0.9, 1.02, 0.86), damp))
+})
 
 /**
  * The ground the foliage stands on, and — past the last instanced ring — the
@@ -227,7 +347,23 @@ export function createFoliageGroundMaterial(
     .mul(vec3(tint[0], tint[1], tint[2]))
     .mul(mix(vec3(1, 1, 1), vec3(0.42, 0.46, 0.34), cover))
 
-  material.colorNode = vec4(mix(shadedSoil, canopy, canopyStrength), 1)
+  // --- fallen leaf litter -------------------------------------------------
+  //
+  // Three cell tiers standing in for three sizes of dead leaf, each hashed to
+  // its own colour and its own rotation, laid over the soil rather than
+  // replacing it so the ground still shows through the gaps. The tiers are
+  // deliberately close in frequency: litter has no dominant scale, and a
+  // single one reads as a printed pattern the moment two of its cells line up.
+  const litterAmount = textures.litter ?? 0
+  const littered = litterAmount > 0
+    ? mossed(
+        mix(shadedSoil, litterColour(ground), float(litterAmount).mul(litterCover(ground))),
+        ground,
+        float(litterAmount),
+      )
+    : shadedSoil
+
+  material.colorNode = vec4(mix(littered, canopy, canopyStrength), 1)
 
   // Grass is glossier than rock and its gloss varies with the tuft structure,
   // which is what gives a distant hillside its shifting sheen as the wind
@@ -258,7 +394,30 @@ export function createFoliageGroundMaterial(
 
   // The soil relief has to recede as the canopy takes over, or the ground ends
   // up as grass-coloured gravel.
-  const soilNormal = normalMapNode(texture(textures.normalMap, soilUv), vec2(0.85, 0.85))
+  const bakedSoilNormal = normalMapNode(texture(textures.normalMap, soilUv), vec2(0.85, 0.85))
+  // Litter has relief, and at eye level it is the only relief there is. The
+  // baked soil normal is a 5-metre tile: from 1.7 metres up its features are
+  // metres across and the ground reads as a smooth painted plane whatever its
+  // colour is doing. These are the individual leaves catching the light.
+  const litterSlope = litterHeight(ground.add(vec2(0.035, 0)))
+    .sub(litterHeight(ground.sub(vec2(0.035, 0))))
+  const litterSlopeZ = litterHeight(ground.add(vec2(0, 0.035)))
+    .sub(litterHeight(ground.sub(vec2(0, 0.035))))
+  // Modest. Pushed harder the 5cm tier aliases into visible banding at the
+  // grazing angles an eye-level camera spends all its time at.
+  const litterNormalWorld = normalize(vec3(
+    litterSlope.negate().mul(3.2), 1, litterSlopeZ.negate().mul(3.2),
+  ))
+  const litterNormal = normalize(
+    cameraViewMatrix.mul(vec4(litterNormalWorld, 0)).xyz,
+  )
+  const soilNormal = litterAmount > 0
+    ? normalize(mix(
+        bakedSoilNormal,
+        litterNormal,
+        float(litterAmount).mul(litterCover(ground)).mul(0.82),
+      ))
+    : bakedSoilNormal
   // Two extra noise taps buy a real surface gradient for the canopy. Without
   // it an aerial view gets a perfectly flat green plane: correct in colour,
   // obviously wrong as a surface, and completely unlit by the shifting sheen

@@ -1,9 +1,11 @@
 import { MeshStandardNodeMaterial, Vector2 } from 'three/webgpu'
 import {
   abs,
+  cameraViewMatrix,
   clamp,
   float,
   mix,
+  normalize,
   mx_fractal_noise_float,
   normalWorld,
   positionWorld,
@@ -14,12 +16,27 @@ import {
   uniform,
   vec2,
   vec3,
+  vec4,
   vertexColor,
 } from 'three/tsl'
 import type { ProceduralTreeTextures } from '../proceduralTreeTextures'
 
-const BARK_TILE_WIDTH_METRES = 1.6
-const BARK_TILE_HEIGHT_METRES = 3.2
+/**
+ * World size of one bark tile.
+ *
+ * Was 1.6 x 3.2m. At the 1024x2048 the forest tier bakes, that is 1.6mm per
+ * texel, and a texel that big cannot hold a cork granule or a lenticel — seen
+ * from arm's length the surface reads as a soft blur with no scale reference
+ * in it at all. Tightening the tile spends the same texels over less world and
+ * puts the fine structure back at roughly 1mm.
+ *
+ * The cost is repetition: a smaller tile repeats more often across a wide
+ * bole. The projection is triplanar and the content is mottled rather than
+ * patterned, which is what makes that affordable — a fissured bark with strong
+ * directional features would show the seam sooner.
+ */
+const BARK_TILE_WIDTH_METRES = 1.0
+const BARK_TILE_HEIGHT_METRES = 2.0
 
 /**
  * Ambient irradiance floor, as a fraction of the bark's own albedo.
@@ -55,7 +72,14 @@ const MOSS_HIGHLIGHT = vec3(0.115, 0.175, 0.045)
  * not as colonised — the contrast between a green base and grey bark above it
  * is the whole effect.
  */
-const MOSS_REACH = 1.9
+// How far up a bole the colony can reach, in metres.
+//
+// 1.9 was sized from a stem standing in ordinary woodland. The reference is a
+// wet old-growth interior, where the moss is not a skirt round the base but
+// the dominant surface: it runs up the buttresses, over the root collars and
+// several metres up the trunks, and it is most of what separates that forest
+// from a dry one.
+const MOSS_REACH = 3.4
 
 
 /** 0 where bark is bare, 1 where the colony is closed. See `MOSS_COLOUR`. */
@@ -76,7 +100,9 @@ function mossMask(amount: any): any {
   const patch = mx_fractal_noise_float(positionWorld.mul(0.42), 3)
     .mul(0.5)
     .add(0.5)
-  const colony = smoothstep(0.34, 0.78, patch)
+  // A wider band than before: at 0.34..0.78 the colonies were small islands
+  // with a lot of bare bark between them, which is a dry stand.
+  const colony = smoothstep(0.22, 0.66, patch)
   return clamp(wetness.mul(aspect).mul(colony).mul(amount), 0, 1)
 }
 
@@ -87,6 +113,26 @@ function mossedAlbedo(albedo: any, mask: any): any {
   const shade = mx_fractal_noise_float(positionWorld.mul(2.4), 2).mul(0.5).add(0.5)
   const moss = mix(MOSS_COLOUR, MOSS_HIGHLIGHT, shade)
   return mix(albedo, moss, mask)
+}
+
+/**
+ * One triplanar plane's contribution to the world-space bark normal.
+ *
+ * `swizzle` maps a tangent-space normal into world space for that plane's UV
+ * convention; the sign flips follow the same ones the UVs use, so the relief
+ * does not invert on the far side of a trunk.
+ */
+function triplanarAxisNormal(
+  sample: any,
+  scale: number,
+  swizzle: (tangent: any, axisSign: any) => any,
+  axisSign: any,
+): any {
+  const tangent = sample.xyz.mul(2).sub(1)
+  // Scaling only the lateral components is the standard way to control normal
+  // strength: it tilts the normal without ever letting it point backwards.
+  const shaped = vec3(tangent.x.mul(scale), tangent.y.mul(scale), tangent.z)
+  return swizzle(shaped, axisSign)
 }
 
 /**
@@ -154,13 +200,62 @@ export function createBarkMaterial(
     .add(surfaceY.mul(blend.y))
     .add(surfaceZ.mul(blend.z))
 
+  // Relief on the same projection as the colour.
+  //
+  // `normalMap` as a material property is sampled with the *mesh* UVs, while
+  // everything else here is sampled in world space. That mismatch is why the
+  // bark had no depth in it: the bake goes to real trouble to make albedo,
+  // occlusion and relief describe one surface, and then the runtime sampled
+  // the relief through a different parameterisation, at a different scale,
+  // aligned to the branch axis instead of to the world. What survived was not
+  // weak relief, it was relief that did not correspond to any feature you
+  // could see, which reads as vague lumpiness at best and as nothing at all in
+  // most lighting. Raising `normalScale` cannot fix that and did not.
+  //
+  // Each plane's tangent-space normal is rotated into world space by the same
+  // swizzle its UVs imply, then the three are blended on the same weights as
+  // the colour. A flat normal comes back as the geometric normal, so the term
+  // is well-behaved where the map has nothing to say.
+  const normalX = triplanarAxisNormal(
+    texture(textures.barkNormalMap, uvX), textures.barkNormalScale,
+    (t, sx) => vec3(t.z.mul(sx), t.y, t.x.mul(sx)), axisSign.x,
+  )
+  const normalY = triplanarAxisNormal(
+    texture(textures.barkNormalMap, uvY), textures.barkNormalScale,
+    (t, sy) => vec3(t.x, t.z.mul(sy), t.y.mul(sy)), axisSign.y,
+  )
+  const normalZ = triplanarAxisNormal(
+    texture(textures.barkNormalMap, uvZ), textures.barkNormalScale,
+    (t, sz) => vec3(t.x.mul(sz.negate()), t.y, t.z.mul(sz)), axisSign.z,
+  )
+  // Perturb the real normal; do not rebuild it.
+  //
+  // Blending the three planes' normals directly gives the geometric normal
+  // back only where the surface faces an axis. The blend weights are
+  // `pow(abs(n), 5)`, which is deliberately sharp so the colour does not
+  // smear across the seams — and that sharpness makes the reconstructed
+  // normal snap to the nearest axis everywhere else. On a trunk that erases
+  // the cylindrical shading gradient and renders the bole as a flat slab.
+  //
+  // So take what the *flat* map would have blended to, subtract it, and add
+  // only the difference to the true normal. Detail with no shape of its own.
+  const flatBlend = normalize(vec3(
+    axisSign.x.mul(blend.x), axisSign.y.mul(blend.y), axisSign.z.mul(blend.z),
+  ) as any)
+  const detail = normalize(
+    normalX.mul(blend.x).add(normalY.mul(blend.y)).add(normalZ.mul(blend.z)) as any,
+  )
+  const reliefWorld = normalize(
+    normalWorld.add((detail as any).sub(flatBlend)) as any,
+  )
+
   const material = new MeshStandardNodeMaterial({
     name: 'world-space procedural bark pbr',
-    normalMap: textures.barkNormalMap,
-    normalScale: new Vector2(textures.barkNormalScale, textures.barkNormalScale),
     roughness: 1,
     metalness: 0,
   })
+  const reliefView = (cameraViewMatrix as any).mul(vec4(reliefWorld as any, 0)).xyz
+  material.normalNode = normalize(reliefView as any) as any
   // A uniform rather than a constant: the amount is per-species, and folding
   // it into the shader as a literal would compile one more pipeline variant
   // per value and miss the pre-warm that exists to keep them off the frame.

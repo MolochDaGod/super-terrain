@@ -821,11 +821,30 @@ function adaptiveCurveSamples(
     const girthStep = part.type === 'twig' || settings.level > 0
       ? Infinity
       : girth * 3.2
+    // Ring spacing from how fast the member's *radius* changes, which is a
+    // separate question from how fast its centreline turns.
+    //
+    // Every rule above measures the centreline: how far it has travelled, how
+    // sharply it bends, how thick it is. A root flare defeats all three at
+    // once. It is straight, so `maximumTurn` never fires; it is the thickest
+    // part of the tree, so `girthStep` goes wide rather than narrow; and it is
+    // short, so `targetStep` gives it a single ring. The result was a buttress
+    // meshed as one cone frustum — a hard crease where a swelling profile
+    // should be, on the one part of a tree a person standing in the forest is
+    // always within arm's reach of.
+    const taperDelta = Math.abs(
+      Math.max(b.crossSection.radiusX, b.crossSection.radiusZ) -
+      Math.max(a.crossSection.radiusX, a.crossSection.radiusZ),
+    )
+    const taperSteps = settings.level === 0
+      ? Math.ceil(taperDelta / Math.max(0.035, settings.geometricError * 1.5))
+      : 1
     const subdivisions = clamp(
       Math.max(
         1,
         Math.ceil(segmentLength / Math.max(0.08, Math.min(targetStep, girthStep))),
         Math.ceil(localTurn / settings.maximumTurn),
+        taperSteps,
       ),
       1,
       settings.level === 0 ? 14 : 10,
@@ -1480,6 +1499,39 @@ function appendVertex(
   return index
 }
 
+/**
+ * Trilinearly interpolated value noise over the shared lattice hash.
+ *
+ * `hashUnit` is a lattice function: it floors its inputs, so it is only
+ * smooth if it is sampled on integers and interpolated between them. Sampling
+ * it at raw world positions — which several callers used to do — gives white
+ * noise at vertex frequency, which is not what any of them wanted.
+ */
+function smoothNoise3(seed: number, x: number, y: number, z: number): number {
+  const xi = Math.floor(x)
+  const yi = Math.floor(y)
+  const zi = Math.floor(z)
+  const ux = smoothstepUnit(x - xi)
+  const uy = smoothstepUnit(y - yi)
+  const uz = smoothstepUnit(z - zi)
+  let total = 0
+  for (let dz = 0; dz < 2; dz += 1) {
+    const wz = dz === 1 ? uz : 1 - uz
+    for (let dy = 0; dy < 2; dy += 1) {
+      const wy = dy === 1 ? uy : 1 - uy
+      for (let dx = 0; dx < 2; dx += 1) {
+        const wx = dx === 1 ? ux : 1 - ux
+        total += wx * wy * wz * hashUnit(seed, xi + dx, yi + dy, zi + dz)
+      }
+    }
+  }
+  return total
+}
+
+function smoothstepUnit(t: number): number {
+  return t * t * (3 - 2 * t)
+}
+
 function barkColor(
   position: TreeVec3,
   part: SemanticTreePart,
@@ -1490,19 +1542,29 @@ function barkColor(
   // leader began, even though the geometry and UVs were continuous. A seeded
   // world-space field remains deterministic and varied while crossing every
   // continuation and collar without a material boundary.
-  const variation = hashUnit(seed, position.x * 0.31, position.y * 0.18, position.z * 0.31)
+  // Smooth fields, not per-vertex hashes.
+  //
+  // `hashUnit` quantises its inputs to 1/8192, so sampling it at a vertex
+  // position returns an independent random number for every vertex however low
+  // the frequency multiplier looks. Interpolated across the faces between them
+  // that is not a tint, it is a Gouraud patchwork keyed to the mesh: a wall of
+  // flat polygons whose size tracks the tessellation rather than anything
+  // about the bark. It was the single loudest "cheap procedural" tell on a
+  // trunk — and because it lives in the vertex colours it survived every
+  // change to the baked bark tile, which is what made it so hard to find.
+  const variation = smoothNoise3(seed, position.x * 1.7, position.y * 0.85, position.z * 1.7)
   const verticalGrain = 0.5 + 0.5 * Math.sin(position.y * 2.4 + position.x * 0.7 - position.z * 0.55)
-  const mossNoise = hashUnit(
+  const mossNoise = smoothNoise3(
     seed + 9173,
-    position.x * 0.115,
-    position.y * 0.085,
-    position.z * 0.115,
+    position.x * 0.6,
+    position.y * 0.42,
+    position.z * 0.6,
   )
   const moss = part.age * clamp((mossNoise - 0.54) * 2.8, 0, 1) *
     (part.type === 'twig' ? 0.35 : 1)
   const rootDarkening = part.type === 'root' ? 0.8 : 1
   const ageDarkening = 0.98 - part.age * 0.09
-  const value = (0.84 + variation * 0.13 + verticalGrain * 0.025) *
+  const value = (0.8 + variation * 0.2 + verticalGrain * 0.025) *
     rootDarkening * ageDarkening
   if (part.id.includes('fruit-stalk') && part.id.includes('-strand-')) {
     // Date bunches are swept with the woody topology so their individual
@@ -1578,7 +1640,11 @@ function settingsFor(
     geometricError,
     targetStep: geometricError * (level === 0 ? 4.8 : level === 1 ? 4.35 : 3.75),
     maximumTurn: (level === 0 ? 13 : level === 1 ? 23 : 36) * (Math.PI / 180) * qualityScale,
-    maximumRadial: level === 0 ? 24 : level === 1 ? 14 : 8,
+    // 24 sides is a 40cm facet across a three-metre buttress, and a buttress is
+    // routinely a metre from the camera. The cap only binds on the widest few
+    // members of the near LOD, so the extra triangles land exactly where they
+    // are looked at.
+    maximumRadial: level === 0 ? 34 : level === 1 ? 14 : 8,
     minimumRadial: level === 0 ? 10 : level === 1 ? 6 : 5,
     level,
   }
