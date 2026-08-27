@@ -38,7 +38,7 @@ import {
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 import { gpuRetirementBacklog } from '../terrain/rendering/gpuResourceRetirement'
 
-const FLY_SPEED = 12
+const FLY_SPEED = 3
 const FLY_BOOST_SPEED = 80
 /**
  * Geometry compiles stay serialised. Each one saturates a core for about a
@@ -199,8 +199,7 @@ function DistanceLodForest({
 }) {
   const camera = useThree((state) => state.camera)
   const lastCamera = useRef(new Vector3(Number.POSITIVE_INFINITY, 0, 0))
-  const observedCamera = useRef(camera.position.clone())
-  const stationaryTime = useRef(0)
+  const sinceReclassify = useRef(0)
   const groupKey = useRef('')
   const [groups, setGroups] = useState<ForestLodGroups>(() =>
     classifyForestLods(asset, instances, camera.position, lodBias, selectedId),
@@ -225,21 +224,33 @@ function DistanceLodForest({
     reclassify()
   }, [reclassify])
 
+  // Reclassify little and often, while moving, rather than a lot at a stop.
+  //
+  // This used to wait for the camera to hold still for 160ms and then only act
+  // if it had travelled four metres. Both halves worked against it: walking
+  // through a stand accumulated every boundary crossing of the whole walk and
+  // then applied them in one commit, and it did so on the frame the viewer had
+  // just stopped on — which is precisely the frame a hitch is most visible.
+  //
+  // Two metres of travel, checked at most six times a second and no longer
+  // waiting for a stop, spreads the same total work across the walk in
+  // portions small enough to disappear into it.
   useFrame((_, delta) => {
-    if (observedCamera.current.distanceToSquared(camera.position) > 0.01) {
-      observedCamera.current.copy(camera.position)
-      stationaryTime.current = 0
-      return
-    }
-    stationaryTime.current += delta
-    if (stationaryTime.current < 0.16) return
-    stationaryTime.current = 0
-    if (lastCamera.current.distanceToSquared(camera.position) < 16) return
+    sinceReclassify.current += delta
+    if (sinceReclassify.current < 0.16) return
+    if (lastCamera.current.distanceToSquared(camera.position) < 4) return
+    sinceReclassify.current = 0
     reclassify()
   })
 
-  const selectionOwner = groups.findIndex((group) => group.length > 0)
-  return groups.map((group, level) => group.length > 0 ? (
+  // Level 0 always owns the picking proxy.
+  //
+  // It used to be whichever level happened to be non-empty first, which moved
+  // as the stand reclassified — and moving it rebuilds an object BVH over
+  // every placement of the prototype, on the frame of the swap. The proxy
+  // covers all instances wherever it lives, so pinning it to a level that is
+  // now always mounted makes it build once.
+  return groups.map((group, level) => (
     <TreeForestAssetView
       key={level}
       asset={asset}
@@ -247,10 +258,10 @@ function DistanceLodForest({
       lodLevel={level as TreeLodLevel}
       showFoliage={showFoliage}
       selectedId={selectedId}
-      selectionProxyInstances={level === selectionOwner ? instances : null}
+      selectionProxyInstances={level === 0 ? instances : null}
       warmup={warmup}
     />
-  ) : null)
+  ))
 }
 
 function sameForestInstances(

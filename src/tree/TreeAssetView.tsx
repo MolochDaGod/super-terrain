@@ -157,6 +157,17 @@ export interface TreeAssetViewProps {
   onRenderResourcesError?: (error: unknown) => void
 }
 
+/**
+ * The lone placement the single-asset view draws through.
+ *
+ * The forest and single-tree paths share one instanced pipeline, so the
+ * editor's one tree is simply a stand of one sitting at its parent group's
+ * origin — no second code path, and no second set of pipelines to warm.
+ */
+const SINGLE_PLACEMENT: readonly ForestTreeInstance[] = [
+  { id: 'single', position: [0, 0, 0], rotation: 0, scale: 1 },
+]
+
 export interface ForestTreeInstance {
   id: string
   position: readonly [number, number, number]
@@ -236,8 +247,21 @@ interface TreeForestAssetViewProps {
   warmup?: (object: Object3D) => Promise<void>
 }
 
+/**
+ * Deliberately renders an empty level rather than unmounting it.
+ *
+ * A distance reclassification empties one LOD group and fills another. When an
+ * empty group unmounted, everything it owned went with it — the material
+ * lease, the compiled pipelines, the warm-up — and refilling it later mounted a
+ * fresh subtree that had to bake, lease and warm all over again from scratch.
+ * That is both halves of what a LOD swap looked like: a stutter while the work
+ * was redone, and, because the group hides itself behind `visible={ready}`
+ * until its warm-up resolves, every tree in it vanishing for the duration.
+ *
+ * Keeping the level mounted with zero instances costs three empty draws and
+ * makes the swap a buffer update.
+ */
 export function TreeForestAssetView(props: TreeForestAssetViewProps) {
-  if (props.instances.length === 0) return null
   return <TexturedTreeForestAssetView {...props} />
 }
 
@@ -309,14 +333,11 @@ function ReadyTreeForestAssetView({
   const lod = asset.lods[lodLevel]
   const woodGeometry = useTreeGeometry(lod.wood)
   const materialLease = useMemo(() => acquireTreeMaterials(textures), [textures])
-  const forestFoliage = useBulkInstanceSource(useMemo(
-    () => multiplyFoliageInstances(lod.foliage, instances),
-    [instances, lod.foliage],
-  ))
-  const forestFruits = useBulkInstanceSource(useMemo(
-    () => multiplyFruitInstances(lod.fruits, instances),
-    [instances, lod.fruits],
-  ))
+  // The per-tree source, not a composed buffer. Composition now happens
+  // block-by-block inside the batch, so a reclassification costs the trees
+  // that moved rather than every card in the level. See `syncPersistentBatch`.
+  const forestFoliage = useBulkInstanceSource(lod.foliage)
+  const forestFruits = useBulkInstanceSource(lod.fruits)
   useEffect(
     () => () => disposeAfterGpuSubmission(() => materialLease.release()),
     [materialLease],
@@ -375,12 +396,14 @@ function ReadyTreeForestAssetView({
         <>
           <FoliageInstances
             source={forestFoliage}
+            instances={instances}
             lodLevel={lodLevel}
             textures={textures}
             materials={materialLease.materials}
           />
           <FruitInstances
             source={forestFruits}
+            instances={instances}
             lodLevel={lodLevel}
             material={materialLease.materials.fruit}
           />
@@ -413,6 +436,10 @@ function ForestWoodInstances({
   castShadow: boolean
 }) {
   const mesh = useRef<InstancedMesh>(null)
+  // Allocated in tiers for the same reason the foliage batches are: `args`
+  // is reconstruction, so sizing the mesh to the exact instance count rebuilt
+  // the InstancedMesh and its GPU buffers on every reclassification.
+  const capacity = useTieredCapacity(instances.length)
   useEffect(() => {
     const target = mesh.current
     if (!target) return
@@ -424,15 +451,16 @@ function ForestWoodInstances({
       target.setMatrixAt(index, matrix)
       target.setColorAt(index, trunkTint(instance, tint))
     }
+    target.count = instances.length
     target.instanceMatrix.needsUpdate = true
     if (target.instanceColor) target.instanceColor.needsUpdate = true
     target.computeBoundingSphere()
-  }, [instances])
+  }, [capacity, instances])
   return (
     <instancedMesh
       ref={mesh}
       name="forest-instanced-wood"
-      args={[geometry, material, instances.length]}
+      args={[geometry, material, capacity]}
       castShadow={castShadow}
       receiveShadow
       frustumCulled={false}
@@ -522,55 +550,6 @@ function ForestSelectionInstances({
       />
     </instancedMesh>
   )
-}
-
-function multiplyFoliageInstances(
-  source: TreeFoliageData,
-  placements: readonly ForestTreeInstance[],
-): TreeFoliageData {
-  const count = source.count * placements.length
-  const matrices = new Float32Array(count * 16)
-  const colors = new Float32Array(count * 3)
-  const variants = new Uint8Array(count)
-  const outer = new Matrix4()
-  const local = new Matrix4()
-  const combined = new Matrix4()
-  for (let placementIndex = 0; placementIndex < placements.length; placementIndex += 1) {
-    placementMatrix(placements[placementIndex]!, outer)
-    for (let localIndex = 0; localIndex < source.count; localIndex += 1) {
-      const targetIndex = placementIndex * source.count + localIndex
-      local.fromArray(source.matrices, localIndex * 16)
-      combined.multiplyMatrices(outer, local).toArray(matrices, targetIndex * 16)
-      colors.set(
-        source.colors.subarray(localIndex * 3, localIndex * 3 + 3),
-        targetIndex * 3,
-      )
-      variants[targetIndex] = source.variants[localIndex] ?? 0
-    }
-  }
-  return { ...source, matrices, colors, variants, count }
-}
-
-function multiplyFruitInstances(
-  source: TreeFruitData,
-  placements: readonly ForestTreeInstance[],
-): TreeFruitData {
-  const count = source.count * placements.length
-  const matrices = new Float32Array(count * 16)
-  const colors = new Float32Array(count * 3)
-  const outer = new Matrix4()
-  const local = new Matrix4()
-  const combined = new Matrix4()
-  for (let placementIndex = 0; placementIndex < placements.length; placementIndex += 1) {
-    placementMatrix(placements[placementIndex]!, outer)
-    for (let localIndex = 0; localIndex < source.count; localIndex += 1) {
-      const targetIndex = placementIndex * source.count + localIndex
-      local.fromArray(source.matrices, localIndex * 16)
-      combined.multiplyMatrices(outer, local).toArray(matrices, targetIndex * 16)
-      colors.set(source.colors.subarray(localIndex * 3, localIndex * 3 + 3), targetIndex * 3)
-    }
-  }
-  return { matrices, colors, count }
 }
 
 /**
@@ -741,12 +720,14 @@ function ReadyTreeAssetView({
         <>
           <FoliageInstances
             source={singleTreeFoliage}
+            instances={SINGLE_PLACEMENT}
             lodLevel={lodLevel}
             textures={textures}
             materials={materialLease.materials}
           />
           <FruitInstances
             source={singleTreeFruits}
+            instances={SINGLE_PLACEMENT}
             lodLevel={lodLevel}
             material={materialLease.materials.fruit}
           />
@@ -758,24 +739,41 @@ function ReadyTreeAssetView({
 
 function FruitInstances({
   source,
+  instances,
   lodLevel,
   material,
 }: {
   source: BulkInstanceSource<TreeFruitData>
+  instances: readonly ForestTreeInstance[]
   lodLevel: TreeLodLevel
   material: MeshStandardNodeMaterial
 }) {
   const data = source.value
-  const geometry = useMemo(
-    () => createAttributeInstancedGeometry(
-      fruitBaseGeometry(), data.matrices, data.colors, data.count,
-    ),
-    [data.colors, data.count, data.matrices],
+  const sourceBatch = useMemo<FoliageSourceBatch>(() => ({
+    key: 'fruit',
+    name: 'fruit-clusters',
+    material,
+    geometryKind: 'spray',
+    geometryVariant: 0,
+    cardGeometryEnabled: false,
+    baseGeometry: fruitBaseGeometry(),
+    matrices: data.matrices,
+    colors: data.colors,
+    cardsPerTree: data.count,
+  }), [data, material])
+  const capacityTrees = useTieredCapacity(instances.length)
+  const batch = useMemo(
+    () => createPersistentBatch(sourceBatch, capacityTrees),
+    [capacityTrees, sourceBatch],
   )
+  const geometry = batch.geometry
   useEffect(
     () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
     [geometry],
   )
+  useEffect(() => {
+    syncPersistentBatch(batch, instances)
+  }, [batch, instances])
 
   if (data.count === 0) return null
   return (
@@ -821,35 +819,63 @@ function useTreeGeometry(mesh: TreeMeshData): BufferGeometry {
  * in `bun dev` while costing production nothing at all. Only geometry crosses
  * a prop boundary now; the bulk data never leaves this module.
  */
-interface FoliageRenderBatch {
+/**
+ * One instanced draw's worth of *per-tree* foliage: the cards a single
+ * placement contributes, before any placement transform is applied.
+ *
+ * The forest used to compose the whole level on the CPU — every card of every
+ * tree in it, multiplied out into a fresh 14MB buffer — and hand that down on
+ * each reclassification. It is the same work whether one tree changed level or
+ * a hundred did, and concentrated in the frame that noticed, which is what the
+ * LOD swap stutter was. Keeping the source per-tree lets a swap write only the
+ * blocks that actually moved.
+ */
+interface FoliageSourceBatch {
+  key: string
   name: string
-  geometry: InstancedBufferGeometry
   material: MeshStandardNodeMaterial
+  geometryKind: TreeFoliageData['cardGeometry']
+  geometryVariant: number
+  cardGeometryEnabled: boolean
+  /** Overrides the foliage base geometry. Fruit uses a finer icosahedron. */
+  baseGeometry?: BufferGeometry
+  matrices: Float32Array
+  colors: Float32Array
+  variants?: Uint8Array
+  /** Cards this batch contributes per placement. Constant by construction. */
+  cardsPerTree: number
 }
 
-function buildFoliageBatches(
+function foliageSourceBatches(
   data: TreeFoliageData,
   textures: ProceduralTreeTextures,
   materials: TreeMaterialSet,
-): FoliageRenderBatch[] {
-  if (data.count === 0) return []
+): FoliageSourceBatch[] {
   if (data.representation === 'clusters') {
     return [{
+      key: 'clusters',
       name: 'foliage-clusters',
-      geometry: createAttributeInstancedGeometry(
-        foliageBaseGeometry('spray', 0, false), data.matrices, data.colors, data.count,
-      ),
       material: materials.cluster,
+      geometryKind: 'spray',
+      geometryVariant: 0,
+      cardGeometryEnabled: false,
+      matrices: data.matrices,
+      colors: data.colors,
+      cardsPerTree: data.count,
     }]
   }
   if (data.cardGeometry === 'spray' && textures.leafAtlas) {
     return [{
+      key: 'atlas',
       name: 'leaf-cards-atlas',
-      geometry: createAttributeInstancedGeometry(
-        foliageBaseGeometry('spray', 0, true),
-        data.matrices, data.colors, data.count, data.variants,
-      ),
       material: materials.leafAtlas,
+      geometryKind: 'spray',
+      geometryVariant: 0,
+      cardGeometryEnabled: true,
+      matrices: data.matrices,
+      colors: data.colors,
+      variants: data.variants,
+      cardsPerTree: data.count,
     }]
   }
   const material = data.cardGeometry === 'frond' ||
@@ -857,36 +883,103 @@ function buildFoliageBatches(
     data.cardGeometry === 'rosette'
     ? materials.frond
     : materials.leafAtlas
-  const batches: FoliageRenderBatch[] = []
-  for (const [variant, batch] of splitFoliageByVariant(data).entries()) {
-    if (batch.count === 0) continue
-    batches.push({
-      name: `leaf-cards-${variant}`,
-      geometry: createAttributeInstancedGeometry(
-        foliageBaseGeometry(data.cardGeometry, variant, true),
-        batch.matrices, batch.colors, batch.count,
-      ),
-      material,
-    })
+  // Kept even where a variant contributes no cards: the batch set is a
+  // property of the compiled asset, and a set that changes with the camera is
+  // a set that has to be rebuilt and recompiled when it does.
+  return splitFoliageByVariant(data).map((batch, variant) => ({
+    key: `variant-${variant}`,
+    name: `leaf-cards-${variant}`,
+    material,
+    geometryKind: data.cardGeometry,
+    geometryVariant: variant,
+    cardGeometryEnabled: true,
+    matrices: batch.matrices,
+    colors: batch.colors,
+    cardsPerTree: batch.count,
+  }))
+}
+
+interface PersistentFoliageBatch {
+  source: FoliageSourceBatch
+  geometry: InstancedBufferGeometry
+  matrixBuffer: InstancedInterleavedBuffer
+  colorAttribute: InstancedBufferAttribute
+  variantAttribute?: InstancedBufferAttribute
+  capacityTrees: number
+  /** Blocks whose per-card colour and variant have been filled in. */
+  filledSlots: number
+  /** Placement id at each block, in draw order. */
+  order: string[]
+  slotOf: Map<string, number>
+  /** Placement transform each block was last written with. */
+  writtenWith: Map<string, string>
+}
+
+/**
+ * Rounds a tree count up to a power of two.
+ *
+ * A GPU buffer cannot be resized, so a batch allocated to exactly the trees it
+ * holds must be rebuilt — and recompiled — every time that number changes,
+ * which for a forest LOD is every time the camera moves far enough to
+ * reclassify one tree. Power-of-two tiers cost at most twice the memory and
+ * make almost every reclassification a write into geometry that already
+ * exists.
+ */
+function instanceCapacity(count: number): number {
+  if (count <= 0) return 1
+  return 2 ** Math.ceil(Math.log2(count))
+}
+
+/**
+ * A capacity tier that resists oscillation.
+ *
+ * Sizing straight from `instanceCapacity` means a level hovering either side
+ * of a power of two rebuilds its geometry every time it crosses — the single
+ * most expensive thing a reclassification can do, and the source of the
+ * occasional half-second spike in an otherwise smooth walk. Growing eagerly
+ * and shrinking only once the level has dropped below a quarter of what is
+ * allocated gives a wide band to wander inside.
+ *
+ * It does not simply never shrink: the near LOD can hold sixty trees at six
+ * thousand cards each, and holding that allocation for every prototype after
+ * the viewer has walked out of the stand is tens of megabytes of nothing on a
+ * machine that has already been shown to have a ceiling.
+ */
+function useTieredCapacity(count: number): number {
+  const capacity = useRef(1)
+  const needed = instanceCapacity(count)
+  if (needed > capacity.current || count * 4 < capacity.current) {
+    capacity.current = needed
   }
-  return batches
+  return capacity.current
+}
+
+function placementSignature(instance: ForestTreeInstance): string {
+  return `${instance.position[0]},${instance.position[1]},${instance.position[2]},${instance.rotation},${instance.scale},${instance.tilt ?? 0}`
 }
 
 /** One attribute-instanced batch covers every authored atlas spray variant. */
 function FoliageInstances({
   source,
+  instances,
   lodLevel,
   textures,
   materials,
 }: {
   source: BulkInstanceSource<TreeFoliageData>
+  instances: readonly ForestTreeInstance[]
   lodLevel: TreeLodLevel
   textures: ProceduralTreeTextures
   materials: TreeMaterialSet
 }) {
-  const batches = useMemo(
-    () => buildFoliageBatches(source.value, textures, materials),
+  const sources = useMemo(
+    () => foliageSourceBatches(source.value, textures, materials),
     [materials, source, textures],
+  )
+  const capacityTrees = useTieredCapacity(instances.length)
+  const batches = useMemo(
+    () => sources.map((batch) => createPersistentBatch(batch, capacityTrees)),
+    [capacityTrees, sources],
   )
   useEffect(
     () => () => disposeAfterGpuSubmission(() => {
@@ -894,15 +987,18 @@ function FoliageInstances({
     }),
     [batches],
   )
+  useEffect(() => {
+    for (const batch of batches) syncPersistentBatch(batch, instances)
+  }, [batches, instances])
   if (batches.length === 0) return null
   return (
     <group name="leaf-cards">
       {batches.map((batch) => (
         <mesh
           key={geometryKey(batch.geometry)}
-          name={batch.name}
+          name={batch.source.name}
           geometry={batch.geometry}
-          material={batch.material}
+          material={batch.source.material}
           castShadow={foliageCastsShadow(lodLevel)}
           receiveShadow
           frustumCulled={false}
@@ -910,6 +1006,158 @@ function FoliageInstances({
       ))}
     </group>
   )
+}
+
+function createPersistentBatch(
+  source: FoliageSourceBatch,
+  capacityTrees: number,
+): PersistentFoliageBatch {
+  const base = source.baseGeometry ?? foliageBaseGeometry(
+    source.geometryKind, source.geometryVariant, source.cardGeometryEnabled,
+  )
+  const geometry = new InstancedBufferGeometry()
+  // WebGPURenderer treats BufferGeometry disposal as ownership of every bound
+  // attribute. Sharing the cached base attributes between LOD batches means
+  // disposing one batch destroys GPU buffers still used by all the others.
+  geometry.setIndex(base.getIndex()?.clone() ?? null)
+  for (const name of Object.keys(base.attributes)) {
+    geometry.setAttribute(name, base.getAttribute(name).clone())
+  }
+  const cards = capacityTrees * source.cardsPerTree
+  const matrixBuffer = new InstancedInterleavedBuffer(
+    new Float32Array(Math.max(1, cards) * 16), 16, 1,
+  )
+  for (let column = 0; column < 4; column += 1) {
+    geometry.setAttribute(
+      `treeInstanceMatrix${column}`,
+      new InterleavedBufferAttribute(matrixBuffer, 4, column * 4),
+    )
+  }
+  // Colour and variant are properties of the card, not of the tree carrying
+  // it, so every block holds identical values — but they are filled block by
+  // block as the level fills, not tiled across the whole capacity here.
+  // Tiling upfront put the entire cost of a tier growth into the one frame
+  // that grew, which was the only remaining spike in a walk through the stand.
+  const colorAttribute = new InstancedBufferAttribute(
+    new Float32Array(Math.max(1, cards) * 3), 3,
+  )
+  geometry.setAttribute('treeInstanceColor', colorAttribute)
+  let variantAttribute: InstancedBufferAttribute | undefined
+  if (source.variants) {
+    variantAttribute = new InstancedBufferAttribute(new Float32Array(Math.max(1, cards)), 1)
+    geometry.setAttribute('leafVariant', variantAttribute)
+  }
+  geometry.instanceCount = 0
+  return {
+    source,
+    geometry,
+    matrixBuffer,
+    colorAttribute,
+    variantAttribute,
+    capacityTrees,
+    filledSlots: 0,
+    order: [],
+    slotOf: new Map(),
+    writtenWith: new Map(),
+  }
+}
+
+/**
+ * Copies the per-card colour and variant into a block the first time it is
+ * used. Every block holds the same values, so this happens once per slot for
+ * the life of the geometry.
+ */
+function fillSlotConstants(batch: PersistentFoliageBatch, slot: number): void {
+  if (slot < batch.filledSlots) return
+  const { source } = batch
+  for (let index = batch.filledSlots; index <= slot; index += 1) {
+    const colors = batch.colorAttribute.array as Float32Array
+    colors.set(source.colors, index * source.cardsPerTree * 3)
+    batch.colorAttribute.addUpdateRange(
+      index * source.cardsPerTree * 3, source.cardsPerTree * 3,
+    )
+    if (batch.variantAttribute && source.variants) {
+      const target = batch.variantAttribute.array as Float32Array
+      const offset = index * source.cardsPerTree
+      for (let card = 0; card < source.cardsPerTree; card += 1) {
+        target[offset + card] = source.variants[card] ?? 0
+      }
+      batch.variantAttribute.addUpdateRange(offset, source.cardsPerTree)
+    }
+  }
+  batch.colorAttribute.needsUpdate = true
+  if (batch.variantAttribute) batch.variantAttribute.needsUpdate = true
+  batch.filledSlots = slot + 1
+}
+
+const SYNC_OUTER = /*@__PURE__*/ new Matrix4()
+const SYNC_LOCAL = /*@__PURE__*/ new Matrix4()
+const SYNC_COMBINED = /*@__PURE__*/ new Matrix4()
+
+/**
+ * Brings a batch's transforms in line with the placements it now holds,
+ * touching only the blocks that changed.
+ *
+ * Departures are filled by moving the last block down into the hole, which
+ * keeps the live blocks contiguous so `instanceCount` alone decides what is
+ * drawn. Every write is registered as an update range, so the backend uploads
+ * those bytes rather than the whole buffer.
+ */
+function syncPersistentBatch(
+  batch: PersistentFoliageBatch,
+  instances: readonly ForestTreeInstance[],
+): void {
+  const { source, order, slotOf, writtenWith } = batch
+  const stride = source.cardsPerTree * 16
+  const array = batch.matrixBuffer.array as Float32Array
+  let dirty = false
+  const touch = (slot: number): void => {
+    batch.matrixBuffer.addUpdateRange(slot * stride, stride)
+    dirty = true
+  }
+
+  if (source.cardsPerTree > 0) {
+    const wanted = new Set(instances.map((instance) => instance.id))
+    for (let slot = order.length - 1; slot >= 0; slot -= 1) {
+      const id = order[slot]!
+      if (wanted.has(id)) continue
+      const last = order.length - 1
+      if (slot !== last) {
+        array.copyWithin(slot * stride, last * stride, (last + 1) * stride)
+        const moved = order[last]!
+        order[slot] = moved
+        slotOf.set(moved, slot)
+        touch(slot)
+      }
+      order.pop()
+      slotOf.delete(id)
+      writtenWith.delete(id)
+    }
+
+    for (const instance of instances) {
+      const signature = placementSignature(instance)
+      let slot = slotOf.get(instance.id)
+      if (slot !== undefined && writtenWith.get(instance.id) === signature) continue
+      if (slot === undefined) {
+        slot = order.length
+        order.push(instance.id)
+        slotOf.set(instance.id, slot)
+      }
+      fillSlotConstants(batch, slot)
+      placementMatrix(instance, SYNC_OUTER)
+      const offset = slot * stride
+      for (let card = 0; card < source.cardsPerTree; card += 1) {
+        SYNC_LOCAL.fromArray(source.matrices, card * 16)
+        SYNC_COMBINED.multiplyMatrices(SYNC_OUTER, SYNC_LOCAL)
+          .toArray(array, offset + card * 16)
+      }
+      writtenWith.set(instance.id, signature)
+      touch(slot)
+    }
+  }
+
+  if (dirty) batch.matrixBuffer.needsUpdate = true
+  batch.geometry.instanceCount = order.length * source.cardsPerTree
 }
 
 const foliageBaseGeometries = new Map<string, BufferGeometry>()
@@ -938,44 +1186,6 @@ function foliageBaseGeometry(
           : createLeafCardGeometry()
     : new IcosahedronGeometry(1, 1)
   foliageBaseGeometries.set(key, geometry)
-  return geometry
-}
-
-function createAttributeInstancedGeometry(
-  base: BufferGeometry,
-  matrices: Float32Array,
-  colors: Float32Array,
-  count: number,
-  variants?: Uint8Array,
-): InstancedBufferGeometry {
-  const geometry = new InstancedBufferGeometry()
-  // WebGPURenderer treats BufferGeometry disposal as ownership of every bound
-  // attribute. Sharing the cached base attributes between LOD batches means
-  // disposing one batch destroys GPU buffers still used by all the others.
-  // Each render batch therefore owns a small clone of its base vertex data;
-  // the large per-card transform payload remains instanced and is not copied.
-  geometry.setIndex(base.getIndex()?.clone() ?? null)
-  for (const name of Object.keys(base.attributes)) {
-    geometry.setAttribute(name, base.getAttribute(name).clone())
-  }
-  const matrixBuffer = new InstancedInterleavedBuffer(matrices, 16, 1)
-  for (let column = 0; column < 4; column += 1) {
-    geometry.setAttribute(
-      `treeInstanceMatrix${column}`,
-      new InterleavedBufferAttribute(matrixBuffer, 4, column * 4),
-    )
-  }
-  geometry.setAttribute(
-    'treeInstanceColor',
-    new InstancedBufferAttribute(colors, 3),
-  )
-  if (variants) {
-    geometry.setAttribute(
-      'leafVariant',
-      new InstancedBufferAttribute(Float32Array.from(variants), 1),
-    )
-  }
-  geometry.instanceCount = count
   return geometry
 }
 
