@@ -34,6 +34,8 @@ export interface ProceduralTreeTextures {
   barkNormalMap: DataTexture
   barkNormalScale: number
   barkProjection: 'world-triplanar' | 'axial-uv'
+  /** Ground-level moss colonisation for this bark. See `BarkMaps.mossiness`. */
+  barkMossiness: number
   /** Packed ORM-compatible surface map: R ambient occlusion, G/B roughness. */
   barkRoughnessMap: DataTexture
   /** One entry per leaf-spray variant; cards are batched per variant. */
@@ -102,39 +104,74 @@ export function treeMaterialSeed(species: TreeSpecies): number {
   return (hash >>> 1) + 1
 }
 
+/** Bark map dimensions for a resolution tier. */
+export function barkMapSize(
+  resolution: TreeTextureResolution,
+): { width: number; height: number } {
+  return resolution === 'forest'
+    ? { width: 1024, height: 2048 }
+    : { width: 2048, height: 4096 }
+}
+
+/** Leaf card edge length for a resolution tier. */
+export function leafCardSize(resolution: TreeTextureResolution): number {
+  return resolution === 'forest' ? FOREST_LEAF_CARD_SIZE : HERO_LEAF_CARD_SIZE
+}
+
+/**
+ * Bakes the bark half of a material set.
+ *
+ * Bark and each leaf variant are separate entry points because they are the
+ * bake's natural parallel units: nothing in one reads anything from another,
+ * so a pool can put every one of them on its own core. Splitting them here
+ * rather than inside the worker keeps the scheduling decision on the client,
+ * where it can see all the material sets a forest is waiting on at once.
+ */
+export function bakeBarkTextureData(
+  species: TreeSpecies,
+  seed: number,
+  resolution: TreeTextureResolution = 'hero',
+): ProceduralTreeTextureData['bark'] {
+  const { width, height } = barkMapSize(resolution)
+  return bakeBarkMaps(seed, species, width, height)
+}
+
+/** Bakes one leaf-spray variant and its authored mip chains. */
+export function bakeLeafCardTextureData(
+  species: TreeSpecies,
+  seed: number,
+  variant: number,
+  resolution: TreeTextureResolution = 'hero',
+): LeafSprayTextureData {
+  const spray = bakeLeafSpray(
+    seed ^ 0x5f3759df, species, variant, leafCardSize(resolution),
+  )
+  return {
+    ...spray,
+    mipmaps: {
+      albedo: buildCutoutMipmaps(
+        spray.albedo, spray.size, 'srgb-cutout', LEAF_ALPHA_TEST,
+      ),
+      normal: buildCutoutMipmaps(
+        spray.normal, spray.size, 'normal-cutout', LEAF_ALPHA_TEST,
+      ),
+      roughness: buildCutoutMipmaps(
+        spray.roughness, spray.size, 'linear-cutout', LEAF_ALPHA_TEST,
+      ),
+    },
+  }
+}
+
 /** CPU-only half of the bake. Safe to call inside a dedicated worker. */
 export function bakeProceduralTreeTextureData(
   species: TreeSpecies,
   seed: number,
   resolution: TreeTextureResolution = 'hero',
 ): ProceduralTreeTextureData {
-  const forest = resolution === 'forest'
-  const bark = bakeBarkMaps(
-    seed,
-    species,
-    forest ? 1024 : 2048,
-    forest ? 2048 : 4096,
-  )
-  const leafCardSize = forest ? FOREST_LEAF_CARD_SIZE : HERO_LEAF_CARD_SIZE
+  const bark = bakeBarkTextureData(species, seed, resolution)
   const leafCards: LeafSprayTextureData[] = []
   for (let variant = 0; variant < LEAF_CARD_VARIANTS; variant += 1) {
-    const spray = bakeLeafSpray(
-      seed ^ 0x5f3759df, species, variant, leafCardSize,
-    )
-    leafCards.push({
-      ...spray,
-      mipmaps: {
-        albedo: buildCutoutMipmaps(
-          spray.albedo, spray.size, 'srgb-cutout', LEAF_ALPHA_TEST,
-        ),
-        normal: buildCutoutMipmaps(
-          spray.normal, spray.size, 'normal-cutout', LEAF_ALPHA_TEST,
-        ),
-        roughness: buildCutoutMipmaps(
-          spray.roughness, spray.size, 'linear-cutout', LEAF_ALPHA_TEST,
-        ),
-      },
-    })
+    leafCards.push(bakeLeafCardTextureData(species, seed, variant, resolution))
   }
   return { bark, leafCards }
 }
@@ -176,6 +213,7 @@ export function createProceduralTreeTextures(
     ),
     barkNormalScale: data.bark.normalScale,
     barkProjection: data.bark.projection,
+    barkMossiness: data.bark.mossiness,
     barkRoughnessMap: makeTexture(
       data.bark.roughness, data.bark.width, data.bark.height,
       'bark ambient occlusion + roughness', false, true,

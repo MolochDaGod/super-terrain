@@ -24,6 +24,7 @@ import {
 import { bloom } from 'three/addons/tsl/display/BloomNode.js'
 import { smaa } from 'three/addons/tsl/display/SMAANode.js'
 import type { TerrainRenderMode } from '../renderModes'
+import { trackGpuCompilation } from '../gpuResourceRetirement'
 import { treeAtmosphericHaze } from '../../../tree/rendering/treeAtmosphericHaze'
 import { volumetricValleyFog } from './volumetricValleyFog'
 
@@ -86,33 +87,70 @@ const terrainGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
 })
 
 /**
- * A restrained foliage grade. The terrain look deliberately pushes warm rock
- * and saturated alpine greens; using it on an isolated oak made the canopy
- * radioactive. This keeps AgX's highlight headroom, adds a photographic toe,
- * cools open-sky shade and warms only the upper values.
+ * The forest-interior grade.
+ *
+ * A photograph taken inside a stand is not a landscape with trees in it, and
+ * the two want opposite things from a curve. The landscape grade protects a
+ * sky several stops above the ground and keeps shade cool and blue, because
+ * open shade *is* lit by blue sky. Under a canopy almost nothing is: the fill
+ * has been filtered through leaves or bounced off brown litter, so the deepest
+ * parts of a forest reference are warm and dark, its greens are the most
+ * saturated thing in frame, and the few sky slivers are simply blown.
+ *
+ * So this pushes contrast hard, keeps a small toe lift so the darks stay
+ * readable rather than clipping to black, warms the shadows instead of cooling
+ * them, and recovers chroma preferentially where the frame is already green —
+ * a flat saturation lift would take the litter and the bark along with it and
+ * turn the floor orange.
  */
 const treeGrade = /*@__PURE__*/ Fn(([colour]: [any]) => {
   const rgb = colour.rgb
-  const curved = rgb.mul(rgb).mul(3).sub(rgb.mul(rgb).mul(rgb).mul(2))
-  const contrasted = mix(curved, rgb, float(0.47))
-  const grey = luminance(contrasted)
-  // Restore a little healthy daylight chroma after AgX without returning to
-  // the original electric-green foliage. Source albedo remains responsible
-  // for the palette; this is only a gentle display-referred recovery.
-  const saturated = mix(vec3(grey), contrasted, float(1.065))
-  const split = smoothstep(0.14, 0.76, grey)
+  // Contrast on luminance, not per channel.
+  //
+  // A per-channel S-curve exaggerates whatever imbalance a pixel already has:
+  // it lifts the strong channel and crushes the weak one, so every colour
+  // slides toward the nearest primary as contrast goes up. On a forest frame
+  // that meant blue was pushed to roughly half of red across bark, litter and
+  // canopy alike, and the whole image came back khaki however the lights were
+  // balanced. Scaling the triplet by the curve's effect on its own luminance
+  // gives the same contrast and leaves the hue where the lighting put it.
+  const grey = luminance(rgb).max(float(0.0001)).toVar('treeGradeLuma')
+  const curved = grey.mul(grey).mul(3).sub(grey.mul(grey).mul(grey).mul(2))
+  const contrastGrey = mix(curved, grey, float(0.26))
+  const contrasted = rgb.mul(contrastGrey.div(grey)) as any
+
+  // Chroma recovery, weighted toward the greens. `leafiness` is how much of
+  // this pixel's colour is green over the mean of the other two primaries,
+  // which is high on moss and foliage and near zero on bark, litter and sky.
+  const leafiness = smoothstep(
+    0.0,
+    0.16,
+    contrasted.g.sub(contrasted.r.add(contrasted.b).mul(0.5)),
+  )
+  const saturation = mix(float(1.05), float(1.2), leafiness)
+  const saturated = mix(vec3(contrastGrey), contrasted, saturation)
+
+  // Split tone. Both ends are warm — the cool end of a forest interior is the
+  // canopy light itself, not its shade — but the shadows carry the litter's
+  // red and the highlights roll toward a bleached cream as they clip.
+  const split = smoothstep(0.05, 0.62, contrastGrey)
   const toned = saturated.mul(mix(
-    vec3(0.982, 0.998, 1.018),
-    vec3(1.04, 1.012, 0.972),
+    vec3(1.012, 0.997, 0.978),
+    vec3(1.022, 1.0, 0.962),
     split,
   ))
-  const lifted = toned.add(smoothstep(0.1, 0, grey).mul(0.008))
+  // A small toe lift. Photographic blacks are never zero, and an interior with
+  // clipped shadows loses the trunk separation that carries the depth.
+  const lifted = toned.add(smoothstep(0.16, 0, contrastGrey).mul(0.014))
+
+  // A deeper vignette than the landscape's. A closed canopy genuinely is
+  // darker at the frame edge, and it is what keeps the eye in the clearing.
   const lens = uv().sub(0.5)
   const radius = lens.x.mul(lens.x)
     .mul(0.82)
     .add(lens.y.mul(lens.y).mul(1.08))
-  const vignette = smoothstep(0.18, 0.55, radius)
-  const vignetted = lifted.mul(mix(float(1), float(0.88), vignette))
+  const vignette = smoothstep(0.12, 0.62, radius)
+  const vignetted = lifted.mul(mix(float(1), float(0.84), vignette))
   return vec4(vignetted.clamp(0, 1), colour.a)
 })
 
@@ -252,6 +290,22 @@ async function warmSceneObject(
   scene: Scene,
   camera: Camera,
 ): Promise<void> {
+  // A compile keeps using the geometries and materials it captured until it
+  // resolves, so deferred disposal has to wait for it. Destroying a buffer
+  // that is still in the captured work list puts a dead handle back into the
+  // backend's attribute cache and every later frame fails validation.
+  return trackGpuCompilation(() => compileSceneObject(
+    renderer, scenePass, object, scene, camera,
+  ))
+}
+
+async function compileSceneObject(
+  renderer: Renderer,
+  scenePass: any,
+  object: Object3D,
+  scene: Scene,
+  camera: Camera,
+): Promise<void> {
   const previousTarget = renderer.getRenderTarget()
   const previousMrt = renderer.getMRT()
   const renderables: Object3D[] = []
@@ -288,6 +342,17 @@ async function warmSceneObject(
 }
 
 async function warmRenderPipeline(
+  renderer: Renderer,
+  scenePass: any,
+  pipeline: RenderPipeline,
+  bloomNode?: unknown,
+): Promise<void> {
+  return trackGpuCompilation(
+    () => compileRenderPipeline(renderer, scenePass, pipeline, bloomNode),
+  )
+}
+
+async function compileRenderPipeline(
   renderer: Renderer,
   scenePass: any,
   pipeline: RenderPipeline,

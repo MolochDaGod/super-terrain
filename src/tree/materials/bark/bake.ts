@@ -5,7 +5,7 @@ import { bakeBarkFields, barkRelief } from './fields'
 import { packPalmBarkAlbedo } from './palmAlbedo'
 import { packPalmRingAlbedo } from './palmRingAlbedo'
 import { barkProfileFor } from './profiles'
-import type { BarkMaps } from './types'
+import type { BarkMaps, BarkProfile } from './types'
 
 /**
  * A 1.6-metre tile at this width is about 0.8mm per texel, which resolves cork
@@ -19,6 +19,30 @@ import type { BarkMaps } from './types'
  */
 const BARK_WIDTH = 2048
 const BARK_HEIGHT = 4096
+
+/**
+ * How much ground-level moss a structure family carries by default.
+ *
+ * Keyed off the structure rather than the species so a new species inherits a
+ * sane answer: the plated and fissured hardwood barks of a wet temperate
+ * forest hold a colony, smooth and papery barks shed it, and nothing in the
+ * palm or desert families ever grows one.
+ */
+function mossinessForStructure(structure: BarkProfile['structure']): number {
+  switch (structure) {
+    case 'palm-rings':
+    case 'palm-boots':
+      return 0
+    case 'papery-strips':
+      return 0.34
+    // A smooth bark sheds flaking colonies but holds an algal and moss film
+    // better than a plated one, and beech is the species this exists for.
+    case 'mottled-smooth':
+      return 0.62
+    default:
+      return 0.85
+  }
+}
 
 /**
  * Bakes a deterministic tiling PBR bark set.
@@ -66,5 +90,6 @@ export function bakeBarkMaps(
     height,
     normalScale: profile.runtimeNormalScale ?? 0.12,
     projection: profile.projection ?? 'world-triplanar',
+    mossiness: profile.mossiness ?? mossinessForStructure(profile.structure),
   }
 }

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import { OrbitControls } from '@react-three/drei'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Euler, MathUtils, Plane, Vector2, Vector3 } from 'three/webgpu'
@@ -16,8 +23,9 @@ import {
   TreeForestAssetView,
   type ForestTreeInstance,
 } from './TreeAssetView'
-import type { ProceduralTreeAsset, TreeLodLevel } from './generator/types'
+import type { ProceduralTreeAsset, TreeLodLevel, TreeSpecies } from './generator/types'
 import { preloadProceduralTreeTextures } from './materials/proceduralTreeTextureClient'
+import { treeMaterialSeed } from './materials/proceduralTreeTextures'
 import { TreeMaterialPrewarmer } from './materials/TreeMaterialPrewarmer'
 import { DEFAULT_TREE_ENVIRONMENT } from './generator/types'
 import { generateTreeAsset } from './treeGeneratorClient'
@@ -28,9 +36,15 @@ import {
   type TreePrototype,
 } from './TreeEditorStore'
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
+import { gpuRetirementBacklog } from '../terrain/rendering/gpuResourceRetirement'
 
 const FLY_SPEED = 12
 const FLY_BOOST_SPEED = 80
+/**
+ * Geometry compiles stay serialised. Each one saturates a core for about a
+ * second and the texture pool already owns the rest of them; running several
+ * only moves the same work around while making the first tree appear later.
+ */
 const MAX_CONCURRENT_TREE_COMPILERS = 1
 
 /** Forest authoring scene: prototypes compile once and placements render in batches. */
@@ -74,9 +88,16 @@ export function TreeScene({
 
   return (
     <>
-      <TerrainEnvironment mode="full" config={terrain.config} updatePriority={0} />
-      <FoliageLayer store={foliage} warmup={warmupObject} />
+      <TerrainEnvironment
+        mode="full"
+        config={terrain.config}
+        look="forest"
+        updatePriority={0}
+      />
+      <FoliageLayer store={foliage} floor="forest" warmup={warmupObject} />
       <TreeMaterialPrewarmer warmup={warmupObject} />
+
+      <ForestMaterialPreloader prototypes={prototypes} />
 
       {compilingPrototypes.map((prototype) => (
         <PrototypeCompiler key={prototype.id} prototype={prototype} store={store} />
@@ -88,16 +109,37 @@ export function TreeScene({
           (placement) => placement.prototypeId === prototype.id,
         )
         if (placements.length === 0) return null
+        const asset = prototype.asset
+        const revision = prototype.compiledRevision ?? 0
+        // Deadfall renders from the same compiled asset as the stems it fell
+        // from — one prototype, one bake, one set of pipelines — but without
+        // its canopy: a log that has been on the floor long enough to grow
+        // moss has not kept its leaves.
+        const standing = placements.filter((placement) => !placement.tilt)
+        const fallen = placements.filter((placement) => placement.tilt)
         return (
-          <DistanceLodForest
-            key={`${prototype.id}:${prototype.compiledRevision ?? 0}`}
-            asset={prototype.asset}
-            instances={placements}
-            lodBias={snapshot.lod}
-            showFoliage={snapshot.showFoliage}
-            selectedId={snapshot.selectedPlacementId}
-            warmup={warmupObject}
-          />
+          <Fragment key={`${prototype.id}:${revision}`}>
+            {standing.length > 0 && (
+              <DistanceLodForest
+                asset={asset}
+                instances={standing}
+                lodBias={snapshot.lod}
+                showFoliage={snapshot.showFoliage}
+                selectedId={snapshot.selectedPlacementId}
+                warmup={warmupObject}
+              />
+            )}
+            {fallen.length > 0 && (
+              <DistanceLodForest
+                asset={asset}
+                instances={fallen}
+                lodBias={snapshot.lod}
+                showFoliage={false}
+                selectedId={snapshot.selectedPlacementId}
+                warmup={warmupObject}
+              />
+            )}
+          </Fragment>
         )
       })}
 
@@ -112,6 +154,7 @@ export function TreeScene({
             lodLevel={snapshot.lod}
             debugMode={snapshot.debugMode}
             showFoliage={false}
+            resolution="forest"
           />
         </group>
       )}
@@ -223,7 +266,8 @@ function sameForestInstances(
       tree.position[1] === candidate.position[1] &&
       tree.position[2] === candidate.position[2] &&
       tree.rotation === candidate.rotation &&
-      tree.scale === candidate.scale
+      tree.scale === candidate.scale &&
+      tree.tilt === candidate.tilt
   })
 }
 
@@ -270,6 +314,43 @@ function classifyForestLods(
     groups[level].push(instance)
   }
   return groups
+}
+
+/**
+ * Starts every distinct material bake a forest needs the moment its layout
+ * exists.
+ *
+ * Geometry compiles are serialised, and material bakes used to ride along with
+ * them: a forest waited for its fourth material until its fourth prototype had
+ * finished meshing. The bakes share no state and the pool already spreads each
+ * one across cores, so queueing them all up front turns four sequential bakes
+ * into one wave. Materials are keyed by bark/foliage profile, so the duplicate
+ * species and variations in a preset all collapse onto the same job.
+ */
+function ForestMaterialPreloader({
+  prototypes,
+}: {
+  prototypes: readonly TreePrototype[]
+}) {
+  const speciesKey = [...new Set(prototypes.map((prototype) => prototype.species))]
+    .sort()
+    .join(',')
+  useEffect(() => {
+    if (speciesKey.length === 0) return
+    const abort = new AbortController()
+    for (const species of speciesKey.split(',') as TreeSpecies[]) {
+      void preloadProceduralTreeTextures(species, treeMaterialSeed(species), {
+        resolution: 'forest',
+        signal: abort.signal,
+      }).catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          console.error('Forest material preload failed', error)
+        }
+      })
+    }
+    return () => abort.abort()
+  }, [speciesKey])
+  return null
 }
 
 function PrototypeCompiler({
@@ -598,7 +679,7 @@ function TreeDevHandle({ store }: { store: TreeEditorStore }) {
   useEffect(() => {
     if (!import.meta.env.DEV) return
     const globals = globalThis as Record<string, unknown>
-    globals.__meshtree = { store, gl, scene, camera }
+    globals.__meshtree = { store, gl, scene, camera, gpuRetirementBacklog }
     return () => { delete globals.__meshtree }
   }, [camera, gl, scene, store])
   return null

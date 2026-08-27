@@ -63,6 +63,48 @@ export const DEFAULT_FOLIAGE_WIND: FoliageWindSettings = {
  * culling, not for painting — so none of this can stall the frame waiting on
  * the device.
  */
+/** Which ground cover the layer opens on. */
+export type FoliageFloor = 'meadow' | 'forest'
+
+type FloorSeed = [string, number, number, number, number]
+
+const FLOOR_SEEDS: Record<FoliageFloor, readonly FloorSeed[]> = {
+  meadow: [
+    ['tussock', -46, 28, 52, 0.55],
+    ['tussock', 63, -71, 44, 0.5],
+    ['dry-steppe', 78, 62, 66, 0.62],
+    ['dry-steppe', -95, -40, 58, 0.5],
+    ['wildflower', -18, -64, 40, 0.55],
+    ['clover-mat', 24, 46, 34, 0.5],
+    ['woodland-fern', -84, 88, 38, 0.6],
+    ['sedge-reed', 108, -18, 30, 0.58],
+    ['broadleaf-weed', 6, 96, 32, 0.45],
+  ],
+  // Colonies, not a sward: overlapping fern stands with low-growing mats
+  // between them and bare litter everywhere else. Flows stay well under one
+  // so the patches keep soft, incomplete edges.
+  forest: [
+    ['woodland-fern', -14, 9, 17, 0.55],
+    ['woodland-fern', 21, -13, 14, 0.5],
+    ['woodland-fern', -3, -28, 12, 0.44],
+    ['woodland-fern', 33, 24, 15, 0.48],
+    ['woodland-fern', -34, -6, 13, 0.42],
+    ['woodland-fern', 41, -6, 11, 0.36],
+    ['woodland-fern', -40, 33, 12, 0.38],
+    // The moss beds. A hundred-millimetre mat is the closest thing in the
+    // species table to sphagnum, and it is the element that makes a wet
+    // forest floor read as one: broad soft green sheets running between the
+    // trunks and up over everything lying on the ground, with bare litter
+    // showing through wherever the beds have not closed.
+    ['clover-mat', 2, 4, 22, 0.34],
+    ['clover-mat', -22, 24, 18, 0.3],
+    ['clover-mat', 26, -27, 19, 0.32],
+    ['clover-mat', 14, 34, 15, 0.26],
+    ['clover-mat', -30, -20, 16, 0.3],
+    ['clover-mat', 38, 12, 13, 0.24],
+  ],
+}
+
 export class FoliageSystem {
   readonly group = new Group()
   readonly mask = new FoliageMaskField()
@@ -119,29 +161,28 @@ export class FoliageSystem {
   }
 
   /**
-   * A starting meadow, so the workspace opens on ground rather than on gravel.
+   * A starting ground cover, so the workspace opens on ground rather than on
+   * gravel.
    *
    * Laid down as real brush strokes through the same kernel the toolbar uses,
    * which means the competition between species applies and the result is a
    * genuine mix — not a uniform field of one type with three others stamped
    * over it.
+   *
+   * `meadow` fills first and scatters over the fill, because open pasture is
+   * continuous. `forest` never fills: the floor of a closed stand is mostly
+   * bare litter, and the cover on it is colonies — a fern stand here, a moss
+   * mat over a rotting log there — with dark humus between them. Filling it
+   * and then darkening the result gives a lawn in the shade, which is exactly
+   * the tell this avoids.
    */
-  seed(renderer: Renderer): void {
+  seed(renderer: Renderer, floor: FoliageFloor = 'meadow'): void {
     if (this.seeded || this.disposed) return
     this.seeded = true
-    this.mask.fill(renderer, foliageSpeciesIndex('meadow-fescue'), 'paint')
-    const scatter: [string, number, number, number, number][] = [
-      ['tussock', -46, 28, 52, 0.55],
-      ['tussock', 63, -71, 44, 0.5],
-      ['dry-steppe', 78, 62, 66, 0.62],
-      ['dry-steppe', -95, -40, 58, 0.5],
-      ['wildflower', -18, -64, 40, 0.55],
-      ['clover-mat', 24, 46, 34, 0.5],
-      ['woodland-fern', -84, 88, 38, 0.6],
-      ['sedge-reed', 108, -18, 30, 0.58],
-      ['broadleaf-weed', 6, 96, 32, 0.45],
-    ]
-    for (const [species, x, z, radius, flow] of scatter) {
+    if (floor === 'meadow') {
+      this.mask.fill(renderer, foliageSpeciesIndex('meadow-fescue'), 'paint')
+    }
+    for (const [species, x, z, radius, flow] of FLOOR_SEEDS[floor]) {
       this.mask.paint(renderer, {
         fromX: x,
         fromZ: z,

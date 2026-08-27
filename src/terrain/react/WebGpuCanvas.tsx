@@ -7,7 +7,6 @@ import {
 } from 'three/webgpu'
 import { installClusteredWebgpuLighting } from '@workspace/clustered-webgpu-lighting'
 import { currentViewUrlState } from './viewUrlState'
-import { configureGpuResourceRetirement } from '../rendering/gpuResourceRetirement'
 
 interface WebGpuCanvasProps extends PropsWithChildren {
   dpr: number
@@ -70,7 +69,6 @@ async function createWebGpuRenderer(canvas: HTMLCanvasElement, dpr: number) {
   renderer.toneMappingExposure = 1.03
   sizeRendererToCanvas(renderer, canvas, dpr)
   await renderer.init()
-  configureGpuResourceRetirement(renderer)
   // Three's native WebGPU light path is the shipped default. In this scene it
   // preserves the real point-light energy inside the two CSG chambers and is
   // just as fast as the clustered path at the current light count. Keep the

@@ -181,6 +181,7 @@ function createPlaceholderTextures(): ProceduralTreeTextures {
     barkNormalMap,
     barkNormalScale: 0.12,
     barkProjection: 'world-triplanar',
+    barkMossiness: 0.85,
     barkRoughnessMap,
     leafCards: [{ map: leafMap, normalMap: leafNormalMap, surfaceMap: leafSurfaceMap }],
     leafAtlas: {

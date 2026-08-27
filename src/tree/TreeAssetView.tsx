@@ -10,6 +10,7 @@ import type { BVHOptions } from 'three-mesh-bvh'
 import {
   BufferAttribute,
   BufferGeometry,
+  Euler,
   Group,
   IcosahedronGeometry,
   InstancedBufferAttribute,
@@ -38,7 +39,10 @@ import type {
   TreeVec3,
 } from './generator/types'
 import type { TreeDebugMode } from './TreeEditorStore'
-import { type ProceduralTreeTextures } from './materials/proceduralTreeTextures'
+import {
+  type ProceduralTreeTextures,
+  type TreeTextureResolution,
+} from './materials/proceduralTreeTextures'
 import { bakeProceduralTreeTexturesAsync } from './materials/proceduralTreeTextureClient'
 import { createFoliageMaterial, createFrondMaterial } from './materials/leafMaterial'
 import { createLeafCardGeometry, splitFoliageByVariant } from './materials/leafCardGeometry'
@@ -57,11 +61,35 @@ function disposeAfterGpuSubmission(dispose: () => void): void {
   retireGpuResource(dispose)
 }
 
+/**
+ * Forces a new `Mesh` whenever the geometry behind it changes.
+ *
+ * Three registers one dispose listener per geometry, and that listener deletes
+ * the attributes of whatever geometry its render object points at *now* — not
+ * the ones the disposed geometry owned. Swapping `geometry` on a live mesh and
+ * disposing the previous geometry afterwards therefore destroys the buffers of
+ * the replacement while it is still being drawn, and the backend keeps handing
+ * the dead handle back for interleaved attributes, so every subsequent frame
+ * fails validation. A geometry-keyed mesh never accumulates that second
+ * geometry, which keeps disposal pointed at its own buffers.
+ */
+function geometryKey(geometry: BufferGeometry): string {
+  return `geometry-${geometry.id}`
+}
+
 export interface TreeAssetViewProps {
   asset: ProceduralTreeAsset
   lodLevel: TreeLodLevel
   debugMode: TreeDebugMode
   showFoliage: boolean
+  /**
+   * Hero maps are four times the bake of the forest tier and are worth it for
+   * a single tree filling the viewport. Inside a forest they are not: the
+   * selected tree is the same size as its neighbours, so asking for them there
+   * bought nothing visible and stalled the workspace behind a second complete
+   * bake of every map.
+   */
+  resolution?: TreeTextureResolution
   /** Fires after textures, materials, meshes and instance buffers are committed. */
   onRenderResourcesReady?: () => void
   onRenderResourcesError?: (error: unknown) => void
@@ -72,6 +100,8 @@ export interface ForestTreeInstance {
   position: readonly [number, number, number]
   rotation: number
   scale: number
+  /** Pitch in radians, applied after the yaw. Deadfall lies near a right angle. */
+  tilt?: number
 }
 
 export function TreeAssetView({
@@ -79,6 +109,7 @@ export function TreeAssetView({
   lodLevel,
   debugMode,
   showFoliage,
+  resolution = 'hero',
   onRenderResourcesReady,
   onRenderResourcesError,
 }: TreeAssetViewProps) {
@@ -92,7 +123,7 @@ export function TreeAssetView({
     void bakeProceduralTreeTexturesAsync(
       asset.parameters.species,
       asset.parameters.seed,
-      { signal: abort.signal },
+      { signal: abort.signal, resolution },
     ).then(
       (created) => {
         if (abort.signal.aborted) {
@@ -107,7 +138,7 @@ export function TreeAssetView({
       },
     )
     return () => abort.abort()
-  }, [asset.parameters.seed, asset.parameters.species])
+  }, [asset.parameters.seed, asset.parameters.species, resolution])
 
   useEffect(() => () => {
     if (textures) disposeAfterGpuSubmission(() => textures.dispose())
@@ -228,10 +259,22 @@ function ReadyTreeForestAssetView({
     () => () => disposeAfterGpuSubmission(() => materialLease.release()),
     [materialLease],
   )
+  // Deliberately not keyed on the instance buffers.
+  //
+  // A pipeline is keyed by its material and its vertex layout, and a distance
+  // reclassification changes neither: it hands the same batch a longer or
+  // shorter transform buffer. Re-warming on every buffer swap meant that
+  // walking through a stand hid every tree that crossed a LOD boundary and
+  // held it hidden for the whole of a `compileAsync` over hundreds of
+  // instances — a forest that blinks out whenever the camera moves, and the
+  // reason an eye-level review frame could come back as bare ground.
   useEffect(() => {
     const object = group.current
     setReady(false)
-    if (!object || !warmup) return
+    if (!object || !warmup) {
+      setReady(true)
+      return
+    }
     let cancelled = false
     void warmup(object).then(
       () => {
@@ -246,7 +289,7 @@ function ReadyTreeForestAssetView({
       },
     )
     return () => { cancelled = true }
-  }, [forestFoliage, forestFruits, materialLease, warmup, woodGeometry])
+  }, [materialLease, warmup, woodGeometry])
 
   return (
     <group
@@ -468,10 +511,17 @@ const PLACEMENT_AXIS = new Vector3(0, 1, 0)
 const PLACEMENT_POSITION = new Vector3()
 const PLACEMENT_QUATERNION = new Quaternion()
 const PLACEMENT_SCALE = new Vector3()
+// YXZ: the yaw aims the stem, then the pitch tips it over in that direction.
+const PLACEMENT_EULER = new Euler(0, 0, 0, 'YXZ')
 
 function placementMatrix(instance: ForestTreeInstance, target: Matrix4): Matrix4 {
   PLACEMENT_POSITION.fromArray(instance.position)
-  PLACEMENT_QUATERNION.setFromAxisAngle(PLACEMENT_AXIS, instance.rotation)
+  if (instance.tilt) {
+    PLACEMENT_EULER.set(instance.tilt, instance.rotation, 0)
+    PLACEMENT_QUATERNION.setFromEuler(PLACEMENT_EULER)
+  } else {
+    PLACEMENT_QUATERNION.setFromAxisAngle(PLACEMENT_AXIS, instance.rotation)
+  }
   PLACEMENT_SCALE.setScalar(instance.scale)
   return target.compose(PLACEMENT_POSITION, PLACEMENT_QUATERNION, PLACEMENT_SCALE)
 }
@@ -558,6 +608,7 @@ function ReadyTreeAssetView({
     <group name="procedural-tree-asset">
       {surfaceVisible && (
         <mesh
+          key={geometryKey(woodGeometry)}
           name="adaptive-woody-topology"
           geometry={woodGeometry}
           material={debugMode === 'topology' ? topologyMaterial : woodMaterial}
@@ -566,7 +617,11 @@ function ReadyTreeAssetView({
         />
       )}
       {debugMode !== 'surface' && debugMode !== 'topology' && (
-        <lineSegments geometry={debugGeometry} material={debugMaterial} />
+        <lineSegments
+          key={geometryKey(debugGeometry)}
+          geometry={debugGeometry}
+          material={debugMaterial}
+        />
       )}
       {debugMode === 'contacts' && <ContactMarkers graph={asset.graph} />}
       {showFoliage && debugMode === 'surface' && (
@@ -611,6 +666,7 @@ function FruitInstances({
   if (data.count === 0) return null
   return (
     <mesh
+      key={geometryKey(geometry)}
       name="fruit-clusters"
       geometry={geometry}
       material={material}
@@ -742,6 +798,7 @@ function FoliageAtlasBatch({
   )
   return (
     <mesh
+      key={geometryKey(geometry)}
       name={name}
       geometry={geometry}
       material={material}
@@ -792,6 +849,7 @@ function FoliageBatch({
 
   return (
     <mesh
+      key={geometryKey(geometry)}
       name={name}
       geometry={geometry}
       material={material}

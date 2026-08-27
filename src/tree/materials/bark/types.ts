@@ -8,6 +8,12 @@ export interface BarkMaps {
   /** Runtime tangent-normal amplitude after the baked slope field. */
   normalScale: number
   /**
+   * How readily this bark is colonised at ground level, 0..1. A structural
+   * property of the species rather than of the frame: a wet-forest hardwood
+   * is green to head height and a desert succulent never is.
+   */
+  mossiness: number
+  /**
    * Coordinate domain used by every runtime channel. Palm leaf-base scars are
    * directional anatomy and must follow the swept bole UVs; isotropic plated
    * bark can use the seamless world projection needed across fork unions.
@@ -74,6 +80,11 @@ export interface BarkProfile {
   /** Species-specific material amplitude; bark anatomies need different relief. */
   runtimeNormalScale?: number
   projection?: 'world-triplanar' | 'axial-uv'
+  /**
+   * Overrides the structure's default ground-level moss colonisation, 0..1.
+   * See `mossinessForStructure`.
+   */
+  mossiness?: number
   /** Profile-level weathering controls; omitted values preserve the shared defaults. */
   /**
    * How heavily the bole carries healed branch scars. A veteran hardwood is

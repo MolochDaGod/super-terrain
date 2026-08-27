@@ -1008,10 +1008,14 @@ export const TREE_SPECIES_PRESETS: Record<TreeSpecies, TreeParameters> = {
     ...DEFAULT_TREE_PARAMETERS, seed: 33049, species: 'european-beech',
     bolePlan: 'single', axisForm: 'straight', trunkDamage: 'intact',
     crownForm: 'full', rootForm: 'buttressed', twist: 0.18,
-    fluting: 0.24, rootRelief: 0.46, rootSurfacings: 1, lostLimbs: 1,
+    // A beech's base is a buttress — a flare that widens into the ground —
+    // not a spray of surface roots. The old exposure and spread ran eight
+    // roots out across the litter and rendered as tentacles, which is the
+    // one thing at eye level in a stand that nobody reads as a tree.
+    fluting: 0.32, rootRelief: 0.3, rootSurfacings: 0, lostLimbs: 1,
     lean: 2, sinuosity: 0.12, height: 30, crownRadius: 10,
     trunkRadius: 0.86, age: 0.82, gnarl: 0.18, branchCount: 8,
-    rootCount: 8, rootSpread: 8, rootExposure: 0.42, foliageDensity: 1.38,
+    rootCount: 7, rootSpread: 5, rootExposure: 0.16, foliageDensity: 1.55,
   },
   'silver-birch': {
     ...DEFAULT_TREE_PARAMETERS, seed: 77419, species: 'silver-birch',

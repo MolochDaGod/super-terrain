@@ -1,17 +1,12 @@
 import type { TreeSpecies } from '../generator/types'
 import {
-  bakeProceduralTreeTextureData,
   createProceduralTreeTextures,
   treeMaterialKey,
   treeMaterialSeed,
-  type ProceduralTreeTextureData,
   type ProceduralTreeTextures,
   type TreeTextureResolution,
 } from './proceduralTreeTextures'
-import type {
-  ProceduralTreeTextureBakeReply,
-  ProceduralTreeTextureBakeRequest,
-} from './proceduralTreeTexture.worker'
+import { bakeTreeTexturesOnPool } from './textureBakePool'
 
 export interface ProceduralTreeTextureBakeOptions {
   signal?: AbortSignal
@@ -29,12 +24,17 @@ interface CacheEntry {
 }
 
 /**
- * Two complete texture sets cover the current tree and one undo/redo neighbour
- * without retaining an unbounded payload for every seed visited in the editor.
- * Callers receive reference-counted leases; staged and presented trees can use
- * the same GPU resources while a rebuild is being swapped into view.
+ * Enough complete sets for every material a forest preset mixes, plus a spare
+ * for the tree the editor was on before it.
+ *
+ * A cache that only held two was the single most expensive thing about
+ * planting a forest: the presets mix up to four bark/foliage profiles, each
+ * material is preloaded and released while its prototype compiles, and the
+ * third preload evicted the first — so the set was baked again from scratch
+ * the moment its trees mounted. Each retained set is roughly forty megabytes
+ * at forest resolution, which is the honest cost of not baking it twice.
  */
-const CACHE_LIMIT = 2
+const CACHE_LIMIT = 6
 const textureCache = new Map<string, CacheEntry>()
 let useClock = 0
 
@@ -43,8 +43,8 @@ let useClock = 0
  *
  * The returned texture set is exclusively owned by the caller, which must
  * invoke `dispose()` on replacement/unmount. Aborting rejects only this
- * consumer; when the last consumer leaves a pending entry its worker is also
- * terminated, so rapid seed edits do not leave old 14-second bakes running.
+ * consumer; when the last consumer leaves a pending entry the bake is
+ * cancelled too, so rapid seed edits do not queue work nobody is waiting for.
  */
 export async function bakeProceduralTreeTexturesAsync(
   species: TreeSpecies,
@@ -131,7 +131,7 @@ function createEntry(
   seed: number,
   resolution: TreeTextureResolution,
 ): CacheEntry {
-  const job = startBake(species, seed, resolution)
+  const job = bakeTreeTexturesOnPool(species, seed, resolution)
   const entry: CacheEntry = {
     key,
     promise: undefined!,
@@ -156,77 +156,6 @@ function createEntry(
     },
   )
   return entry
-}
-
-function startBake(
-  species: TreeSpecies,
-  seed: number,
-  resolution: TreeTextureResolution,
-): { promise: Promise<ProceduralTreeTextureData>; cancel(): void } {
-  if (typeof Worker === 'undefined') return bakeWithoutWorker(species, seed, resolution)
-
-  const worker = new Worker(
-    new URL('./proceduralTreeTexture.worker.ts', import.meta.url),
-    { type: 'module', name: 'procedural-tree-texture-baker' },
-  )
-  let settled = false
-  let rejectJob: (reason: unknown) => void = () => undefined
-  const finish = (callback: () => void) => {
-    if (settled) return
-    settled = true
-    worker.terminate()
-    callback()
-  }
-  const promise = new Promise<ProceduralTreeTextureData>((resolve, reject) => {
-    rejectJob = reject
-    worker.onmessage = (event: MessageEvent<ProceduralTreeTextureBakeReply>) => {
-      const reply = event.data
-      if (reply.kind === 'error') {
-        finish(() => reject(new Error(reply.error)))
-      } else {
-        finish(() => resolve(reply.data))
-      }
-    }
-    worker.onerror = (event) => {
-      finish(() => reject(new Error(event.message || 'Tree texture bake worker failed')))
-    }
-    worker.onmessageerror = () => {
-      finish(() => reject(new Error('Tree texture bake worker returned unreadable data')))
-    }
-    const request: ProceduralTreeTextureBakeRequest = { species, seed, resolution }
-    worker.postMessage(request)
-  })
-  return {
-    promise,
-    cancel: () => finish(() => rejectJob(abortError())),
-  }
-}
-
-function bakeWithoutWorker(
-  species: TreeSpecies,
-  seed: number,
-  resolution: TreeTextureResolution,
-): { promise: Promise<ProceduralTreeTextureData>; cancel(): void } {
-  let timer = 0
-  let rejectJob: (reason: unknown) => void = () => undefined
-  const promise = new Promise<ProceduralTreeTextureData>((resolve, reject) => {
-    rejectJob = reject
-    // Yield once for SSR/tests and old browsers. The production viewport has
-    // Worker support; this fallback preserves correctness, not responsiveness.
-    timer = globalThis.setTimeout(
-      () => resolve(bakeProceduralTreeTextureData(species, seed, resolution)),
-      0,
-    ) as unknown as number
-  })
-  return {
-    promise,
-    cancel() {
-      if (!timer) return
-      globalThis.clearTimeout(timer)
-      timer = 0
-      rejectJob(abortError())
-    },
-  }
 }
 
 function pruneCache(): void {
@@ -266,6 +195,7 @@ function createTextureLease(
     barkNormalMap: textures.barkNormalMap,
     barkNormalScale: textures.barkNormalScale,
     barkProjection: textures.barkProjection,
+    barkMossiness: textures.barkMossiness,
     barkRoughnessMap: textures.barkRoughnessMap,
     leafCards: textures.leafCards,
     leafAtlas: textures.leafAtlas,

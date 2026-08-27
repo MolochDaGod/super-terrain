@@ -21,7 +21,7 @@ import { cameraPosition, fog, normalize, positionWorld, uniform } from 'three/ts
 import { aerialPerspective, syncSunDirection } from '../full/atmosphere'
 import type { TerrainConfig } from '../../config'
 import type { TerrainRenderMode } from '../renderModes'
-import { DEFAULT_SUN } from './sunPosition'
+import { DEFAULT_SUN, setSunAngles } from './sunPosition'
 import { getTerrainShadowRevision } from './terrainShadowInvalidation'
 
 export interface TerrainEnvironment {
@@ -36,8 +36,19 @@ export interface TerrainEnvironment {
 }
 
 const SKY_SCALE = 45_000
-/** Divides the Preetham dome down into the scene's linear lighting range. */
-const SKY_INTENSITY = 0.18
+
+/**
+ * Which world the lighting is for.
+ *
+ * `terrain` is a kilometre-scale landscape under an open sky: a low sun, a
+ * bright blue hemisphere and cascades reaching the far ridges. `forest` is the
+ * inside of a stand, which is a different lighting problem in every respect —
+ * the sky is a few bright slivers rather than the dominant source, almost all
+ * the fill has been filtered green through leaves or bounced off brown litter,
+ * and the shadow budget belongs in the first fifty metres where the dapples
+ * are, not spread over two kilometres of ridge.
+ */
+export type TerrainEnvironmentLook = 'terrain' | 'forest'
 
 export interface TerrainEnvironmentOptions {
   /** Cascaded shadows. Disable to fall back to one wide shadow frustum. */
@@ -46,6 +57,78 @@ export interface TerrainEnvironmentOptions {
   shadows?: boolean
   /** Lightweight authored backdrop; physical sun and fog still come from the sky model. */
   skyTexture?: Texture
+  look?: TerrainEnvironmentLook
+}
+
+/**
+ * The light rig, as numbers rather than as code.
+ *
+ * Both looks run the same four sources — sun, hemisphere, ambient and a
+ * camera-side fill — so the difference between an open valley and a forest
+ * floor is entirely in this table. Keeping it as data is what makes the two
+ * comparable: every value below has a counterpart to be read against.
+ */
+interface LightRig {
+  sun: { elevation: number; azimuth: number; colour: number; intensity: number }
+  /** Shadow map edge in texels, and how far the cascades reach in metres. */
+  shadow: { mapSize: number; maxFar: number; lightMargin: number; cascades: number }
+  hemisphere: { sky: number; ground: number; intensity: number }
+  ambient: { colour: number; intensity: number }
+  frontFill: { colour: number; intensity: number }
+  sky: {
+    turbidity: number
+    rayleigh: number
+    intensity: number
+    cloudCoverage: number
+    /** The authored cloud panorama. A forest interior has no use for one. */
+    backdrop: boolean
+  }
+}
+
+const LIGHT_RIGS: Record<TerrainEnvironmentLook, LightRig> = {
+  // Late afternoon over open ground: warm raking sun, blue sky bounce.
+  terrain: {
+    sun: { elevation: 14, azimuth: 142, colour: 0xffd0a6, intensity: 4.35 },
+    shadow: { mapSize: 1536, maxFar: 2_200, lightMargin: 800, cascades: 3 },
+    hemisphere: { sky: 0x748ba8, ground: 0x292a2d, intensity: 0.92 },
+    ambient: { colour: 0x303947, intensity: 0.052 },
+    frontFill: { colour: 0x879bb8, intensity: 0.94 },
+    sky: {
+      turbidity: 4.1,
+      rayleigh: 1.12,
+      intensity: 0.18,
+      cloudCoverage: 0.38,
+      backdrop: true,
+    },
+  },
+  // Mid-morning inside a closed stand. The sun is high enough to reach the
+  // floor in patches rather than raking under the canopy, and everything it
+  // misses is lit by leaf-filtered green and litter bounce — which is why the
+  // shadows in a forest photograph are warm brown and not blue. The hemisphere
+  // is a third of the terrain's: an interior that keeps an open-sky fill has
+  // no shadow left to make dapples out of, which is the whole read.
+  forest: {
+    // Lower than noon on purpose. A high sun drops light straight onto the
+    // canopy and almost none of it reaches eye level; the raking morning angle
+    // is what sends light *between* the trunks and gives a stand its lit
+    // mid-ground and its long floor shadows.
+    sun: { elevation: 24, azimuth: 152, colour: 0xffeccb, intensity: 5.2 },
+    shadow: { mapSize: 2048, maxFar: 260, lightMargin: 120, cascades: 3 },
+    hemisphere: { sky: 0x77878a, ground: 0x362e24, intensity: 0.7 },
+    ambient: { colour: 0x2b332f, intensity: 0.1 },
+    frontFill: { colour: 0x86948f, intensity: 0.32 },
+    sky: {
+      turbidity: 5.4,
+      rayleigh: 1.05,
+      // Dimmer than the open-sky rig. Seen from a forest floor the sky is a
+      // handful of small gaps, and at landscape brightness each of them blows
+      // out and pulls the eye off the subject — the frame then reads as a
+      // stand photographed against a light box.
+      intensity: 0.1,
+      cloudCoverage: 0.3,
+      backdrop: false,
+    },
+  },
 }
 
 export function createTerrainEnvironment(
@@ -67,19 +150,25 @@ function createFullEnvironment(
   config: TerrainConfig,
   options: TerrainEnvironmentOptions,
 ): TerrainEnvironment {
+  const rig = LIGHT_RIGS[options.look ?? 'terrain']
+  // The sun is shared state: the sky model, the atmosphere uniforms and the
+  // haze all read it. Setting it from the rig here rather than relying on the
+  // module default is what lets two workspaces have different times of day
+  // without the order they were opened in deciding the result.
+  setSunAngles(rig.sun.elevation, rig.sun.azimuth)
   syncSunDirection()
   const group = new Group()
 
   const sky = new SkyMesh()
   sky.scale.setScalar(SKY_SCALE)
-  sky.turbidity.value = 4.1
-  sky.rayleigh.value = 1.12
+  sky.turbidity.value = rig.sky.turbidity
+  sky.rayleigh.value = rig.sky.rayleigh
   sky.mieCoefficient.value = 0.006
   sky.mieDirectionalG.value = 0.84
   sky.sunPosition.value.copy(DEFAULT_SUN.direction)
   // Cumulus. An empty gradient sky is one of the strongest tells that a frame
   // is synthetic, and clouds also give the eye a scale reference at the horizon.
-  sky.cloudCoverage.value = 0.38
+  sky.cloudCoverage.value = rig.sky.cloudCoverage
   sky.cloudDensity.value = 0.46
   sky.cloudScale.value = 0.00072
   sky.cloudElevation.value = 0.38
@@ -87,22 +176,24 @@ function createFullEnvironment(
   sky.renderOrder = -1000
   // Preetham radiance is authored in its own arbitrary scale; this brings it
   // into the same linear range as the sun-lit ground so neither clips.
-  const skyIntensity = uniform(SKY_INTENSITY)
+  const skyIntensity = uniform(rig.sky.intensity)
   sky.material.colorNode = (sky.material.colorNode as any).mul(skyIntensity)
   group.add(sky)
 
-  const skyBackdrop = options.skyTexture
+  const skyBackdrop = options.skyTexture && rig.sky.backdrop
     ? createCinematicSkyBackdrop(options.skyTexture)
     : undefined
   if (skyBackdrop) group.add(skyBackdrop)
 
-  // A 7-degree sun has lost most of its blue to the long atmospheric path, and
-  // what is left is strong: the reference frame's lit rock is a warm gold at
-  // several times the brightness of its own sky-lit shade.
-  const sun = new DirectionalLight(0xffd0a6, 4.35)
+  // A low sun has lost most of its blue to the long atmospheric path, and what
+  // is left is strong: the terrain reference's lit rock is a warm gold at
+  // several times the brightness of its own sky-lit shade. The forest rig
+  // carries a higher, whiter sun for the same reason in reverse — what reaches
+  // a stand's floor has come almost straight down through the gaps.
+  const sun = new DirectionalLight(rig.sun.colour, rig.sun.intensity)
   sun.position.copy(DEFAULT_SUN.direction).multiplyScalar(2_400)
   sun.castShadow = options.shadows ?? true
-  sun.shadow.mapSize.set(1536, 1536)
+  sun.shadow.mapSize.set(rig.shadow.mapSize, rig.shadow.mapSize)
   sun.shadow.bias = -0.0004
   sun.shadow.normalBias = 0.35
   // The terrain, sun and camera are persistent. Redrawing four 2048² maps
@@ -119,16 +210,18 @@ function createFullEnvironment(
   // which is most of the frame. Underfilling it is what turns a backlit valley
   // into a black cut-out: the reference keeps readable blue-grey texture in
   // every shadow, and this is where that comes from.
-  const skyFill = new HemisphereLight(0x748ba8, 0x292a2d, 0.92)
+  const skyFill = new HemisphereLight(
+    rig.hemisphere.sky, rig.hemisphere.ground, rig.hemisphere.intensity,
+  )
   group.add(skyFill)
-  const ambient = new AmbientLight(0x303947, 0.052)
+  const ambient = new AmbientLight(rig.ambient.colour, rig.ambient.intensity)
   group.add(ambient)
 
   // A real valley receives a directional lobe from the open sky behind the
   // camera, not a uniform ambient wash. This cool, shadowless bounce lets the
   // backlit landmark retain its fracture and grain while the occluded ravines
   // stay dark. Uniformly raising the hemisphere flattened both into grey.
-  const frontFill = new DirectionalLight(0x879bb8, 0.94)
+  const frontFill = new DirectionalLight(rig.frontFill.colour, rig.frontFill.intensity)
   frontFill.castShadow = false
   group.add(frontFill, frontFill.target)
 
@@ -140,10 +233,10 @@ function createFullEnvironment(
   let cascades: CSMShadowNode | undefined
   if (sun.castShadow && (options.cascadedShadows ?? true)) {
     cascades = new CSMShadowNode(sun, {
-      cascades: 3,
-      maxFar: 2_200,
+      cascades: rig.shadow.cascades,
+      maxFar: rig.shadow.maxFar,
       mode: 'practical',
-      lightMargin: 800,
+      lightMargin: rig.shadow.lightMargin,
     })
     sun.shadow.shadowNode = cascades
   } else {

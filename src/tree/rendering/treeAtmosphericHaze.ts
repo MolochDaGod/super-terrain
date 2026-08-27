@@ -63,20 +63,24 @@ export function treeAtmosphericHaze(
 
     // Clear the first few metres so bark close-ups stay crisp. Humid air is
     // denser near the ground, while the crown receives only a thin aerial veil.
-    const travelled = distance.sub(14).max(0)
+    const travelled = distance.sub(9).max(0)
     const altitude = smoothstep(1, 32, meanHeight)
-    const density = mix(float(0.0033), float(0.00085), altitude)
+    const density = mix(float(0.0042), float(0.0011), altitude)
     const amount = exp(travelled.mul(density).negate())
       .oneMinus()
-      .min(0.14)
+      .min(0.2)
       .toVar('treeHazeAmount')
 
-    // Water droplets shift from cool slate to warm cream toward the sun. A
-    // broad lobe is enough here; bloom turns its brightest end into glare.
-    const forward = pow(clamp(dot(direction, SUN_DIRECTION), 0, 1), float(3))
+    // Inside a stand the air is not lit by open sky: what fills the gaps
+    // between trunks is light that has already come through the canopy, so the
+    // veil is a dim green-grey rather than the blue slate of an open valley,
+    // and it only goes warm where a shaft is aimed at the camera. Getting this
+    // backwards is most of what makes a rendered forest read as foggy — a blue
+    // veil at twenty metres is the one thing a real forest interior never has.
+    const forward = pow(clamp(dot(direction, SUN_DIRECTION), 0, 1), float(4))
     const hazeColour = mix(
-      vec3(0.39, 0.47, 0.57),
-      vec3(1.02, 0.82, 0.59),
+      vec3(0.2, 0.25, 0.19),
+      vec3(0.98, 0.86, 0.6),
       forward,
     )
     return vec4(mix(colour.rgb, hazeColour, amount), colour.a)

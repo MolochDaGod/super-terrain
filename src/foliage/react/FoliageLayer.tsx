@@ -20,7 +20,7 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import groundArmUrl from '../../terrain/react/assets/rock-ground-arm-1k.jpg'
 import groundMapUrl from '../../terrain/react/assets/rock-ground-diffuse-1k.jpg'
 import groundNormalUrl from '../../terrain/react/assets/rock-ground-normal-gl-1k.jpg'
-import { FoliageSystem } from '../FoliageSystem'
+import { FoliageSystem, type FoliageFloor } from '../FoliageSystem'
 import type { FoliageEditorStore } from '../FoliageEditorStore'
 import { foliageSpeciesIndex } from '../foliageSpecies'
 import { useFoliageSnapshot } from './useFoliageSnapshot'
@@ -30,8 +30,17 @@ const SOIL_TILE_SIZE = 5
 
 const GROUND_PLANE = /*@__PURE__*/ new Plane(new Vector3(0, 1, 0), 0)
 
+/** Linear soil multipliers per floor. See `FoliageGroundTextures.soilTint`. */
+const SOIL_TINTS: Record<FoliageFloor, readonly [number, number, number]> = {
+  meadow: [1, 1, 1],
+  // Damp humus: dark, warm, and well under the mineral ground's own value.
+  forest: [0.3, 0.255, 0.205],
+}
+
 export interface FoliageLayerProps {
   store: FoliageEditorStore
+  /** Which ground cover the layer opens on, and how dark its soil reads. */
+  floor?: FoliageFloor
   /**
    * Compiles the layer against the real multisampled scene attachment before
    * anything is shown. Without it the first frame that includes the grass
@@ -41,7 +50,7 @@ export interface FoliageLayerProps {
   warmup?: (object: Object3D) => Promise<void>
 }
 
-export function FoliageLayer({ store, warmup }: FoliageLayerProps) {
+export function FoliageLayer({ store, floor = 'meadow', warmup }: FoliageLayerProps) {
   const renderer = useThree((state) => state.gl) as unknown as Renderer
   const camera = useThree((state) => state.camera)
   const canvas = useThree((state) => state.gl.domElement)
@@ -72,8 +81,9 @@ export function FoliageLayer({ store, warmup }: FoliageLayerProps) {
         normalMap,
         armMap,
         tileSize: SOIL_TILE_SIZE,
+        soilTint: SOIL_TINTS[floor],
       }),
-    [armMap, map, normalMap],
+    [armMap, floor, map, normalMap],
   )
   useEffect(() => () => system.dispose(), [system])
 
@@ -147,7 +157,7 @@ export function FoliageLayer({ store, warmup }: FoliageLayerProps) {
 
     if (!seeded.current) {
       seeded.current = true
-      system.seed(renderer)
+      system.seed(renderer, floor)
     }
 
     for (const command of store.takeCommands()) {

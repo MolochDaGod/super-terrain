@@ -4,6 +4,7 @@ import {
 } from './generator/types'
 
 export type ForestPresetId =
+  | 'mossy-old-growth'
   | 'temperate-mixed'
   | 'ancient-oak-grove'
   | 'boreal-conifer'
@@ -20,6 +21,23 @@ interface ForestSpeciesMix {
   scale: readonly [number, number]
 }
 
+/**
+ * Stems that are lying down rather than standing up.
+ *
+ * A closed old-growth stand is defined as much by what has fallen in it as by
+ * what is still upright: a mossy log across the floor is the element that
+ * gives a forest photograph its foreground, its sense of time, and most of its
+ * relief. They are generated as ordinary placements pitched onto their side,
+ * so they instance with everything else and cost no extra prototype.
+ */
+export interface ForestDeadfall {
+  /** Fraction of accepted stems that fall instead of standing. */
+  rate: number
+  species: TreeSpecies
+  variations: readonly number[]
+  scale: readonly [number, number]
+}
+
 export interface ForestPreset {
   id: ForestPresetId
   label: string
@@ -28,6 +46,7 @@ export interface ForestPreset {
   gapRate: number
   clustering: number
   mix: readonly ForestSpeciesMix[]
+  deadfall?: ForestDeadfall
 }
 
 export interface GeneratedForestTree {
@@ -36,9 +55,64 @@ export interface GeneratedForestTree {
   position: readonly [number, number, number]
   rotation: number
   scale: number
+  /**
+   * Radians of pitch about the placement's own X axis. A standing stem is 0;
+   * a fallen one is near a right angle, with the variance that decides whether
+   * it is lying flat or propped against a neighbour.
+   */
+  tilt: number
 }
 
 export const FOREST_PRESETS: readonly ForestPreset[] = [
+  {
+    id: 'mossy-old-growth',
+    label: 'Mossy old-growth beech',
+    description:
+      'Closed southern-beech interior: crowded slim stems under a few veterans, tree-fern understory.',
+    // A closed stand, and the number that matters most in the whole file.
+    //
+    // At a hundred and twenty stems a hectare — a parkland density — an
+    // eye-level camera sees the horizon between the trunks, the sun reaches
+    // the floor everywhere, and no amount of grading makes that read as a
+    // forest interior: it reads as an orchard, because it is one. Real
+    // closed-canopy beech runs four to eight hundred stems a hectare, and it
+    // is the crowding that closes the canopy, occludes the sky, and leaves the
+    // floor lit only by the dapples that make the reference photograph.
+    treesPerHectare: 560,
+    // Almost no clearings. A closed stand has gaps where a veteran has fallen,
+    // not a scattering of bare patches.
+    gapRate: 0.04,
+    clustering: 0.4,
+    mix: [
+      // The canopy: crowded, near-vertical, competing stems of one species at
+      // a wide range of ages, which is what an even-aged closed stand is.
+      // Weighted to the high-canopy recipe: a stem grown in a closed stand
+      // self-prunes its low limbs and puts everything into height, which is
+      // what gives the interior its clean boles and its ceiling.
+      { species: 'european-beech', weight: 26, variations: [1], scale: [0.86, 1.2] },
+      { species: 'european-beech', weight: 12, variations: [0], scale: [0.86, 1.1] },
+      { species: 'european-beech', weight: 26, variations: [5], scale: [0.6, 0.92] },
+      // The veterans the eye reads scale from: fewer, far heavier, buttressed.
+      { species: 'european-beech', weight: 10, variations: [4], scale: [1.15, 1.45] },
+      { species: 'field-oak', weight: 8, variations: [4], scale: [1.0, 1.3] },
+      // Understory. Nothing in a forest photograph sells the floor like the
+      // layer between knee height and the lowest canopy branch.
+      { species: 'tree-fern', weight: 22, variations: [0, 5], scale: [0.5, 0.92] },
+    ],
+    // Storm relics: snapped stems, so the fallen end reads as a broken bole
+    // rather than as a tree that was picked up and set down sideways.
+    deadfall: {
+      // Sparse: a log is a landmark in a frame, and a floor criss-crossed
+      // with them reads as a windthrow rather than as old growth.
+      rate: 0.055,
+      species: 'european-beech',
+      // Storm relics only. The veteran recipe keeps its whole limb structure,
+      // and a complete crown lying on its side is a bramble of clean sticks —
+      // the opposite of the bare mossy bole a fallen tree actually leaves.
+      variations: [7],
+      scale: [0.85, 1.3],
+    },
+  },
   {
     id: 'temperate-mixed',
     label: 'Temperate mixed woodland',
@@ -191,10 +265,20 @@ export function generateForestLayout(
     if (x * x + z * z > radius * radius) continue
     if (habitatNoise(x, z, seed) < preset.gapRate) continue
 
-    const variation = entry.variations[Math.floor(random() * entry.variations.length)]!
-    const scale = entry.scale[0] + random() * (entry.scale[1] - entry.scale[0])
-    const crown = TREE_SPECIES_PRESETS[entry.species].crownRadius
-    const spacing = Math.max(1.35, Math.min(5.2, crown * 0.2)) * scale
+    const deadfall = preset.deadfall && random() < preset.deadfall.rate
+      ? preset.deadfall
+      : undefined
+    const source = deadfall ?? entry
+    const variation = source.variations[Math.floor(random() * source.variations.length)]!
+    const scale = source.scale[0] + random() * (source.scale[1] - source.scale[0])
+    const species = deadfall?.species ?? entry.species
+    const preset_ = TREE_SPECIES_PRESETS[species]
+    const crown = preset_.crownRadius
+    // A log occupies a line, not a disc, so it is allowed to lie much closer
+    // to its neighbours than a standing stem of the same species.
+    const spacing = deadfall
+      ? Math.max(0.8, preset_.trunkRadius * 1.6) * scale
+      : Math.max(1.35, Math.min(5.2, crown * 0.2)) * scale
     const overlaps = accepted.some((tree) => {
       const dx = tree.position[0] - x
       const dz = tree.position[2] - z
@@ -203,11 +287,14 @@ export function generateForestLayout(
     })
     if (overlaps) continue
     accepted.push({
-      species: entry.species,
+      species,
       variation,
-      position: [x, 0, z],
+      // Pitched onto its side and lifted by its own radius so the bole rests
+      // on the litter instead of being buried to its axis.
+      position: [x, deadfall ? preset_.trunkRadius * scale * 0.82 : 0, z],
       rotation: random() * Math.PI * 2,
       scale,
+      tilt: deadfall ? Math.PI * 0.5 + (random() - 0.5) * 0.22 : 0,
       spacing,
     })
   }

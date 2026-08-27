@@ -593,19 +593,37 @@ const BEECH_SMOOTH: BarkProfile = {
   furrowDepth: 0.04,
   furrowStrength: 0.18,
   normalStrength: 2.6,
-  scaleDensity: 2.6,
-  scaleAspect: 2.2,
-  scaleLift: 0.1,
-  lichenAmount: 0.45,
-  mossAmount: 0.5,
+  // Beech has no plates and no scales. What little tonal structure it carries
+  // is a fine algal mottle a few centimetres across, so the scale tier runs
+  // three times finer than it did and contributes almost no per-cell tint:
+  // at the old density and mosaic strength the tile came out as a wall of
+  // hand-sized polygons, which is a reptile or a flagstone, not a beech.
+  scaleDensity: 9,
+  scaleAspect: 1.6,
+  scaleLift: 0.04,
+  lichenAmount: 0.4,
+  // The baked map covers the whole tile at every height, so the green in it
+  // is the algal film a beech carries everywhere, not the moss colony. The
+  // colony is height-dependent and belongs to the material, which is why this
+  // came down when the runtime one went in: both at full strength painted a
+  // thirty-metre bole green to its crown.
+  mossAmount: 0.24,
   grainAmount: 0.45,
-  mosaicAmount: 0.22,
+  mosaicAmount: 0.08,
+  // Wet-forest beech, not a specimen tree on a dry lawn.
+  //
+  // The old palette sat around 0.6, which is close to fresh concrete, and
+  // under a strong key it rendered as bone-white ceramic — the single loudest
+  // "procedural" tell in a stand of them. Beech in the shade of its own canopy
+  // is a mid grey with a green cast from the algal film that covers it, and
+  // dropping the whole ramp about a third is what puts the trunks back into
+  // the same tonal range as the litter they stand in.
   palette: {
-    fissure: [0.4, 0.405, 0.385],
-    crown: [0.6, 0.605, 0.575],
-    fresh: [0.565, 0.56, 0.52],
-    lichen: [0.63, 0.645, 0.575],
-    moss: [0.26, 0.32, 0.21],
+    fissure: [0.175, 0.182, 0.168],
+    crown: [0.325, 0.332, 0.312],
+    fresh: [0.29, 0.292, 0.268],
+    lichen: [0.4, 0.412, 0.36],
+    moss: [0.17, 0.225, 0.13],
   },
 }
 

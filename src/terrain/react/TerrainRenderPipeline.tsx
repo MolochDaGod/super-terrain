@@ -5,6 +5,7 @@ import type { Camera, Object3D, Renderer, Scene } from 'three/webgpu'
 import { createTerrainRenderPipeline } from '../rendering/post/createTerrainRenderPipeline'
 import type { PostLook } from '../rendering/post/createTerrainRenderPipeline'
 import type { TerrainRenderMode } from '../rendering/renderModes'
+import { drainGpuRetirementsForFrame } from '../rendering/gpuResourceRetirement'
 import { currentViewUrlState } from './viewUrlState'
 
 export interface TerrainRenderPipelineProps {
@@ -42,8 +43,13 @@ export interface TerrainRenderPipelineProps {
 // bottom of its range, and at the editor's old 0.95 everything the sun missed
 // fell off the curve entirely.
 const FULL_EXPOSURE = 1.18
-/** Brighter than the old direct ACES path, but below the terrain's sunset push. */
-const TREE_EXPOSURE = 1.17
+/**
+ * A forest interior is a low-key subject. Most of the frame is under a canopy
+ * and the few sunlit patches are meant to be the brightest things in it, so the
+ * exposure sits below the landscape's — printing an interior at landscape
+ * exposure is what turns a stand into an overlit model of one.
+ */
+const TREE_EXPOSURE = 1.02
 
 export function TerrainRenderPipeline({
   mode,
@@ -137,6 +143,10 @@ export function TerrainRenderPipeline({
   }, [rendering, size.height, size.width])
 
   useFrame(() => {
+    // The top of the frame is the one point where the renderer owns no open
+    // command encoder, which is what makes destroying GPU buffers safe here
+    // and nowhere else.
+    drainGpuRetirementsForFrame()
     // Holding the previous frame for a moment is a far better failure mode than
     // submitting work that outlives the watchdog.
     if (readyMode !== mode) return

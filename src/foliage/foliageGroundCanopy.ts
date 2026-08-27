@@ -66,6 +66,16 @@ export interface FoliageGroundTextures {
   armMap: Texture
   /** World metres one tile of the soil textures covers. */
   tileSize: number
+  /**
+   * Linear multiplier on the soil albedo.
+   *
+   * The shared soil map is a pale dry mineral ground, which is right under a
+   * meadow and wrong everywhere a canopy has been dropping litter on it for a
+   * century. A forest floor is dark wet humus — several stops below open
+   * ground — and leaving it pale is what makes trees read as standing on a
+   * lawn that has been turned down rather than on their own leaf litter.
+   */
+  soilTint?: readonly [number, number, number]
 }
 
 /**
@@ -212,7 +222,10 @@ export function createFoliageGroundMaterial(
   // Soil under thick cover is in permanent shade and is damper. Leaving it at
   // its dry sunlit albedo is what makes painted grass look like it is lying on
   // top of a photograph of gravel.
-  const shadedSoil = soil.rgb.mul(mix(vec3(1, 1, 1), vec3(0.42, 0.46, 0.34), cover))
+  const tint = textures.soilTint ?? [1, 1, 1]
+  const shadedSoil = soil.rgb
+    .mul(vec3(tint[0], tint[1], tint[2]))
+    .mul(mix(vec3(1, 1, 1), vec3(0.42, 0.46, 0.34), cover))
 
   material.colorNode = vec4(mix(shadedSoil, canopy, canopyStrength), 1)
 

@@ -48,6 +48,8 @@ export interface TreePlacement {
   position: ForestPosition
   rotation: number
   scale: number
+  /** Pitch in radians. Non-zero means deadfall: a fallen, leafless stem. */
+  tilt?: number
 }
 
 export interface TreeEditorSnapshot {
@@ -188,10 +190,16 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       debugMode: 'surface',
       showFoliage: true,
       showHud: false,
-      forestPreset: 'temperate-mixed',
+      forestPreset: 'mossy-old-growth',
       forestSeed: 42017,
       forestDensity: 1,
-      forestRadius: 70,
+      // Thirty metres of closed stand is about a hundred and sixty stems, and
+      // it is as much as a four-core machine with integrated graphics carries
+      // at eye level: past roughly two hundred the tab runs out of memory
+      // partway through a walk. Nothing in the frame is lost — an eye-level
+      // camera in a closed stand cannot see past the third rank of trunks —
+      // so the radius, not the density, is what gives way.
+      forestRadius: 30,
       status: 'Forest workspace ready',
     })
   }
@@ -348,6 +356,7 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
         position: tree.position,
         rotation: tree.rotation,
         scale: tree.scale,
+        tilt: tree.tilt,
       } satisfies TreePlacement
     })
     this.patch({

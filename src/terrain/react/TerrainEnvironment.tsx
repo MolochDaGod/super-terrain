@@ -9,7 +9,10 @@ import {
   type Scene,
 } from 'three/webgpu'
 import type { TerrainConfig } from '../config'
-import { createTerrainEnvironment } from '../rendering/environment/createTerrainEnvironment'
+import {
+  createTerrainEnvironment,
+  type TerrainEnvironmentLook,
+} from '../rendering/environment/createTerrainEnvironment'
 import type { TerrainRenderMode } from '../rendering/renderModes'
 
 const CINEMATIC_SKY_URL = new URL(
@@ -24,10 +27,13 @@ const CINEMATIC_SKY_URL = new URL(
 export function TerrainEnvironment({
   mode,
   config,
+  look = 'terrain',
   updatePriority = 0.5,
 }: {
   mode: TerrainRenderMode
   config: TerrainConfig
+  /** Which light rig to build. See `TerrainEnvironmentLook`. */
+  look?: TerrainEnvironmentLook
   /**
    * The terrain post stack owns rendering at priority 1, so its environment
    * update runs just ahead of it. Standalone workspaces use priority 0 to keep
@@ -49,8 +55,8 @@ export function TerrainEnvironment({
     skyTexture.needsUpdate = true
   }, [skyTexture])
   const environment = useMemo(
-    () => createTerrainEnvironment(mode, config, { skyTexture }),
-    [config, mode, skyTexture],
+    () => createTerrainEnvironment(mode, config, { skyTexture, look }),
+    [config, look, mode, skyTexture],
   )
 
   useEffect(() => {
