@@ -63,6 +63,21 @@ export interface GeneratedForestTree {
   tilt: number
 }
 
+/**
+ * A deterministic boulder placement generated alongside a forest layout.
+ *
+ * Rocks stay as lightweight placement data here; the scene decides how to
+ * materialize them. Keeping the seed on each placement gives a renderer a
+ * stable granite/material variation without coupling this preset module to the
+ * terrain rock implementation.
+ */
+export interface GeneratedForestRock {
+  seed: number
+  position: readonly [number, number, number]
+  rotation: number
+  scale: number
+}
+
 export const FOREST_PRESETS: readonly ForestPreset[] = [
   {
     id: 'mossy-old-growth',
@@ -313,6 +328,61 @@ export function generateForestLayout(
     })
   }
   return accepted.map(({ spacing: _spacing, ...tree }) => tree)
+}
+
+/**
+ * Generate sparse, deterministic boulders for the forest floor.
+ *
+ * The count follows area rather than tree count so changing a species mix does
+ * not unexpectedly cover the floor with stones. A small amount of extra
+ * weight for open presets keeps savanna and arid layouts from looking empty,
+ * while the cap prevents a large editor radius from creating an unreasonable
+ * number of rock assets.
+ */
+export function generateForestRockLayout(
+  presetId: ForestPresetId,
+  seed: number,
+  radius: number,
+  density: number,
+): GeneratedForestRock[] {
+  const preset = FOREST_PRESETS.find((candidate) => candidate.id === presetId)
+    ?? FOREST_PRESETS[0]
+  const hectares = Math.PI * radius * radius / 10_000
+  const openness = 0.75 + preset.gapRate * 1.5
+  const targetCount = Math.min(
+    48,
+    Math.max(0, Math.round(hectares * 42 * density * openness)),
+  )
+  if (targetCount === 0) return []
+
+  const random = mulberry32(seed ^ hashString(`${preset.id}:rocks`))
+  const accepted: Array<GeneratedForestRock & { spacing: number }> = []
+
+  for (let attempt = 0; attempt < targetCount * 40 && accepted.length < targetCount; attempt += 1) {
+    const angle = random() * Math.PI * 2
+    const distance = Math.sqrt(random()) * radius * 0.94
+    const x = Math.cos(angle) * distance
+    const z = Math.sin(angle) * distance
+    const scale = 0.65 + random() * 1.35
+    const spacing = 1.8 * scale
+    const overlaps = accepted.some((rock) => {
+      const dx = rock.position[0] - x
+      const dz = rock.position[2] - z
+      const minimum = (rock.spacing + spacing) * 0.72
+      return dx * dx + dz * dz < minimum * minimum
+    })
+    if (overlaps) continue
+
+    accepted.push({
+      seed: Math.floor(random() * 0x7fffffff) + 1,
+      position: [x, 0, z],
+      rotation: random() * Math.PI * 2,
+      scale,
+      spacing,
+    })
+  }
+
+  return accepted.map(({ spacing: _spacing, ...rock }) => rock)
 }
 
 function weightedIndex(mix: readonly ForestSpeciesMix[], roll: number): number {
