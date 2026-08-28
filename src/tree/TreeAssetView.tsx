@@ -604,15 +604,83 @@ const PLACEMENT_SCALE = new Vector3()
 // YXZ: the yaw aims the stem, then the pitch tips it over in that direction.
 const PLACEMENT_EULER = new Euler(0, 0, 0, 'YXZ')
 
+/**
+ * Radians of lean given to a standing stem.
+ *
+ * Small, and it has to stay small. A tree's root flare spreads several metres
+ * across the litter, so tipping the whole placement lifts the far side of that
+ * flare clear of the ground in proportion to the spread: five degrees on a
+ * nine-metre root plate is nearly eighty centimetres of daylight under it.
+ * Genuine lean belongs in the geometry, where the generator builds a leaning
+ * stem over a level root plate — that is the `Wind shaped` recipe. This is only
+ * here to break the dead-plumb uniformity of a stand where every stem shares
+ * one prototype.
+ */
+const PLACEMENT_LEAN = 0.044
+
+/** Fraction by which a crown is stretched on one axis and squeezed on the other. */
+const PLACEMENT_CROWN_ASYMMETRY = 0.13
+
+/** Fraction of independent variation in height, separate from girth. */
+const PLACEMENT_RISE_VARIANCE = 0.09
+
+const PLACEMENT_LEAN_AXIS = new Vector3()
+const PLACEMENT_LEAN_QUATERNION = new Quaternion()
+
+/**
+ * A stable pseudo-random value for one placement.
+ *
+ * Keyed on world position rather than on the instance id so that a tree keeps
+ * its own lean and proportions across a regenerate, a reclassification, or a
+ * renumbering — anything that would otherwise make the stand visibly reshuffle
+ * itself while the camera sits still.
+ */
+function placementNoise(instance: ForestTreeInstance, salt: number): number {
+  const x = Math.imul(Math.round(instance.position[0] * 128) | 0, 0x27d4eb2d)
+  const z = Math.imul(Math.round(instance.position[2] * 128) | 0, 0x165667b1)
+  let hash = (x ^ z ^ Math.imul(salt + 1, 0x9e3779b9)) >>> 0
+  hash = Math.imul(hash ^ (hash >>> 15), 0x2c1b3c6d) >>> 0
+  return ((hash ^ (hash >>> 13)) >>> 0) / 4294967296
+}
+
 function placementMatrix(instance: ForestTreeInstance, target: Matrix4): Matrix4 {
   PLACEMENT_POSITION.fromArray(instance.position)
   if (instance.tilt) {
     PLACEMENT_EULER.set(instance.tilt, instance.rotation, 0)
     PLACEMENT_QUATERNION.setFromEuler(PLACEMENT_EULER)
-  } else {
-    PLACEMENT_QUATERNION.setFromAxisAngle(PLACEMENT_AXIS, instance.rotation)
+    PLACEMENT_SCALE.setScalar(instance.scale)
+    return target.compose(PLACEMENT_POSITION, PLACEMENT_QUATERNION, PLACEMENT_SCALE)
   }
-  PLACEMENT_SCALE.setScalar(instance.scale)
+
+  // Squared, so most stems are near plumb and a few lean noticeably, rather
+  // than every stem leaning by an average amount.
+  const bias = placementNoise(instance, 0)
+  const lean = bias * bias * PLACEMENT_LEAN
+  const heading = placementNoise(instance, 1) * Math.PI * 2
+  PLACEMENT_QUATERNION.setFromAxisAngle(PLACEMENT_AXIS, instance.rotation)
+  if (lean > 1e-4) {
+    PLACEMENT_LEAN_AXIS.set(Math.cos(heading), 0, Math.sin(heading))
+    PLACEMENT_LEAN_QUATERNION.setFromAxisAngle(PLACEMENT_LEAN_AXIS, lean)
+    // Pre-multiplied: the stem yaws in its own frame and then tips in a world
+    // direction, so which way it leans is independent of which way it faces.
+    PLACEMENT_QUATERNION.premultiply(PLACEMENT_LEAN_QUATERNION)
+    // Settle the butt by the amount the lean lifted it. Cheaper and steadier
+    // than solving for the flare, and enough that the base stays in the litter.
+    PLACEMENT_POSITION.y -= Math.sin(lean) * instance.scale * 1.6
+  }
+
+  // Crowns are not surfaces of revolution. Stretching one horizontal axis and
+  // squeezing the other keeps the footprint about the same while making every
+  // instance of a prototype a different shape — which is most of what stops a
+  // stand reading as one tree stamped two hundred times. The stretch is applied
+  // before the yaw, so its axis follows the tree rather than the world.
+  const stretch = (placementNoise(instance, 2) - 0.5) * 2 * PLACEMENT_CROWN_ASYMMETRY
+  const rise = (placementNoise(instance, 3) - 0.5) * 2 * PLACEMENT_RISE_VARIANCE
+  PLACEMENT_SCALE.set(
+    instance.scale * (1 + stretch),
+    instance.scale * (1 + rise),
+    instance.scale * (1 - stretch),
+  )
   return target.compose(PLACEMENT_POSITION, PLACEMENT_QUATERNION, PLACEMENT_SCALE)
 }
 

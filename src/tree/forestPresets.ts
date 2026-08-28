@@ -110,6 +110,14 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       // The veterans the eye reads scale from: fewer, far heavier, buttressed.
       { species: 'european-beech', weight: 10, variations: [4], scale: [1.15, 1.45] },
       { species: 'field-oak', weight: 8, variations: [4], scale: [1.0, 1.3] },
+      // Wind-shaped stems: a leaning axis over a level root plate, with the
+      // crown pulled to one side. Every other recipe in this mix grows dead
+      // plumb, and a stand of identical vertical stems is the clearest tell
+      // that they came from one prototype.
+      { species: 'european-beech', weight: 14, variations: [3], scale: [0.8, 1.15] },
+      // What the veterans that already fell left behind. Sparse — a stump is a
+      // landmark on a forest floor, and a field of them reads as a clear-fell.
+      { species: 'european-beech', weight: 5, variations: [9], scale: [0.75, 1.2] },
       // Understory.
       //
       // This was a fifth of the stand as full-height tree ferns, and it was
@@ -167,6 +175,8 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       // the difference between woodland and an orchard at eye level.
       { species: 'hazel-thicket', weight: 18, variations: [0], scale: [0.72, 1.12] },
       { species: 'elder-bush', weight: 10, variations: [0], scale: [0.72, 1.08] },
+      { species: 'field-oak', weight: 12, variations: [3], scale: [0.76, 1.1] },
+      { species: 'silver-birch', weight: 6, variations: [9], scale: [0.7, 1.1] },
     ],
   },
   {
@@ -184,6 +194,8 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       // with trees on it.
       { species: 'hazel-thicket', weight: 22, variations: [0], scale: [0.78, 1.2] },
       { species: 'common-juniper', weight: 14, variations: [0], scale: [0.8, 1.35] },
+      // Wood pasture is where stumps are most legible: nothing is hiding them.
+      { species: 'ancient-oak', weight: 7, variations: [9], scale: [0.9, 1.35] },
     ],
   },
   {
@@ -200,6 +212,8 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       // Juniper is the boreal understory — it takes the cold and the acid soil
       // that keeps everything else out.
       { species: 'common-juniper', weight: 20, variations: [0], scale: [0.75, 1.3] },
+      { species: 'norway-spruce', weight: 10, variations: [3], scale: [0.72, 1.08] },
+      { species: 'norway-spruce', weight: 6, variations: [9], scale: [0.75, 1.15] },
     ],
   },
   {

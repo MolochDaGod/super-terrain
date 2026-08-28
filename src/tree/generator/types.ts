@@ -1144,7 +1144,12 @@ export function normalizeTreeParameters(
     rootRelief: finiteInRange(input?.rootRelief, fallback.rootRelief, 0, 3),
     rootSurfacings: integerInRange(input?.rootSurfacings, fallback.rootSurfacings, 0, 5),
     lostLimbs: integerInRange(input?.lostLimbs, fallback.lostLimbs, 0, 8),
-    height: finiteInRange(input?.height, fallback.height, 4, 120),
+    // The floor was four metres, which predates both the shrubs and the
+    // stumps. It was silently inflating a 1.9-metre juniper to 4 and a
+    // 3.6-metre elder to 4 — the authored value never reached the generator —
+    // and it made a stump unexpressible. It still guards the degenerate case
+    // a floor is for: a zero or negative height.
+    height: finiteInRange(input?.height, fallback.height, 1.2, 120),
     crownRadius: finiteInRange(input?.crownRadius, fallback.crownRadius, 1.5, 35),
     // The floor is a sapling's stem, not a tree's. Twelve centimetres of
     // radius is a quarter-metre bole, which no four-metre plant has; holding

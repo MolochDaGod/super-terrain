@@ -106,6 +106,7 @@ export const TREE_VARIATION_NAMES = [
   'Multi stem',
   'Storm relic',
   'Sapling',
+  'Stump',
 ] as const
 
 export function treePrototypeId(species: TreeSpecies, variation: number): string {
@@ -231,6 +232,42 @@ export function parametersForTreeVariation(
         gnarl: Math.max(0.82, base.gnarl),
         sinuosity: Math.max(0.9, base.sinuosity),
         foliageDensity: base.foliageDensity * 0.58,
+      })
+    // What is left after a tree comes down, and the reason it needs its own
+    // recipe rather than a scaled-down anything: every other variation here
+    // changes a *tree*, and a stump is not a small tree. Girth, root flare and
+    // age all stay adult — the ratio of a metre and a half of height to most of
+    // a metre of radius is the entire read — and only the stem is gone. Scaling
+    // a whole tree down to stump height instead gives a slender post, because
+    // its girth scales with it.
+    case 9:
+      return normalizeTreeParameters({
+        ...common,
+        trunkDamage: 'snapped',
+        crownForm: 'stagheaded',
+        axisForm: 'straight',
+        // Cut or snapped between knee and chest height, whatever the species'
+        // full height was.
+        height: Math.max(1.2, Math.min(2.4, base.height * 0.06)),
+        crownRadius: 1.5,
+        // Adult girth, untouched.
+        trunkRadius: base.trunkRadius,
+        age: Math.max(0.9, base.age),
+        gnarl: 1,
+        twist: base.twist,
+        lostLimbs: 8,
+        branchCount: 5,
+        // No crown at all. A stump with foliage on it is a hedge.
+        foliageDensity: 0,
+        // The flare is the silhouette. A stump seen across a forest floor is
+        // recognised by its buttresses spreading into the litter, not by the
+        // cylinder above them.
+        rootExposure: Math.max(0.72, base.rootExposure),
+        rootSpread: Math.max(base.rootSpread, 6),
+        rootSurfacings: Math.max(2, base.rootSurfacings),
+        fluting: Math.max(0.5, base.fluting),
+        lean: Math.min(base.lean, 3),
+        sinuosity: 0,
       })
     default:
       return normalizeTreeParameters(common)
