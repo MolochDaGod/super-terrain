@@ -148,7 +148,13 @@ function make3D(
   return tex
 }
 
-interface Accumulators {
+/**
+ * Coverage-weighted colour and normal sums, one entry per voxel.
+ *
+ * Kept separate from `VoxelScene` so a volume can be filled from triangles, from
+ * analytic proxy shapes, or from both, and only then turned into GPU textures.
+ */
+export interface VoxelAccumulator {
   dims: [number, number, number]
   origin: Vector3
   cell: number
@@ -157,13 +163,62 @@ interface Accumulators {
   weight: Float32Array
 }
 
+/** Allocates a volume of cubic cells covering `bounds`, plus a cell of padding. */
+export function createVoxelVolume(
+  bounds: Box3,
+  maxResolution: number,
+): VoxelAccumulator {
+  const size = bounds.getSize(new Vector3())
+  const longest = Math.max(size.x, size.y, size.z, 1e-3)
+  const cell = longest / Math.max(8, maxResolution)
+  const dims: [number, number, number] = [
+    Math.max(4, Math.ceil(size.x / cell) + 2),
+    Math.max(4, Math.ceil(size.y / cell) + 2),
+    Math.max(4, Math.ceil(size.z / cell) + 2),
+  ]
+  const count = dims[0] * dims[1] * dims[2]
+  return {
+    dims,
+    // One cell of padding so a ray leaving the geometry still has valid field.
+    origin: bounds.min.clone().addScalar(-cell),
+    cell,
+    colour: new Float32Array(count * 3),
+    normal: new Float32Array(count * 3),
+    weight: new Float32Array(count),
+  }
+}
+
+/** Accumulates one covered sample into the voxel containing `x, y, z`. */
+export function splatSample(
+  acc: VoxelAccumulator,
+  x: number, y: number, z: number,
+  albedo: readonly [number, number, number],
+  nx: number, ny: number, nz: number,
+  weight: number,
+): void {
+  const [dx, dy, dz] = acc.dims
+  const ix = Math.floor((x - acc.origin.x) / acc.cell)
+  const iy = Math.floor((y - acc.origin.y) / acc.cell)
+  const iz = Math.floor((z - acc.origin.z) / acc.cell)
+  if (ix < 0 || iy < 0 || iz < 0 || ix >= dx || iy >= dy || iz >= dz) return
+  const index = (iz * dy + iy) * dx + ix
+  const o3 = index * 3
+  acc.colour[o3] += albedo[0] * weight
+  acc.colour[o3 + 1] += albedo[1] * weight
+  acc.colour[o3 + 2] += albedo[2] * weight
+  acc.normal[o3] += nx * weight
+  acc.normal[o3 + 1] += ny * weight
+  acc.normal[o3 + 2] += nz * weight
+  acc.weight[index] += weight
+}
+
 /**
  * Area-uniform point sampling of a triangle. Conservative SAT rasterisation is
  * the textbook answer, but at half-cell sample spacing this misses nothing a
  * 0.2 m voxel could resolve and runs several times faster on 260 k triangles.
  */
-function splatTriangle(
-  acc: Accumulators,
+export function splatTriangle(
+  acc: VoxelAccumulator,
   ax: number, ay: number, az: number,
   bx: number, by: number, bz: number,
   cx: number, cy: number, cz: number,
@@ -328,26 +383,7 @@ export async function voxelizeScene(
     if (!bounds) continue
     _box.union(_meshBox.copy(bounds).applyMatrix4(mesh.matrixWorld))
   }
-  const rawSize = _box.getSize(new Vector3())
-  const longest = Math.max(rawSize.x, rawSize.y, rawSize.z)
-  const cell = longest / maxResolution
-  // One cell of padding so a ray leaving the geometry still has valid SDF.
-  const origin = _box.min.clone().addScalar(-cell)
-  const dims: [number, number, number] = [
-    Math.max(4, Math.ceil(rawSize.x / cell) + 2),
-    Math.max(4, Math.ceil(rawSize.y / cell) + 2),
-    Math.max(4, Math.ceil(rawSize.z / cell) + 2),
-  ]
-  const count = dims[0] * dims[1] * dims[2]
-
-  const acc: Accumulators = {
-    dims,
-    origin,
-    cell,
-    colour: new Float32Array(count * 3),
-    normal: new Float32Array(count * 3),
-    weight: new Float32Array(count),
-  }
+  const acc = createVoxelVolume(_box, maxResolution)
 
   let done = 0
   for (const mesh of meshes) {
@@ -386,10 +422,20 @@ export async function voxelizeScene(
 
   report(0.72, 'distance field')
   await nextFrame()
-  const distance = distanceTransform(acc.weight, dims)
+  const scene = finaliseVoxels(acc)
+  report(1, 'ready')
+  return scene
+}
 
-  report(0.9, 'uploading volumes')
-  await nextFrame()
+
+/**
+ * Turns accumulated coverage into the GPU volumes the tracer reads: quantised
+ * albedo and geometric normal, plus the distance field derived from occupancy.
+ */
+export function finaliseVoxels(acc: VoxelAccumulator): VoxelScene {
+  const { dims, origin, cell } = acc
+  const count = dims[0] * dims[1] * dims[2]
+  const distance = distanceTransform(acc.weight, dims)
 
   const albedoData = new Uint8Array(count * 4)
   const normalData = new Uint8Array(count * 4)
@@ -411,8 +457,8 @@ export async function voxelizeScene(
       normalData[i * 4] = Math.round((nx / len) * 127.5 + 127.5)
       normalData[i * 4 + 1] = Math.round((ny / len) * 127.5 + 127.5)
       normalData[i * 4 + 2] = Math.round((nz / len) * 127.5 + 127.5)
-      // Confidence: a voxel straddling two opposing faces averages to ~0 and
-      // its normal must not be trusted over the SDF gradient.
+      // Confidence: a voxel straddling two opposing faces averages to ~0, and
+      // its normal must not then be trusted over the distance-field gradient.
       normalData[i * 4 + 3] = Math.round(Math.min(1, Math.hypot(nx, ny, nz) / w) * 255)
     }
     // Distance is measured between voxel centres; back it off half a cell so
@@ -435,6 +481,121 @@ export async function voxelizeScene(
       scene.sdf.dispose()
     },
   }
-  report(1, 'ready')
   return scene
+}
+
+/** Fills a horizontal slab — the ground plane a proxy scene stands on. */
+export function splatSlab(
+  acc: VoxelAccumulator,
+  y: number,
+  thickness: number,
+  albedo: readonly [number, number, number],
+): void {
+  const [dx, , dz] = acc.dims
+  const layers = Math.max(1, Math.round(thickness / acc.cell))
+  for (let iz = 0; iz < dz; iz += 1) {
+    const z = acc.origin.z + (iz + 0.5) * acc.cell
+    for (let ix = 0; ix < dx; ix += 1) {
+      const x = acc.origin.x + (ix + 0.5) * acc.cell
+      for (let layer = 0; layer < layers; layer += 1) {
+        splatSample(acc, x, y - layer * acc.cell, z, albedo, 0, 1, 0, 1)
+      }
+    }
+  }
+}
+
+/**
+ * Fills a tapered capsule: a trunk, a branch, or a fallen log.
+ *
+ * The radius is floored at half a cell. A stem thinner than the voxel grid
+ * would otherwise vanish entirely, and a forest whose trunks cast no shadow
+ * loses the one occlusion cue that reads as "under trees".
+ */
+export function splatTaperedCylinder(
+  acc: VoxelAccumulator,
+  from: Vector3,
+  to: Vector3,
+  radiusFrom: number,
+  radiusTo: number,
+  albedo: readonly [number, number, number],
+): void {
+  const axis = _v1.subVectors(to, from)
+  const length = axis.length()
+  if (length < 1e-4) return
+  const steps = Math.max(1, Math.ceil(length / (acc.cell * 0.5)))
+  const floor = acc.cell * 0.5
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps
+    const radius = Math.max(floor, radiusFrom + (radiusTo - radiusFrom) * t)
+    _p.copy(from).addScaledVector(axis, t)
+    const ring = Math.max(1, Math.ceil((radius * 2 * Math.PI) / (acc.cell * 0.6)))
+    const rings = Math.max(1, Math.ceil(radius / (acc.cell * 0.6)))
+    for (let r = 0; r <= rings; r += 1) {
+      const rr = (radius * r) / rings
+      const spokes = r === 0 ? 1 : Math.max(4, Math.round((ring * r) / rings))
+      for (let a = 0; a < spokes; a += 1) {
+        const angle = (a / spokes) * Math.PI * 2
+        const ox = Math.cos(angle) * rr
+        const oz = Math.sin(angle) * rr
+        splatSample(acc, _p.x + ox, _p.y, _p.z + oz, albedo, ox, 0, oz, 1)
+      }
+    }
+  }
+}
+
+/**
+ * Fills a porous ellipsoidal shell — a tree crown.
+ *
+ * A solid crown would be an opaque dome and the floor beneath it would go
+ * black. Leaves live in the outer part of the crown and light finds its way
+ * through the gaps between them, so the proxy fills a shell and drops a
+ * deterministic fraction of its cells. The holes are what let dappled light
+ * and green bounce reach the ground at all.
+ */
+export function splatCanopyShell(
+  acc: VoxelAccumulator,
+  centre: Vector3,
+  radius: Vector3,
+  albedo: readonly [number, number, number],
+  options: { shell?: number; porosity?: number; seed?: number } = {},
+): void {
+  const shell = options.shell ?? 0.42
+  const porosity = options.porosity ?? 0.4
+  const seed = (options.seed ?? 1) | 0
+  const step = acc.cell * 0.75
+  const nx = Math.max(1, Math.ceil((radius.x * 2) / step))
+  const ny = Math.max(1, Math.ceil((radius.y * 2) / step))
+  const nz = Math.max(1, Math.ceil((radius.z * 2) / step))
+  for (let k = 0; k <= nz; k += 1) {
+    const wz = (k / nz) * 2 - 1
+    for (let j = 0; j <= ny; j += 1) {
+      const wy = (j / ny) * 2 - 1
+      for (let i = 0; i <= nx; i += 1) {
+        const wx = (i / nx) * 2 - 1
+        const rSq = wx * wx + wy * wy + wz * wz
+        if (rSq > 1) continue
+        const r = Math.sqrt(rSq)
+        if (r < 1 - shell) continue
+        // Hash the cell so the holes are stable across rebuilds: a canopy whose
+        // gaps moved every frame would be a scene full of moving shadows.
+        let h = (Math.imul(i + 1, 0x27d4eb2d) ^ Math.imul(j + 7, 0x165667b1) ^
+          Math.imul(k + 13, 0x9e3779b1) ^ seed) >>> 0
+        h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d) >>> 0
+        // Denser toward the crown surface, thinner inside, as a real crown is.
+        const density = (1 - porosity) * (0.45 + 0.55 * ((r - (1 - shell)) / shell))
+        if ((h & 0xffff) / 0x10000 > density) continue
+        splatSample(
+          acc,
+          centre.x + wx * radius.x,
+          centre.y + wy * radius.y,
+          centre.z + wz * radius.z,
+          albedo,
+          wx / Math.max(r, 1e-4),
+          wy / Math.max(r, 1e-4),
+          wz / Math.max(r, 1e-4),
+          1,
+        )
+      }
+    }
+  }
 }

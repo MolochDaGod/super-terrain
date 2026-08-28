@@ -6,6 +6,7 @@ import {
   Orbit,
   Plane,
   RefreshCw,
+  Sun,
   Trash2,
   TreePine,
 } from 'lucide-react'
@@ -110,6 +111,28 @@ export function TreeMenuBar({
             onSelect={() => store.patch({ showFoliage: !snapshot.showFoliage })}
           />
           <MenuItem
+            label="Global illumination"
+            icon={Sun}
+            checked={snapshot.gi}
+            onSelect={() =>
+              store.patch({
+                gi: !snapshot.gi,
+                giStatus: snapshot.gi ? '' : 'GI: building…',
+                status: snapshot.gi
+                  ? 'Global illumination off'
+                  : 'Global illumination on · voxelising the stand',
+              })
+            }
+          />
+          <MenuItem
+            label="GI: irradiance only"
+            icon={Eye}
+            disabled={!snapshot.gi}
+            checked={snapshot.giDebug}
+            onSelect={() => store.patch({ giDebug: !snapshot.giDebug })}
+          />
+          <MenuSeparator />
+          <MenuItem
             label="Performance overlay"
             icon={Gauge}
             checked={snapshot.showHud}
@@ -127,6 +150,9 @@ export function TreeMenuBar({
       <WorkspaceToggle workspace={workspace} onChange={onWorkspaceChange} />
 
       <div className="ml-auto hidden items-center gap-3 font-mono text-[9px] text-white/35 md:flex">
+        {snapshot.gi && snapshot.giStatus && (
+          <span className="text-emerald-300/60">{snapshot.giStatus}</span>
+        )}
         <span>{snapshot.placements.length} trees</span>
         <span>{Object.keys(snapshot.prototypes).length} prototypes</span>
       </div>

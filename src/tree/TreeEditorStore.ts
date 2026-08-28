@@ -65,6 +65,30 @@ export interface TreeEditorSnapshot {
   debugMode: TreeDebugMode
   showFoliage: boolean
   showHud: boolean
+  /**
+   * Ray-traced global illumination over the stand.
+   *
+   * Off by default. It voxelises the stand and runs a probe field, which costs
+   * a second of build time and a couple of milliseconds a frame, and the
+   * authored fill rig is a perfectly good approximation until you want to see
+   * what the canopy is actually doing to the light.
+   */
+  gi: boolean
+  /** Progress and telemetry from the GI rig, for the status line. */
+  giStatus: string
+  /**
+   * Paints the indirect irradiance on its own, with no albedo, no direct light
+   * and no authored fill. A stand lit by both a hemisphere and a probe field
+   * looks much the same either way in aggregate; this is how you see which of
+   * the two is shaping it.
+   */
+  giDebug: boolean
+  /**
+   * How much of the authored hemisphere/ambient/fill rig survives while GI is
+   * on. Those lights approximate exactly what the probes compute, so leaving
+   * them at full strength double-counts the bounce and flattens the result.
+   */
+  giFill: number
   forestPreset: ForestPresetId
   forestSeed: number
   forestDensity: number
@@ -232,6 +256,10 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       debugMode: 'surface',
       showFoliage: true,
       showHud: false,
+      gi: false,
+      giStatus: '',
+      giDebug: false,
+      giFill: 0.12,
       rocks: [],
       forestPreset: 'mossy-old-growth',
       forestSeed: 42017,

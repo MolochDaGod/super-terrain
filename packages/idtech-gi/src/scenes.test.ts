@@ -48,22 +48,39 @@ describe('sponza-like harder scene', () => {
 })
 
 describe('editor isolation', () => {
-  it('does not import the GI package from the default editor entry', () => {
-    const root = resolve(import.meta.dirname, '../../..')
+  const root = resolve(import.meta.dirname, '../../..')
+
+  it('keeps the GI package out of the editor entry point', () => {
     const app = readFileSync(resolve(root, 'src/App.tsx'), 'utf8')
     const main = readFileSync(resolve(root, 'src/main.tsx'), 'utf8')
     const index = readFileSync(resolve(root, 'index.html'), 'utf8')
-    expect(app).not.toMatch(/idtech-gi|IdTechGI|SousaPipeline/)
-    expect(main).not.toMatch(/idtech-gi|IdTechGI|SousaPipeline/)
+    expect(app).not.toMatch(/idtech-gi|SousaGI/)
+    expect(main).not.toMatch(/idtech-gi|SousaGI/)
     expect(index).not.toMatch(/idtech-gi|gi\.html/)
     const giHtml = readFileSync(resolve(root, 'gi.html'), 'utf8')
     expect(giHtml).toMatch(/packages\/idtech-gi\/src\/demo\/main\.ts/)
     expect(giHtml).not.toMatch(/src\/main\.tsx/)
-    expect(readFileSync(resolve(root, 'src/tree/TreeScene.tsx'), 'utf8')).not.toMatch(
-      /idtech-gi|IdTechGI/,
-    )
     expect(readFileSync(resolve(root, 'src/terrain/react/GraniteRockScene.tsx'), 'utf8')).not.toMatch(
-      /idtech-gi|IdTechGI/,
+      /idtech-gi|SousaGI/,
     )
+  })
+
+  it('loads the forest GI rig lazily, so switching it off costs nothing', () => {
+    // The forest workspace may use the GI, but only behind a dynamic import:
+    // it ships off by default and the tracing package — volume builders, probe
+    // kernels, a distance transform — has no business in the editor's startup
+    // path until someone asks for it.
+    const scene = readFileSync(resolve(root, 'src/tree/TreeScene.tsx'), 'utf8')
+    expect(scene).toMatch(/lazy\(/)
+    expect(scene).toMatch(/import\('\.\/gi\/ForestGi'\)/)
+    const staticImports = scene.matchAll(/^import[^\n]*from '([^']+)'/gm)
+    for (const [, specifier] of staticImports) {
+      expect(specifier).not.toMatch(/idtech-gi|\/gi\//)
+    }
+  })
+
+  it('defaults the forest GI toggle to off', () => {
+    const store = readFileSync(resolve(root, 'src/tree/TreeEditorStore.ts'), 'utf8')
+    expect(store).toMatch(/\bgi: false,/)
   })
 })

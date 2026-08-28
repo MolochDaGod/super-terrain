@@ -1,5 +1,7 @@
 import {
   Fragment,
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -37,6 +39,7 @@ import {
 } from './TreeEditorStore'
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
 import { gpuRetirementBacklog } from '../terrain/rendering/gpuResourceRetirement'
+import { invalidateTerrainShadows } from '../terrain/rendering/environment/terrainShadowInvalidation'
 
 const FLY_SPEED = 3
 const FLY_BOOST_SPEED = 80
@@ -46,6 +49,17 @@ const FLY_BOOST_SPEED = 80
  * only moves the same work around while making the first tree appear later.
  */
 const MAX_CONCURRENT_TREE_COMPILERS = 1
+
+/**
+ * Loaded only when the View menu turns GI on.
+ *
+ * The rig pulls in the whole tracing package — volume builders, probe kernels,
+ * a distance transform. None of that belongs in the editor's startup path for a
+ * feature that ships switched off.
+ */
+const ForestGi = lazy(async () => ({
+  default: (await import('./gi/ForestGi')).ForestGi,
+}))
 
 /** Forest authoring scene: prototypes compile once and placements render in batches. */
 export function TreeScene({
@@ -85,6 +99,23 @@ export function TreeScene({
     raycaster.firstHitOnly = true
     return () => { raycaster.firstHitOnly = previous }
   }, [raycaster])
+
+  const reportGiStatus = useCallback(
+    (giStatus: string) => store.patch({ giStatus }),
+    [store],
+  )
+
+  // Shadow maps are only re-rendered when something says the scene changed, and
+  // the only thing that said so was the terrain backend and camera motion. A
+  // stand compiles one prototype at a time over tens of seconds, so trees that
+  // appeared after the last camera move cast no shadow at all until the view
+  // was nudged — which is exactly how it looked: a forest standing in light it
+  // was not blocking.
+  const shadowCasters = `${snapshot.placements.length}:${snapshot.lod}:${snapshot.showFoliage}:` +
+    prototypes.map((prototype) => `${prototype.id}@${prototype.compiledRevision ?? -1}`).join(',')
+  useEffect(() => {
+    invalidateTerrainShadows()
+  }, [shadowCasters])
 
   return (
     <>
@@ -157,6 +188,12 @@ export function TreeScene({
             resolution="forest"
           />
         </group>
+      )}
+
+      {snapshot.gi && (
+        <Suspense fallback={null}>
+          <ForestGi store={store} onStatus={reportGiStatus} />
+        </Suspense>
       )}
 
       <ForestPointerController store={store} />

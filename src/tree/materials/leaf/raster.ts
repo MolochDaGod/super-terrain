@@ -157,7 +157,7 @@ export function drawLeaf(
         depthBuffer[index] = depth
         alpha[index] = Math.max(alpha[index]!, coverage)
         layers[index] = layers[index]! + coverage
-        height[index] = Math.max(height[index]!, coverage * 0.5)
+        height[index] = Math.max(height[index]!, 0.5)
         basis[index * 3] = planeX
         basis[index * 3 + 1] = planeY
         basis[index * 3 + 2] = planeZ
@@ -232,7 +232,18 @@ export function drawLeaf(
       )
 
       alpha[index] = Math.max(alpha[index]!, coverage)
-      height[index] = blade * coverage
+      // Straight-alpha, like the tint below and for the same reason. Scaling
+      // the relief by coverage puts a cliff in the height field along every
+      // antialiased contour, and `packNormals` takes a central difference of
+      // this field: a one-texel drop of a full blade height tilts the rim
+      // normal almost perpendicular to the leaf. That is the dark outline
+      // around every cutout — shading, not blending, which is why it survives
+      // against a bright sky and gets worse with distance as the mip chain
+      // promotes more rim texels past the alpha test.
+      //
+      // Dilation cannot repair it either: it only fills texels below alpha
+      // 0.02, and the whole antialiased band sits above that.
+      height[index] = blade
       basis[index * 3] = planeX
       basis[index * 3 + 1] = planeY
       basis[index * 3 + 2] = planeZ

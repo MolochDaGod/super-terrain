@@ -20,6 +20,30 @@ export {
   type GiScene,
   type SceneName,
 } from './scenes.ts'
-export { IdTechGI } from './IdTechGI.ts'
-export { createGiComputePasses } from './tsl/kernels.ts'
-export { createIndirectNode } from './tsl/irradianceNode.ts'
+
+// GPU-resident id-Tech-style GI. The exports above are the CPU reference model
+// the pipeline was derived from; these are what runs in a frame.
+export { SousaGI, type SousaGIOptions, type GiStats } from './gpu/SousaGI.ts'
+export {
+  voxelizeScene,
+  createVoxelVolume,
+  finaliseVoxels,
+  splatSample,
+  splatSlab,
+  splatTaperedCylinder,
+  splatCanopyShell,
+  splatTriangle,
+  type VoxelScene,
+  type VoxelAccumulator,
+  type VoxelizeOptions,
+} from './gpu/voxelScene.ts'
+export {
+  applyGiMaterials,
+  injectIrradiance,
+  createIrradianceInjector,
+  GiPhysicalNodeMaterial,
+} from './gpu/giMaterial.ts'
+export { createProbeField, DEFAULT_PROBES, type ProbeConfig } from './gpu/probeField.ts'
+export { createPointLightField, type GiPointLight } from './gpu/pointLights.ts'
+export { createDebugMaterial, DEBUG_VIEWS, type DebugView } from './gpu/debugViews.ts'
+export type { Node as GiNode } from './gpu/nodes.ts'

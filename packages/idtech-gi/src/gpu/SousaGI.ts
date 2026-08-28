@@ -85,6 +85,16 @@ export class SousaGI {
   }
 
   /**
+   * Builds the rig around a volume produced some other way — a proxy of
+   * primitives rather than a walk over triangles. A streamed, instanced,
+   * LOD-swapped scene has no single mesh list to voxelise, and its occlusion is
+   * better described by the shapes it was generated from anyway.
+   */
+  static fromVoxels(voxels: VoxelScene, options: SousaGIOptions = {}): SousaGI {
+    return new SousaGI(voxels, options)
+  }
+
+  /**
    * Replaces the dynamic light list the GI rays shade with. Call every frame
    * for moving lights — it is a buffer write, not a rebuild.
    */

@@ -9,7 +9,9 @@ import {
   attribute,
   Fn,
   float,
+  fwidth,
   mat4,
+  max,
   mix,
   normalize,
   normalLocal,
@@ -17,6 +19,8 @@ import {
   normalView,
   positionLocal,
   positionViewDirection,
+  smoothstep,
+  step,
   texture,
   transformNormal,
   uv,
@@ -38,6 +42,48 @@ type VectorNode = Node<'vec3'>
  * thick rosettes and araucaria scales still scatter within their cuticle even
  * though much less light travels straight through the whole blade.
  */
+/**
+ * Atlas alpha to a one-pixel coverage ramp for alpha-to-coverage.
+ *
+ * `fwidth` is how fast the alpha is changing per pixel, so dividing the signed
+ * distance from the cutoff by it yields a value that crosses 0 to 1 over
+ * roughly one pixel wherever the silhouette is. The isoline stays exactly where
+ * a hard test at `LEAF_ALPHA_TEST` would put it, which is what the mip chain's
+ * coverage matching is calibrated against.
+ *
+ * Under heavy minification the derivative stops meaning anything — a whole
+ * blade fits inside one pixel — and the ramp would collapse to a flat one-half
+ * coverage, dithering the entire canopy. Past that point this hands over to a
+ * hard cutout, which is the right answer at a distance where the silhouette is
+ * smaller than a pixel anyway.
+ */
+function cutoutCoverage(alpha: Node<'float'>): Node<'float'> {
+  const slope = max(fwidth(alpha), float(1e-4))
+  const sharpened = alpha.sub(LEAF_ALPHA_TEST).div(slope).add(0.5).clamp()
+  const hard = step(float(LEAF_ALPHA_TEST), alpha)
+  return mix(sharpened, hard, smoothstep(float(0.2), float(0.5), slope))
+}
+
+/**
+ * How much extra ambient a leaf returns because light passes through it.
+ *
+ * The physics puts a ceiling on this. A leaf transmits roughly as much as it
+ * reflects, so a double-sided card under uniform ambient should return at most
+ * about twice a Lambertian surface of the same albedo — that is, this term
+ * should add roughly `irradiance * albedo / PI` on top of what
+ * `PhysicalLightingModel` already contributed. `surfaceScatter` runs 0.45 to
+ * 0.9, so the multiplier that lands on `1/PI` is about 0.47.
+ *
+ * It was 3, which put the extra term at 1.35 to 2.7 times `albedo * irradiance`
+ * — four to eight times the Lambert term it was added to. That is why foliage
+ * read as luminous next to every other surface no matter what the lighting did:
+ * under ambient, a leaf was returning five to nine times the energy that bark
+ * or ground with the same albedo returned, biased green on top. It also swamped
+ * global illumination, since the probe field arrives through this same
+ * `irradiance` and was being amplified by the same factor on leaves alone.
+ */
+const LEAF_AMBIENT_TRANSMISSION = 0.5
+
 class LeafLightingModel extends PhysicalLightingModel {
   private readonly translucency: Node<'float'>
   private readonly transmitted: VectorNode
@@ -61,9 +107,8 @@ class LeafLightingModel extends PhysicalLightingModel {
     // environment. The floor prevents thick foliage becoming an opaque cutout.
     const surfaceScatter = this.translucency.mul(0.45).add(0.45)
     context.reflectedLight.indirectDiffuse.addAssign(
-      // Kept below the fluorescent v19 response (4.25), but high enough that
-      // the distant crown retains olive midtones instead of collapsing black.
-      context.irradiance.mul(surfaceScatter).mul(3).mul(this.transmitted),
+      context.irradiance.mul(surfaceScatter).mul(LEAF_AMBIENT_TRANSMISSION)
+        .mul(this.transmitted),
     )
   }
 
@@ -190,11 +235,22 @@ export function createFoliageMaterial(
   // A soft threshold plus alpha-to-coverage: hard-cut leaf edges are the
   // single most recognisable "game foliage from 2010" artefact, and MSAA
   // coverage dithering removes it without paying for sorted transparency.
-  // Shared with the mip builder, which rescales alpha per level so the same
-  // fraction of texels survives this threshold at every distance. Two separate
-  // constants would drift and the canopy would thin out again with no
-  // obvious cause.
-  material.alphaTest = LEAF_ALPHA_TEST
+  //
+  // What it must be handed is a *coverage* value, not the atlas alpha. Alpha
+  // to coverage turns whatever alpha it receives into a stochastic sample mask,
+  // and the atlas ramps its alpha over several texels at every blade edge. At
+  // any distance where a card spans a handful of pixels — which is most of a
+  // stand — nearly every pixel then lands in that ramp and gets a fractional
+  // mask, so the uncovered samples resolve to whatever is behind: the dark
+  // canopy interior. That is the black speckle over backlit foliage, and it is
+  // worst facing the sun because that is when lit blade and shaded interior are
+  // furthest apart. The mip chain's coverage matching keeps the same fraction
+  // of texels inside the ramp at every level, so it never resolves away with
+  // distance either.
+  //
+  // Rescaling by the alpha's own screen-space slope puts the transition back
+  // where it belongs: about one pixel wide, on the silhouette only.
+  material.alphaTest = 0.02
   material.alphaToCoverage = true
   material.depthWrite = true
 
@@ -210,7 +266,7 @@ export function createFoliageMaterial(
     albedo.rgb
       .mul(mix(vec3(1, 1, 1), vec3(1.06, 0.92, 1.08), underside))
       .mul(instanceTint),
-    albedo.a,
+    cutoutCoverage(albedo.a),
   )
   material.roughnessNode = mix(roughnessChannel, roughnessChannel.add(0.16), underside)
   // Card-local occlusion for the geometry the card stands in for. It is applied

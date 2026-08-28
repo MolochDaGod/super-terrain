@@ -6,15 +6,8 @@ import {
   worldToCell,
   type ProbeRef,
 } from './cascades.ts'
-import {
-  addSH,
-  copySH,
-  emptySH,
-  evaluateIrradiance as evalSH,
-  mixSH,
-  scaleSH,
-  type SH2,
-} from './sphericalHarmonics.ts'
+import type { SH2 } from './types.ts'
+import { addSH, copySH, emptySH, evaluateIrradiance as evalSH, mixSH, scaleSH } from './sphericalHarmonics.ts'
 import {
   DEFAULT_CASCADE,
   type CascadeConfig,

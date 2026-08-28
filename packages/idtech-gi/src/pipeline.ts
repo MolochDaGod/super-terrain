@@ -3,7 +3,7 @@ import { resolveGather, type GatherCaches } from './gatherFallback.ts'
 import { IrradianceVolumeField } from './irradianceVolume.ts'
 import { INV_PI, TAU, cosineHemisphere, dot3, fibonacciSphere, interleavedGradientNoise, length3, normalize3, sub3 } from './math.ts'
 import { WorldRadianceCache } from './spatialHash.ts'
-import { encodeRadiance, emptySH, evaluateIrradiance, type SH2 } from './sphericalHarmonics.ts'
+import { encodeRadiance, emptySH, evaluateIrradiance } from './sphericalHarmonics.ts'
 import {
   DEFAULT_CACHE,
   DEFAULT_CASCADE,
@@ -18,6 +18,7 @@ import {
   type ScreenSpaceCache,
   type Vec3,
   type VisibilityHit,
+  type SH2,
 } from './types.ts'
 import type { VoxelGrid } from './voxelGrid.ts'
 
