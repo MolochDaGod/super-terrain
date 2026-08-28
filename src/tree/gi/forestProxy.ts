@@ -92,11 +92,19 @@ export async function buildForestProxy(
   // rather than the edge of the volume.
   bounds.max.y += 6
 
-  // A stand is tens of metres across and its occluders are crowns metres wide,
-  // so the field can be far coarser than an interior's. Doubling the resolution
-  // quadruples both the canopy splat and the distance transform, and buys
-  // nothing a crown can resolve.
-  const acc = createVoxelVolume(bounds, options.maxResolution ?? 112)
+  // Resolution follows the stand's extent so the voxel stays about the same
+  // size in metres however wide the layout spreads — a fixed resolution over a
+  // hundred-metre stand puts crowns inside single cells. The ceiling is there
+  // because both the canopy splat and the distance transform scale with the
+  // voxel count, and this runs on the main thread.
+  const span = Math.max(
+    bounds.max.x - bounds.min.x,
+    bounds.max.y - bounds.min.y,
+    bounds.max.z - bounds.min.z,
+  )
+  const resolution = options.maxResolution
+    ?? Math.max(96, Math.min(176, Math.round(span / 0.7)))
+  const acc = createVoxelVolume(bounds, resolution)
   report(0.05, 'forest floor')
   await yieldToBrowser()
   splatSlab(acc, groundY, acc.cell * 2.5, floor)

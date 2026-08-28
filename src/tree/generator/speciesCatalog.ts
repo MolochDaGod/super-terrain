@@ -46,7 +46,7 @@ export type TreeTrunkProfile = (typeof TREE_TRUNK_PROFILES)[number]
 export interface TreeSpeciesDefinition<Id extends string = string> {
   id: Id
   label: string
-  group: 'temperate-broadleaf' | 'conifer' | 'tropical' | 'palm' | 'succulent'
+  group: 'temperate-broadleaf' | 'conifer' | 'tropical' | 'palm' | 'succulent' | 'shrub'
   growthModel: TreeGrowthModel
   rootModel: TreeRootModel
   organModel: TreeOrganModel
@@ -365,6 +365,30 @@ export const TREE_SPECIES_DEFINITIONS = [
     growthModel: 'colonized-crown', rootModel: 'basal-surface',
     organModel: 'needle-spray', trunkProfile: 'conifer-excurrent',
     barkProfile: 'pine-plated-dark', foliageProfile: 'black-pine-needle',
+  },
+  // Shrubs. They take the colonized crown like the broadleaves do — mass fills
+  // a volume from attractors rather than from a scaffold — and it is
+  // `bolePlan: 'multistem'` in the preset plus `shrub()` in the architecture
+  // that make the result a bush rather than a small tree.
+  {
+    id: 'hazel-thicket', label: 'Hazel thicket', group: 'shrub',
+    growthModel: 'colonized-crown', rootModel: 'basal-surface',
+    organModel: 'broadleaf-spray', trunkProfile: 'tapered',
+    barkProfile: 'smooth-mottled', foliageProfile: 'hazel-leaf',
+  },
+  {
+    id: 'elder-bush', label: 'Elder bush', group: 'shrub',
+    growthModel: 'colonized-crown', rootModel: 'basal-surface',
+    organModel: 'broadleaf-spray', trunkProfile: 'tapered',
+    barkProfile: 'smooth-grey', foliageProfile: 'elder-pinnate',
+  },
+  {
+    id: 'common-juniper', label: 'Common juniper', group: 'shrub',
+    growthModel: 'colonized-crown', rootModel: 'basal-surface',
+    // Fibrous and shredding, which is what a juniper stem actually does and
+    // the closest thing in the bark set.
+    organModel: 'needle-spray', trunkProfile: 'tapered',
+    barkProfile: 'fibrous-redwood', foliageProfile: 'juniper-needle',
   },
 ] as const satisfies readonly TreeSpeciesDefinition[]
 

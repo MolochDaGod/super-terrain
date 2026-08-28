@@ -35,6 +35,7 @@ import {
   foliageDensity,
   foliageFrustumPlanes,
 } from './foliageRuntime'
+import { FOLIAGE_MASK_ROWS } from './foliageSpecies'
 import {
   FOLIAGE_DENSITY_SCALES,
   foliageSpeciesRow,
@@ -391,34 +392,41 @@ function createPopulateKernel(
 
       const column = clamp(floor(maskU.mul(maskResolution)), 0, maskResolution - 1)
       const row = clamp(floor(maskV.mul(maskResolution)), 0, maskResolution - 1)
-      const maskIndex = uint(row.mul(maskResolution).add(column)).mul(uint(2))
-      const low = maskBuffer.element(maskIndex).mul(
-        vec4(scales[0], scales[1], scales[2], scales[3]),
-      )
-      const high = maskBuffer.element(maskIndex.add(uint(1))).mul(
-        vec4(scales[4], scales[5], scales[6], scales[7]),
-      )
+      const maskIndex = uint(row.mul(maskResolution).add(column))
+        .mul(uint(FOLIAGE_MASK_ROWS))
+      // Species weights, already scaled by each one's clump abundance so a
+      // brush at full strength lays the right number of ferns and the right
+      // number of fescue tufts rather than the same count of both.
+      const weighted: ShaderValue[] = []
+      for (let maskRow = 0; maskRow < FOLIAGE_MASK_ROWS; maskRow += 1) {
+        const scaleRow = vec4(
+          scales[maskRow * 4] ?? 0,
+          scales[maskRow * 4 + 1] ?? 0,
+          scales[maskRow * 4 + 2] ?? 0,
+          scales[maskRow * 4 + 3] ?? 0,
+        )
+        weighted.push(maskBuffer.element(maskIndex.add(uint(maskRow))).mul(scaleRow))
+      }
 
-      const c1 = low.x
-      const c2 = c1.add(low.y)
-      const c3 = c2.add(low.z)
-      const c4 = c3.add(low.w)
-      const c5 = c4.add(high.x)
-      const c6 = c5.add(high.y)
-      const c7 = c6.add(high.z)
-      const total = c7.add(high.w).mul(inField)
+      // Running sums, one per species boundary. The last is the total.
+      const cumulative: ShaderValue[] = []
+      let running: ShaderValue | null = null
+      for (const group of weighted) {
+        for (const channel of ['x', 'y', 'z', 'w'] as const) {
+          running = running === null ? group[channel] : running.add(group[channel])
+          cumulative.push(running)
+        }
+      }
+      const total = cumulative[cumulative.length - 1]!.mul(inField)
 
       const draw = hash21(vec2(positionX, positionZ).mul(5.13).add(97.7))
       const pick = draw.mul(total)
       // Branchless weighted choice: the index is simply how many cumulative
       // thresholds the draw cleared.
-      const speciesFloat = step(c1, pick)
-        .add(step(c2, pick))
-        .add(step(c3, pick))
-        .add(step(c4, pick))
-        .add(step(c5, pick))
-        .add(step(c6, pick))
-        .add(step(c7, pick))
+      let speciesFloat: ShaderValue = step(cumulative[0]!, pick)
+      for (let i = 1; i < cumulative.length - 1; i += 1) {
+        speciesFloat = speciesFloat.add(step(cumulative[i]!, pick))
+      }
       const species = int(min(speciesFloat, float(scales.length - 1)))
 
       const accept = hash21(vec2(positionZ, positionX).mul(3.37).add(7.91))

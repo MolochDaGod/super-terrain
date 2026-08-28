@@ -229,8 +229,9 @@ function TreeCatalogue({ store }: { store: TreeEditorStore }) {
             <ForestOptionRow label="Area radius">
               {[
                 { value: 45, label: '45 m' },
-                { value: 70, label: '70 m' },
-                { value: 100, label: '100 m' },
+                { value: 90, label: '90 m' },
+                { value: 140, label: '140 m' },
+                { value: 190, label: '190 m' },
               ].map((option) => (
                 <ForestOptionButton
                   key={option.value}

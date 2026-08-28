@@ -8,6 +8,7 @@ import {
   type Renderer,
 } from 'three/webgpu'
 import type ComputeNode from 'three/src/nodes/gpgpu/ComputeNode.js'
+import { FOLIAGE_MASK_ROWS } from './foliageSpecies'
 import {
   Fn,
   If,
@@ -35,7 +36,8 @@ export const FOLIAGE_FIELD_SIZE = 400
 
 export type FoliagePaintMode = 'paint' | 'erase'
 
-const createMaskBuffer = (cells: number) => attributeArray(cells * 2, 'vec4')
+const createMaskBuffer = (cells: number) =>
+  attributeArray(cells * FOLIAGE_MASK_ROWS, 'vec4')
 export type FoliageMaskBuffer = ReturnType<typeof createMaskBuffer>
 
 export interface FoliagePaintStroke {
@@ -72,12 +74,13 @@ export class FoliageMaskField {
   readonly resolution = FOLIAGE_MASK_RESOLUTION
   readonly fieldSize = FOLIAGE_FIELD_SIZE
 
-  /** Species 0-3 weights, linear filtered, for the ground canopy. */
-  readonly weightsA: StorageTexture
-  /** Species 4-7 weights. */
-  readonly weightsB: StorageTexture
+  /**
+   * Species weights in groups of four, linear filtered, for the ground canopy.
+   * One texture per mask row; the ground material sums them all.
+   */
+  readonly weights: readonly StorageTexture[]
 
-  /** Two vec4 rows per cell — eight species weights. */
+  /** `FOLIAGE_MASK_ROWS` vec4 rows per cell, four species weights each. */
   readonly buffer: FoliageMaskBuffer
 
   private readonly strokeSegment = uniform(new Vector4())
@@ -91,8 +94,12 @@ export class FoliageMaskField {
     const resolution = this.resolution
     const cells = resolution * resolution
 
-    this.weightsA = createWeightTexture('foliage-mask-weights-0-3', resolution)
-    this.weightsB = createWeightTexture('foliage-mask-weights-4-7', resolution)
+    this.weights = Array.from({ length: FOLIAGE_MASK_ROWS }, (_, row) =>
+      createWeightTexture(
+        `foliage-mask-weights-${row * 4}-${row * 4 + 3}`,
+        resolution,
+      ),
+    )
     this.buffer = createMaskBuffer(cells)
 
     const texel = float(this.fieldSize / resolution)
@@ -102,8 +109,7 @@ export class FoliageMaskField {
     const species = this.strokeSpecies
     const sign = this.strokeSign
     const buffer = this.buffer
-    const weightsA = this.weightsA
-    const weightsB = this.weightsB
+    const weights = this.weights
 
     this.paintKernel = Fn(() => {
       const cellX = instanceIndex.mod(uint(resolution)).toVar()
@@ -127,9 +133,10 @@ export class FoliageMaskField {
       const inner = radius.mul(clamp(shape.z, 0, 0.98))
       const amount = smoothstep(radius, inner, distance).mul(shape.y)
 
-      const base = instanceIndex.mul(uint(2))
-      const low = buffer.element(base).toVar('foliageWeightsLow')
-      const high = buffer.element(base.add(uint(1))).toVar('foliageWeightsHigh')
+      const base = instanceIndex.mul(uint(FOLIAGE_MASK_ROWS))
+      const rows = Array.from({ length: FOLIAGE_MASK_ROWS }, (_, row) =>
+        buffer.element(base.add(uint(row))).toVar(`foliageWeights${row}`),
+      )
 
       If(amount.greaterThan(0.0002), () => {
         // Adding to one species while the others recede is what makes a second
@@ -143,28 +150,22 @@ export class FoliageMaskField {
         const selected = int(species)
         const one = float(1)
         const zero = float(0)
-        const addLow = vec4(
-          select(selected.equal(int(0)), one, zero),
-          select(selected.equal(int(1)), one, zero),
-          select(selected.equal(int(2)), one, zero),
-          select(selected.equal(int(3)), one, zero),
-        ).mul(gain)
-        const addHigh = vec4(
-          select(selected.equal(int(4)), one, zero),
-          select(selected.equal(int(5)), one, zero),
-          select(selected.equal(int(6)), one, zero),
-          select(selected.equal(int(7)), one, zero),
-        ).mul(gain)
-        low.assign(clamp(low.mul(competition).add(addLow), 0, 1))
-        high.assign(clamp(high.mul(competition).add(addHigh), 0, 1))
+        rows.forEach((current, row) => {
+          const add = vec4(
+            select(selected.equal(int(row * 4)), one, zero),
+            select(selected.equal(int(row * 4 + 1)), one, zero),
+            select(selected.equal(int(row * 4 + 2)), one, zero),
+            select(selected.equal(int(row * 4 + 3)), one, zero),
+          ).mul(gain)
+          current.assign(clamp(current.mul(competition).add(add), 0, 1))
+        })
       })
 
-      buffer.element(base).assign(low)
-      buffer.element(base.add(uint(1))).assign(high)
-
       const coord = ivec2(int(cellX), int(cellY))
-      textureStore(weightsA, coord, low)
-      textureStore(weightsB, coord, high)
+      rows.forEach((current, row) => {
+        buffer.element(base.add(uint(row))).assign(current)
+        textureStore(weights[row]!, coord, current)
+      })
     })().compute(cells)
   }
 
@@ -201,8 +202,7 @@ export class FoliageMaskField {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    this.weightsA.dispose()
-    this.weightsB.dispose()
+    for (const texture of this.weights) texture.dispose()
   }
 }
 

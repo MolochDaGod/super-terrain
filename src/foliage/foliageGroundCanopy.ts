@@ -235,15 +235,17 @@ export function createFoliageGroundMaterial(
   const ground: ShaderValue = positionWorld.xz
   const fieldUv = ground.div(mask.fieldSize).add(0.5)
 
-  const low = texture(mask.weightsA, fieldUv)
-  const high = texture(mask.weightsB, fieldUv)
-  const total = dot(low, vec4(1, 1, 1, 1)).add(dot(high, vec4(1, 1, 1, 1)))
+  const weightRows = mask.weights.map((row) => texture(row, fieldUv))
+  const total = weightRows
+    .map((row) => dot(row, vec4(1, 1, 1, 1)))
+    .reduce((sum: ShaderValue, row: ShaderValue) => sum.add(row))
   const cover = clamp(total, 0, 1)
 
   let blended: ShaderValue = vec3(0, 0, 0)
   AGGREGATE_COLOURS.forEach((colour, index) => {
-    const channel = ['x', 'y', 'z', 'w'][index % 4]
-    const weights = index < 4 ? low : high
+    const channel = ['x', 'y', 'z', 'w'][index % 4]!
+    const weights = weightRows[Math.floor(index / 4)]
+    if (!weights) return
     blended = blended.add(vec3(colour[0], colour[1], colour[2]).mul(weights[channel]))
   })
   // Nudged toward the green primary. AgX rolls the sunlit half of a wide field

@@ -19,6 +19,10 @@ export type FoliageSpeciesId =
   | 'woodland-fern'
   | 'wildflower'
   | 'sedge-reed'
+  | 'forest-moss'
+  | 'wood-rush'
+  | 'bramble'
+  | 'bracken'
 
 export interface FoliageSpecies {
   id: FoliageSpeciesId
@@ -279,9 +283,140 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     densityScale: 0.32,
     bladesPerClump: 7,
   },
+  // The woodland floor. The set above was written for open ground, and a stand
+  // painted with it reads as a lawn under trees: everything in it sits between
+  // ten and sixty centimetres, and nothing has the habit of a shade plant. The
+  // four below are the layers a real forest floor is actually built from, and
+  // they are chosen for the lengths the palette had nothing at — a mat below
+  // everything, and a frond above everything.
+  {
+    id: 'forest-moss',
+    label: 'Forest moss',
+    hint: 'Ground-hugging mat · damp saturated green',
+    swatch: '#4a7a3a',
+    // Ankle height is already too tall. Moss is the layer that makes a floor
+    // read as old and damp rather than as bare soil with plants standing on
+    // it, and it only does that by being genuinely flat.
+    height: 0.045,
+    heightVariance: 0.55,
+    width: 0.005,
+    // It does not move. A moss that sways in the wind is the single most
+    // obvious way this layer announces it is made of grass blades.
+    stiffness: 0.96,
+    arch: 0.45,
+    clumpRadius: 0.055,
+    taper: 0.95,
+    bulge: 0.34,
+    yawSpread: 3.14,
+    // Splayed almost flat, which is what turns a tuft into a cushion.
+    tiltSpread: 1.25,
+    base: [0.016, 0.038, 0.014],
+    tip: [0.055, 0.105, 0.03],
+    flower: [0.07, 0.1, 0.04],
+    flowerChance: 0,
+    dryChance: 0.02,
+    roughness: 0.74,
+    translucency: 0.32,
+    // Dense: a mat is continuous or it is not a mat.
+    densityScale: 2.4,
+    bladesPerClump: 8,
+  },
+  {
+    id: 'wood-rush',
+    label: 'Wood rush',
+    hint: 'Fine arching tufts · pale fresh green',
+    swatch: '#7fa356',
+    height: 0.26,
+    heightVariance: 0.42,
+    width: 0.005,
+    stiffness: 0.42,
+    arch: 0.88,
+    clumpRadius: 0.062,
+    taper: 1.5,
+    bulge: 0.06,
+    yawSpread: 2.7,
+    tiltSpread: 0.72,
+    base: [0.038, 0.062, 0.026],
+    tip: [0.125, 0.175, 0.062],
+    flower: [0.16, 0.14, 0.08],
+    flowerChance: 0.1,
+    dryChance: 0.16,
+    roughness: 0.52,
+    translucency: 0.72,
+    densityScale: 0.95,
+    bladesPerClump: 7,
+  },
+  {
+    id: 'bramble',
+    label: 'Bramble',
+    hint: 'Sprawling dark canes · broad leaves',
+    swatch: '#2f4a2c',
+    height: 0.52,
+    heightVariance: 0.45,
+    // Broad enough to read as a leaf rather than a blade, which is what the
+    // floor needs between the grasses and the ferns.
+    width: 0.072,
+    stiffness: 0.48,
+    // A cane arches over and back down. This is the parameter that makes it
+    // sprawl instead of stand.
+    arch: 1.28,
+    clumpRadius: 0.17,
+    taper: 0.5,
+    bulge: 0.62,
+    yawSpread: 3.14,
+    tiltSpread: 1.05,
+    base: [0.014, 0.03, 0.014],
+    tip: [0.055, 0.088, 0.032],
+    flower: [0.1, 0.06, 0.07],
+    flowerChance: 0.06,
+    dryChance: 0.1,
+    roughness: 0.38,
+    translucency: 0.48,
+    densityScale: 0.34,
+    bladesPerClump: 6,
+  },
+  {
+    id: 'bracken',
+    label: 'Bracken',
+    hint: 'Waist-high arching fronds · the tall layer',
+    swatch: '#5c7a3a',
+    // The one the palette was missing most. A metre of frond is what stops a
+    // forest floor reading as mown, and nothing else in the set reaches it
+    // except the sedge, which is a wetland plant standing bolt upright.
+    height: 1.02,
+    heightVariance: 0.36,
+    width: 0.105,
+    stiffness: 0.52,
+    arch: 1.02,
+    clumpRadius: 0.1,
+    taper: 0.6,
+    bulge: 0.55,
+    yawSpread: 3.14,
+    tiltSpread: 0.88,
+    base: [0.02, 0.042, 0.018],
+    tip: [0.075, 0.13, 0.042],
+    flower: [0.1, 0.09, 0.04],
+    flowerChance: 0,
+    // Bracken browns off in patches, and the dead fronds stay standing.
+    dryChance: 0.2,
+    roughness: 0.42,
+    translucency: 0.74,
+    // Sparse and large, like the fern it is.
+    densityScale: 0.24,
+    bladesPerClump: 5,
+  },
 ]
 
 export const FOLIAGE_SPECIES_COUNT = FOLIAGE_SPECIES.length
+
+/**
+ * vec4 rows of species weight the paint mask carries per cell.
+ *
+ * Everything that reads or writes the mask derives its row count from this
+ * rather than assuming two, so adding a species is an edit to the list above
+ * and nothing else.
+ */
+export const FOLIAGE_MASK_ROWS = Math.ceil(FOLIAGE_SPECIES_COUNT / 4)
 
 export function foliageSpeciesIndex(id: FoliageSpeciesId): number {
   const index = FOLIAGE_SPECIES.findIndex((species) => species.id === id)

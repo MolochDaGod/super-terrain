@@ -264,13 +264,12 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       forestPreset: 'mossy-old-growth',
       forestSeed: 42017,
       forestDensity: 1,
-      // Thirty metres of closed stand is about a hundred and sixty stems, and
-      // it is as much as a four-core machine with integrated graphics carries
-      // at eye level: past roughly two hundred the tab runs out of memory
-      // partway through a walk. Nothing in the frame is lost — an eye-level
-      // camera in a closed stand cannot see past the third rank of trunks —
-      // so the radius, not the density, is what gives way.
-      forestRadius: 30,
+      // The ground is four hundred metres across. Radius is extent, not budget
+      // — the layout spends a capped stem budget, so widening it scatters the
+      // same trees into groves and glades across more of that ground rather
+      // than multiplying them. A hundred and forty metres covers most of the
+      // world; drop it if you want a single copse to work on.
+      forestRadius: 140,
       status: 'Forest workspace ready',
     })
   }

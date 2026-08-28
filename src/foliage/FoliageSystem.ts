@@ -68,6 +68,46 @@ export type FoliageFloor = 'meadow' | 'forest'
 
 type FloorSeed = [string, number, number, number, number]
 
+/**
+ * Deterministic colonies of one species scattered over a disc.
+ *
+ * Seeded rather than hand-placed so the layout covers whatever the stand
+ * actually spans, and so adding a layer is one line instead of twenty
+ * coordinates that have to be kept clear of each other by eye.
+ */
+function scatterColonies(
+  species: string,
+  count: number,
+  spread: number,
+  radius: readonly [number, number],
+  flow: readonly [number, number],
+  seed: number,
+): FloorSeed[] {
+  let state = seed >>> 0
+  const random = () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let t = state
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+  const seeds: FloorSeed[] = []
+  for (let i = 0; i < count; i += 1) {
+    const angle = random() * Math.PI * 2
+    // Square-rooted so colonies are spread evenly over the disc rather than
+    // piled around the origin.
+    const distance = Math.sqrt(random()) * spread
+    seeds.push([
+      species,
+      Math.round(Math.cos(angle) * distance),
+      Math.round(Math.sin(angle) * distance),
+      radius[0] + random() * (radius[1] - radius[0]),
+      flow[0] + random() * (flow[1] - flow[0]),
+    ])
+  }
+  return seeds
+}
+
 const FLOOR_SEEDS: Record<FoliageFloor, readonly FloorSeed[]> = {
   meadow: [
     ['tussock', -46, 28, 52, 0.55],
@@ -80,36 +120,33 @@ const FLOOR_SEEDS: Record<FoliageFloor, readonly FloorSeed[]> = {
     ['sedge-reed', 108, -18, 30, 0.58],
     ['broadleaf-weed', 6, 96, 32, 0.45],
   ],
-  // Colonies, not a sward: overlapping fern stands with low-growing mats
-  // between them and bare litter everywhere else. Flows stay well under one
-  // so the patches keep soft, incomplete edges.
+  // Colonies, not a sward.
+  //
+  // The floor is built in layers the way a real one is, because a single
+  // species painted anywhere always reads as a texture: bracken over the open
+  // ground, fern colonies in the shade under it, bramble sprawling where a
+  // gap lets light in, and a fine rush threading between all of them. Flows
+  // stay well under one so the patches keep soft, incomplete edges and
+  // overlap into mixtures rather than stacking as decals.
+  //
+  // Scattered rather than listed. The stand now spreads across most of a
+  // four-hundred-metre ground, and a hand-placed list of nine colonies inside
+  // forty metres of the origin left everything beyond that bare — which is
+  // most of what made the floor read as a demo.
+  //
+  // Moss is deliberately absent. A mat of blades is the wrong model for it
+  // twice over: moss is a film on a surface rather than a stand of
+  // individuals, and it lives in the ground material where a film belongs.
+  // The species exists in the palette for painting cushions by hand.
   forest: [
-    ['woodland-fern', -14, 9, 17, 0.55],
-    ['woodland-fern', 21, -13, 14, 0.5],
-    ['woodland-fern', -3, -28, 12, 0.44],
-    ['woodland-fern', 33, 24, 15, 0.48],
-    ['woodland-fern', -34, -6, 13, 0.42],
-    ['woodland-fern', 41, -6, 11, 0.36],
-    ['woodland-fern', -40, 33, 12, 0.38],
-    // Low herbs between the fern stands.
-    //
-    // The moss is deliberately not here. A clover mat was standing in for it,
-    // and a mat of blades is the wrong model twice over: moss is a film on a
-    // surface rather than a stand of individuals, and the clover came with a
-    // one-in-nine chance of a pale flower, which scattered white confetti
-    // across a forest floor that should be the darkest thing in the frame.
-    // The moss now lives in the ground material, where a film belongs, and
-    // this layer is just the scattered broadleaf herbs that grow between the
-    // ferns — dark-flowered, coarse enough to break the litter's silhouette.
+    ...scatterColonies('bracken', 20, 122, [11, 23], [0.3, 0.54], 0x1f35),
+    ...scatterColonies('woodland-fern', 24, 118, [10, 19], [0.34, 0.56], 0x2c71),
+    ...scatterColonies('bramble', 15, 116, [6, 13], [0.26, 0.46], 0x3a19),
+    ...scatterColonies('wood-rush', 28, 130, [12, 25], [0.18, 0.32], 0x4d63),
     // Scattered, not a sward. Painted at full flow these read as a layer of
-    // pale plastic leaves over the litter — the floor of a closed stand is
-    // mostly bare, and the herbs are the exception on it rather than the rule.
-    ['broadleaf-weed', 2, 4, 20, 0.24],
-    ['broadleaf-weed', -22, 24, 16, 0.2],
-    ['broadleaf-weed', 26, -27, 17, 0.22],
-    ['broadleaf-weed', 14, 34, 13, 0.17],
-    ['broadleaf-weed', -30, -20, 14, 0.2],
-    ['broadleaf-weed', 38, 12, 12, 0.15],
+    // pale plastic leaves over the litter — the herbs are the exception on a
+    // forest floor rather than the rule.
+    ...scatterColonies('broadleaf-weed', 18, 120, [11, 19], [0.14, 0.25], 0x5b87),
   ],
 }
 

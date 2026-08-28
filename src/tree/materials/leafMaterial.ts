@@ -19,8 +19,6 @@ import {
   normalView,
   positionLocal,
   positionViewDirection,
-  smoothstep,
-  step,
   texture,
   transformNormal,
   uv,
@@ -29,6 +27,7 @@ import {
   vec4,
 } from 'three/tsl'
 import type { Node } from 'three/webgpu'
+import { foliageSway } from './foliageWind'
 import {
   LEAF_ALPHA_TEST,
   type LeafAtlasTextures,
@@ -51,17 +50,21 @@ type VectorNode = Node<'vec3'>
  * a hard test at `LEAF_ALPHA_TEST` would put it, which is what the mip chain's
  * coverage matching is calibrated against.
  *
- * Under heavy minification the derivative stops meaning anything — a whole
- * blade fits inside one pixel — and the ramp would collapse to a flat one-half
- * coverage, dithering the entire canopy. Past that point this hands over to a
- * hard cutout, which is the right answer at a distance where the silhouette is
- * smaller than a pixel anyway.
+ * The result is self-normalising: dividing by the per-pixel slope makes the
+ * transition one pixel wide at every distance, so there is nothing to hand over
+ * to at range. Blending toward a hard cutout past some slope, which is the
+ * obvious-looking safety net, does the opposite of helping — the blend itself
+ * produces intermediate coverage across a whole depth band and dithers it.
+ *
+ * With alpha to coverage off this decides the cut boundary to sub-texel
+ * accuracy instead of at whichever texel centre crosses the threshold, which
+ * keeps blade edges from crawling as a card is approached. It is also the
+ * prerequisite for switching coverage back on: doing that without this is what
+ * produced the speckle in the first place.
  */
 function cutoutCoverage(alpha: Node<'float'>): Node<'float'> {
-  const slope = max(fwidth(alpha), float(1e-4))
-  const sharpened = alpha.sub(LEAF_ALPHA_TEST).div(slope).add(0.5).clamp()
-  const hard = step(float(LEAF_ALPHA_TEST), alpha)
-  return mix(sharpened, hard, smoothstep(float(0.2), float(0.5), slope))
+  const slope = max(fwidth(alpha), float(1e-5))
+  return alpha.sub(LEAF_ALPHA_TEST).div(slope).add(0.5).clamp()
 }
 
 /**
@@ -177,7 +180,7 @@ export function createFoliageMaterial(
       metalness: 0,
     })
     if (attributeInstancing) {
-      applyAttributeInstanceTransform(material)
+      applyAttributeInstanceTransform(material, { wind: true })
       material.colorNode = vec4(
         attribute<'vec3'>('treeInstanceColor', 'vec3'), 1,
       )
@@ -215,7 +218,7 @@ export function createFoliageMaterial(
   const material = new LeafNodeMaterial(translucency, transmitted)
   material.name = 'leaf spray card'
   material.vertexColors = !atlasUv
-  if (attributeInstancing) applyAttributeInstanceTransform(material)
+  if (attributeInstancing) applyAttributeInstanceTransform(material, { wind: true })
   if (atlasUv) {
     material.normalNode = normalMap(texture(card.normalMap, atlasUv).rgb, vec2(0.28))
   } else {
@@ -232,26 +235,25 @@ export function createFoliageMaterial(
   material.roughness = 1
   material.metalness = 0
   material.side = DoubleSide
-  // A soft threshold plus alpha-to-coverage: hard-cut leaf edges are the
-  // single most recognisable "game foliage from 2010" artefact, and MSAA
-  // coverage dithering removes it without paying for sorted transparency.
+  // Alpha to coverage was here to antialias the cutout, and measurement says
+  // it cannot pay for itself in a canopy.
   //
-  // What it must be handed is a *coverage* value, not the atlas alpha. Alpha
-  // to coverage turns whatever alpha it receives into a stochastic sample mask,
-  // and the atlas ramps its alpha over several texels at every blade edge. At
-  // any distance where a card spans a handful of pixels — which is most of a
-  // stand — nearly every pixel then lands in that ramp and gets a fractional
-  // mask, so the uncovered samples resolve to whatever is behind: the dark
-  // canopy interior. That is the black speckle over backlit foliage, and it is
-  // worst facing the sun because that is when lit blade and shaded interior are
-  // furthest apart. The mip chain's coverage matching keeps the same fraction
-  // of texels inside the ramp at every level, so it never resolves away with
-  // distance either.
+  // It turns the fragment's alpha into a stochastic MSAA sample mask, so every
+  // pixel that is not fully inside or fully outside a blade resolves as a
+  // mixture of the blade and whatever is behind it. In a stand that background
+  // is the dark canopy interior, which is why backlit foliage came out covered
+  // in black speckle, worst when looking into the sun — the moment lit blade
+  // and shaded interior are furthest apart.
   //
-  // Rescaling by the alpha's own screen-space slope puts the transition back
-  // where it belongs: about one pixel wide, on the silhouette only.
+  // Sharpening the coverage to one pixel (see `cutoutCoverage`) removes it on
+  // near and middle foliage but not in the depth of the canopy, because there
+  // several cards stack inside a single pixel and every pixel is a silhouette
+  // pixel for one of them. At that density alpha to coverage has no silhouette
+  // left to antialias and only contributes noise. The frames with it off are
+  // cleaner at every distance, and the geometry edges of the cards are still
+  // antialiased by MSAA itself.
   material.alphaTest = 0.02
-  material.alphaToCoverage = true
+  material.alphaToCoverage = false
   material.depthWrite = true
 
   // The abaxial surface of a leaf is genuinely a different material: paler,
@@ -297,6 +299,7 @@ export function createFrondMaterial(attributeInstancing = false): MeshStandardNo
 
 export function applyAttributeInstanceTransform(
   material: MeshStandardNodeMaterial,
+  { wind = false }: { wind?: boolean } = {},
 ): void {
   const instanceMatrix = mat4(
     attribute<'vec4'>('treeInstanceMatrix0', 'vec4'),
@@ -305,7 +308,18 @@ export function applyAttributeInstanceTransform(
     attribute<'vec4'>('treeInstanceMatrix3', 'vec4'),
   )
   material.positionNode = Fn(() => {
-    normalLocal.assign(transformNormal(normalLocal, instanceMatrix))
-    return instanceMatrix.mul(positionLocal).xyz
+    const placed = instanceMatrix.mul(positionLocal).xyz
+    const worldNormal = transformNormal(normalLocal, instanceMatrix)
+    if (!wind) {
+      normalLocal.assign(worldNormal)
+      return placed
+    }
+    // The matrix's translation column is where this spray meets its twig. The
+    // sway is a rotation about that point, so the offset is what turns and the
+    // anchor is what stays.
+    const anchor = attribute<'vec4'>('treeInstanceMatrix3', 'vec4').xyz
+    const swayed = foliageSway(anchor, placed.sub(anchor), worldNormal)
+    normalLocal.assign(swayed.normal)
+    return anchor.add(swayed.position)
   })()
 }

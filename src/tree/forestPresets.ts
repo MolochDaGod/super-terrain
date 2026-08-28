@@ -127,6 +127,14 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       // interior graded to a mean luminance of about 0.2 a single one takes
       // the whole exposure with it. There are none in the reference.
       { species: 'european-beech', weight: 22, variations: [5], scale: [0.28, 0.46] },
+      // A hazel layer, kept deliberately thin. Hazel under beech is the
+      // classic pairing, but a closed canopy suppresses it — a stand carrying
+      // as much shrub as the reference photographs show has gaps this preset
+      // does not. Enough to break the bare-floor read at eye level and no
+      // more. Elder is rarer still: it wants a gap and a richer soil than the
+      // inside of a closed stand offers.
+      { species: 'hazel-thicket', weight: 10, variations: [0], scale: [0.7, 1.05] },
+      { species: 'elder-bush', weight: 4, variations: [0], scale: [0.7, 1.0] },
     ],
     // Storm relics: snapped stems, so the fallen end reads as a broken bole
     // rather than as a tree that was picked up and set down sideways.
@@ -154,6 +162,11 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       { species: 'european-beech', weight: 28, variations: [0, 5], scale: [0.78, 1.12] },
       { species: 'silver-birch', weight: 24, variations: [0, 3], scale: [0.72, 1.08] },
       { species: 'norway-spruce', weight: 14, variations: [0, 1], scale: [0.8, 1.1] },
+      // An open mixed wood is where a shrub layer actually belongs: enough
+      // light reaches the floor to support one, and it is most of what makes
+      // the difference between woodland and an orchard at eye level.
+      { species: 'hazel-thicket', weight: 18, variations: [0], scale: [0.72, 1.12] },
+      { species: 'elder-bush', weight: 10, variations: [0], scale: [0.72, 1.08] },
     ],
   },
   {
@@ -166,6 +179,11 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
     mix: [
       { species: 'ancient-oak', weight: 72, variations: [0, 4], scale: [0.86, 1.18] },
       { species: 'field-oak', weight: 28, variations: [2, 5], scale: [0.68, 0.98] },
+      // Wood pasture: widely spaced veterans over scrub. The shrubs are what
+      // fill the ground between them, and without them the preset is a lawn
+      // with trees on it.
+      { species: 'hazel-thicket', weight: 22, variations: [0], scale: [0.78, 1.2] },
+      { species: 'common-juniper', weight: 14, variations: [0], scale: [0.8, 1.35] },
     ],
   },
   {
@@ -179,6 +197,9 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
       { species: 'norway-spruce', weight: 58, variations: [0, 3], scale: [0.7, 1.14] },
       { species: 'windswept-pine', weight: 28, variations: [0, 5], scale: [0.76, 1.12] },
       { species: 'silver-birch', weight: 14, variations: [3, 5], scale: [0.68, 0.96] },
+      // Juniper is the boreal understory — it takes the cold and the acid soil
+      // that keeps everything else out.
+      { species: 'common-juniper', weight: 20, variations: [0], scale: [0.75, 1.3] },
     ],
   },
   {
@@ -248,6 +269,21 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
   },
 ] as const
 
+/**
+ * Stems the editor will plant at the reference area, before spread is applied.
+ *
+ * A stand's own stems-per-hectare is a property of the *forest*, not of how
+ * much ground the editor is filling, so it cannot also decide the budget: at a
+ * hundred metres a closed beech stand is seventeen thousand trees. The budget
+ * therefore grows as the geometric mean of the requested area and this
+ * reference one — enough that a larger world reads as more forest, slow enough
+ * that it stays inside what the machine can bake and draw.
+ */
+const REFERENCE_HECTARES = Math.PI * 30 * 30 / 10_000
+
+/** Hard ceiling on planted stems, whatever area and density ask for. */
+const MAX_STEMS = 480
+
 export function generateForestLayout(
   presetId: ForestPresetId,
   seed: number,
@@ -257,70 +293,92 @@ export function generateForestLayout(
   const preset = FOREST_PRESETS.find((candidate) => candidate.id === presetId)
     ?? FOREST_PRESETS[0]
   const random = mulberry32(seed ^ hashString(preset.id))
-  const hectares = Math.PI * radius * radius / 10_000
-  const targetCount = Math.min(
-    480,
-    Math.max(8, Math.round(preset.treesPerHectare * hectares * density)),
-  )
-  const clusters = preset.mix.map((_, mixIndex) =>
-    Array.from({ length: 3 }, (__, clusterIndex) => {
-      const clusterRandom = mulberry32(
-        seed ^ Math.imul(mixIndex + 3, 0x45d9f3b) ^ Math.imul(clusterIndex + 7, 0x27d4eb2d),
-      )
-      const angle = clusterRandom() * Math.PI * 2
-      const distance = Math.sqrt(clusterRandom()) * radius * 0.72
-      return [Math.cos(angle) * distance, Math.sin(angle) * distance] as const
-    }),
-  )
-  const accepted: Array<GeneratedForestTree & { spacing: number }> = []
 
-  for (let attempt = 0; attempt < targetCount * 80 && accepted.length < targetCount; attempt += 1) {
+  const hectares = Math.PI * radius * radius / 10_000
+  const budget = Math.max(
+    8,
+    Math.min(
+      MAX_STEMS,
+      Math.round(
+        preset.treesPerHectare
+          * Math.sqrt(hectares * REFERENCE_HECTARES)
+          * density,
+      ),
+    ),
+  )
+
+  // Density varies across the stand, but every part of it is stand. Spending
+  // the budget on a fraction of the ground at full density instead — groves
+  // with open country between — is a real landscape, and it is not a forest:
+  // it reads as islands of trees rather than as woods you are inside of.
+  // The noise modulates how thick the wood is, never whether it is there.
+  const thinnest = 0.42
+
+  const accepted: Array<GeneratedForestTree & { spacing: number }> = []
+  const grid = new SpacingGrid(24)
+
+  // The spacing grid is what makes a high attempt count affordable — the
+  // previous linear scan over every accepted tree was quadratic and set the
+  // practical ceiling on both count and spread.
+  const maxAttempts = Math.min(600_000, budget * 120)
+  // Once the stand is packed, further candidates fail on spacing forever. The
+  // streak is what ends the search then, rather than grinding out the whole
+  // attempt budget for nothing.
+  const saturatedAfter = 6_000
+  let sinceAccepted = 0
+
+  for (let attempt = 0; attempt < maxAttempts && accepted.length < budget; attempt += 1) {
+    if (sinceAccepted > saturatedAfter) break
+    sinceAccepted += 1
+    const angle = random() * Math.PI * 2
+    // Square-rooted so candidates are uniform over the disc rather than piled
+    // at the middle — the reason the old layout read as one blob in the centre
+    // of a four-hundred-metre ground.
+    const distance = Math.sqrt(random()) * radius
+    const x = Math.cos(angle) * distance
+    const z = Math.sin(angle) * distance
+
+    // Thicker here, thinner there, and the odd genuine clearing where the
+    // field bottoms out — but woodland throughout.
+    const field = standCover(x, z, seed) - preset.gapRate
+    const inStand = thinnest + (1 - thinnest) * Math.min(1, Math.max(0, field))
+    // Stands do not end at a surveyed line. The outer fifth thins to scattered
+    // stems, which is what a wood looks like from outside it.
+    const fringe = 1 - smoothstep(radius * 0.8, radius, distance)
+    if (random() > inStand * fringe) continue
+
     const mixIndex = weightedIndex(preset.mix, random())
     const entry = preset.mix[mixIndex]!
-    let x: number
-    let z: number
-    if (random() < preset.clustering) {
-      const center = clusters[mixIndex]![Math.floor(random() * 3)]!
-      const angle = random() * Math.PI * 2
-      const spread = Math.sqrt(random()) * radius * (0.13 + (1 - preset.clustering) * 0.18)
-      x = center[0] + Math.cos(angle) * spread
-      z = center[1] + Math.sin(angle) * spread
-    } else {
-      const angle = random() * Math.PI * 2
-      const distance = Math.sqrt(random()) * radius
-      x = Math.cos(angle) * distance
-      z = Math.sin(angle) * distance
-    }
-    if (x * x + z * z > radius * radius) continue
-    if (habitatNoise(x, z, seed) < preset.gapRate) continue
-
     const deadfall = preset.deadfall && random() < preset.deadfall.rate
       ? preset.deadfall
       : undefined
     const source = deadfall ?? entry
     const variation = source.variations[Math.floor(random() * source.variations.length)]!
-    const scale = source.scale[0] + random() * (source.scale[1] - source.scale[0])
+    // Open-grown trees are the big spreading ones; a stem inside a closed grove
+    // spent its life reaching for light between neighbours and stayed slim.
+    // Biasing where in the authored range this one lands, rather than scaling
+    // the result, keeps every tree inside the size the preset asked for.
+    const openness = 1 - Math.min(1, Math.max(0, field))
+    const roll = lerp(random(), openness, 0.35)
+    const scale = source.scale[0] + roll * (source.scale[1] - source.scale[0])
     const species = deadfall?.species ?? entry.species
-    const preset_ = TREE_SPECIES_PRESETS[species]
-    const crown = preset_.crownRadius
+    const speciesPreset = TREE_SPECIES_PRESETS[species]
+    const crown = speciesPreset.crownRadius
     // A log occupies a line, not a disc, so it is allowed to lie much closer
     // to its neighbours than a standing stem of the same species.
     const spacing = deadfall
-      ? Math.max(0.8, preset_.trunkRadius * 1.6) * scale
+      ? Math.max(0.8, speciesPreset.trunkRadius * 1.6) * scale
       : Math.max(1.35, Math.min(5.2, crown * 0.2)) * scale
-    const overlaps = accepted.some((tree) => {
-      const dx = tree.position[0] - x
-      const dz = tree.position[2] - z
-      const minimum = (tree.spacing + spacing) * 0.7
-      return dx * dx + dz * dz < minimum * minimum
-    })
-    if (overlaps) continue
+    if (grid.overlaps(x, z, spacing)) continue
+
+    grid.insert(x, z, spacing)
+    sinceAccepted = 0
     accepted.push({
       species,
       variation,
       // Pitched onto its side and lifted by its own radius so the bole rests
       // on the litter instead of being buried to its axis.
-      position: [x, deadfall ? preset_.trunkRadius * scale * 0.82 : 0, z],
+      position: [x, deadfall ? speciesPreset.trunkRadius * scale * 0.82 : 0, z],
       rotation: random() * Math.PI * 2,
       scale,
       tilt: deadfall ? Math.PI * 0.5 + (random() - 0.5) * 0.22 : 0,
@@ -328,6 +386,82 @@ export function generateForestLayout(
     })
   }
   return accepted.map(({ spacing: _spacing, ...tree }) => tree)
+}
+
+/**
+ * Uniform-grid neighbour lookup for the spacing test.
+ *
+ * Every candidate used to be compared against every tree already placed, which
+ * is fine for a hundred and unworkable for the tens of thousands of candidates
+ * a sparse, wide stand has to reject. Only trees within a couple of cells can
+ * possibly be too close, and the cell is sized to the largest spacing any
+ * species asks for.
+ */
+class SpacingGrid {
+  private readonly cell: number
+  private readonly buckets = new Map<number, Array<[number, number, number]>>()
+
+  constructor(cell: number) {
+    this.cell = cell
+  }
+
+  private key(gx: number, gz: number): number {
+    return (Math.imul(gx, 0x45d9f3b) ^ Math.imul(gz, 0x27d4eb2d)) | 0
+  }
+
+  overlaps(x: number, z: number, spacing: number): boolean {
+    const gx = Math.floor(x / this.cell)
+    const gz = Math.floor(z / this.cell)
+    for (let dz = -1; dz <= 1; dz += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const bucket = this.buckets.get(this.key(gx + dx, gz + dz))
+        if (!bucket) continue
+        for (const [px, pz, pSpacing] of bucket) {
+          const ex = px - x
+          const ez = pz - z
+          const minimum = (pSpacing + spacing) * 0.7
+          if (ex * ex + ez * ez < minimum * minimum) return true
+        }
+      }
+    }
+    return false
+  }
+
+  insert(x: number, z: number, spacing: number): void {
+    const key = this.key(Math.floor(x / this.cell), Math.floor(z / this.cell))
+    const bucket = this.buckets.get(key)
+    if (bucket) bucket.push([x, z, spacing])
+    else this.buckets.set(key, [[x, z, spacing]])
+  }
+}
+
+/**
+ * Where the stand is, as a field in 0..1.
+ *
+ * Three scales, because a wood is structured at three: a broad one that decides
+ * which part of the ground carries forest at all, a grove-sized one that breaks
+ * that into stands and glades, and a fine one for the gaps around individual
+ * veterans. One octave — which is what this was — gives evenly spaced blobs of
+ * one size, and reads as a pattern rather than as terrain.
+ */
+function standCover(x: number, z: number, seed: number): number {
+  const broad = habitatNoise(x / 4.1, z / 4.1, seed)
+  const grove = habitatNoise(x / 1.55, z / 1.55, seed ^ 0x9e3779b9)
+  const gaps = habitatNoise(x / 0.62, z / 0.62, seed ^ 0x85ebca6b)
+  const sum = broad * 0.55 + grove * 0.31 + gaps * 0.14
+  // Summing octaves piles the result around one half — the standard deviation
+  // of this particular weighting is 0.187, not the 0.289 a uniform field would
+  // have. Thresholding that directly rejects roughly twice the ground it was
+  // asked to, which is why a wider stand came back thinner than a narrow one.
+  // Pushing the sum through the matching normal CDF flattens it back out, so
+  // "cover" means the fraction it says.
+  return 1 / (1 + Math.exp(-1.702 * ((sum - 0.5) / 0.187)))
+}
+
+function smoothstep(edge0: number, edge1: number, value: number): number {
+  if (edge1 <= edge0) return value >= edge1 ? 1 : 0
+  const t = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0)))
+  return t * t * (3 - 2 * t)
 }
 
 /**
