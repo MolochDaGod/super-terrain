@@ -11,6 +11,8 @@ import {
 } from './generator/types'
 import {
   generateForestLayout,
+  generateForestRockLayout,
+  type GeneratedForestRock,
   type ForestPresetId,
 } from './forestPresets'
 
@@ -55,6 +57,8 @@ export interface TreePlacement {
 export interface TreeEditorSnapshot {
   prototypes: Readonly<Record<string, TreePrototype>>
   placements: readonly TreePlacement[]
+  /** Boulders scattered with the stand; empty until a forest is generated. */
+  rocks: readonly GeneratedForestRock[]
   selectedPlacementId?: string
   armedPrototypeId?: string
   lod: TreeLodLevel
@@ -77,13 +81,14 @@ export const TREE_VARIATION_NAMES = [
   'Young stand',
   'Multi stem',
   'Storm relic',
+  'Sapling',
 ] as const
 
 export function treePrototypeId(species: TreeSpecies, variation: number): string {
   return `${species}:${variation}`
 }
 
-/** Eight deterministic topology recipes per species, not cosmetic presets. */
+/** Nine deterministic topology recipes per species, not cosmetic presets. */
 export function parametersForTreeVariation(
   species: TreeSpecies,
   variation: number,
@@ -155,6 +160,43 @@ export function parametersForTreeVariation(
         twist: base.twist + 0.45,
         crownRadius: base.crownRadius * 1.16,
       })
+    // The regeneration layer: a knee-to-shoulder-height Jüngling, not a small
+    // adult.
+    //
+    // Every other recipe here varies an adult. This one drops `age` into the
+    // juvenile band, where the species architecture stops lifting a crown onto
+    // a bole and starts describing a leader with branches to the ground — so
+    // what changes is the *architecture*, and height and girth merely follow.
+    // Reaching for `height` alone is what produces bonsai: a 30-metre beech
+    // description rendered at a quarter scale, with a clear bole, a hollow
+    // shell crown and a 15-centimetre trunk on a 7-metre stem.
+    //
+    // Slenderness is the giveaway the height floor cannot express on its own.
+    // A four-metre sapling carries a stem a couple of centimetres thick, which
+    // is a ratio near a hundred to one; an adult runs nearer twenty.
+    case 8:
+      return normalizeTreeParameters({
+        ...common,
+        age: 0.03,
+        height: Math.max(4, base.height * 0.15),
+        crownRadius: Math.max(0.5, base.crownRadius * 0.17),
+        trunkRadius: Math.max(0.035, base.trunkRadius * 0.1),
+        axisForm: 'straight',
+        bolePlan: 'single',
+        trunkDamage: 'intact',
+        crownForm: 'full',
+        rootForm: 'auto',
+        branchCount: 5,
+        lostLimbs: 0,
+        gnarl: 0,
+        twist: Math.min(base.twist, 0.2),
+        lean: Math.min(base.lean, 4),
+        sinuosity: Math.min(base.sinuosity, 0.4),
+        rootExposure: 0,
+        rootSpread: base.rootSpread * 0.28,
+        rootCount: 5,
+        foliageDensity: Math.min(MAX_FOLIAGE_DENSITY, base.foliageDensity * 1.15),
+      })
     case 7:
       return normalizeTreeParameters({
         ...common,
@@ -190,6 +232,7 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       debugMode: 'surface',
       showFoliage: true,
       showHud: false,
+      rocks: [],
       forestPreset: 'mossy-old-growth',
       forestSeed: 42017,
       forestDensity: 1,
@@ -327,7 +370,12 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
   }
 
   clearForest(): void {
-    this.patch({ placements: [], selectedPlacementId: undefined, status: 'Forest cleared' })
+    this.patch({
+      placements: [],
+      rocks: [],
+      selectedPlacementId: undefined,
+      status: 'Forest cleared',
+    })
   }
 
   generateForest(options: Partial<Pick<
@@ -359,9 +407,16 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
         tilt: tree.tilt,
       } satisfies TreePlacement
     })
+    const rocks = generateForestRockLayout(
+      forestPreset,
+      forestSeed,
+      forestRadius,
+      forestDensity,
+    )
     this.patch({
       prototypes,
       placements,
+      rocks,
       selectedPlacementId: undefined,
       armedPrototypeId: undefined,
       forestPreset,
@@ -369,7 +424,8 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       forestDensity,
       forestRadius,
       lod: 0,
-      status: `Generated ${placements.length} trees across ${Object.keys(prototypes).length} instanced prototypes`,
+      status: `Generated ${placements.length} trees across ${Object.keys(prototypes).length} instanced prototypes` +
+        (rocks.length > 0 ? ` · ${rocks.length} boulders` : ''),
     })
   }
 

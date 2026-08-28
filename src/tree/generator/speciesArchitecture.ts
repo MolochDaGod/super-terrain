@@ -65,6 +65,101 @@ export interface SpeciesArchitecture {
 
 export function speciesArchitecture(parameters: TreeParameters): SpeciesArchitecture {
   const age = clamp(parameters.age, 0, 1)
+  return juvenileArchitecture(matureArchitecture(parameters, age), juvenility(age))
+}
+
+/**
+ * How young the individual is, as a blend weight: 1 at a knee-high seedling,
+ * 0 by the time it has any clear bole at all.
+ *
+ * Deliberately confined to the bottom fifth of the age range. Every authored
+ * species preset sits well above it and every variation but the sapling one
+ * does too, so this changes nothing that already existed — it exists so that
+ * *asking* for a juvenile gets a juvenile rather than a shrunken adult.
+ */
+function juvenility(age: number): number {
+  return clamp((JUVENILE_AGE - age) / JUVENILE_AGE, 0, 1)
+}
+
+const JUVENILE_AGE = 0.22
+
+/**
+ * A young tree, which is not a small old one.
+ *
+ * Scaling an adult down is the standard way to get an understory, and it is
+ * why understories look like bonsai: the thing that makes a sapling read as a
+ * sapling is not its size, it is that it has no clear bole, one unchallenged
+ * leader, few branches, and foliage carried all the way to the ground. An
+ * adult's architecture — a crown lifted onto a bole, self-pruned below,
+ * hollowed into a lit shell, ramified through five orders — is a record of
+ * competition the sapling has not had yet.
+ *
+ * So this interpolates the species' own description toward the juvenile end
+ * rather than introducing a separate sapling species. A young beech and a
+ * young spruce stay as different from each other as the adults are.
+ */
+function juvenileArchitecture(
+  mature: SpeciesArchitecture,
+  amount: number,
+): SpeciesArchitecture {
+  if (amount <= 0) return mature
+  const toward = (from: number, to: number): number => lerpNumber(from, to, amount)
+  return {
+    ...mature,
+    // No clear bole and no self-pruned lower crown: branches from the ground.
+    //
+    // Except on an excurrent conifer, where `boleFraction` near one does not
+    // describe a clear bole at all — it says the leader runs the whole height,
+    // which it does at every age. Blending that toward a juvenile 0.05 cut a
+    // five-metre spruce down to a ninety-centimetre stump carrying sixteen
+    // whorls. What makes a young conifer young is its crown base and its
+    // branch habit, both of which are handled below.
+    boleFraction: mature.boleFraction > 0.9
+      ? mature.boleFraction
+      : toward(mature.boleFraction, 0.05),
+    crownBaseFraction: toward(mature.crownBaseFraction, 0.07),
+    // Widest low, tapering to a point — a young conifer's cone, and, near
+    // enough, a young broadleaf's too before its leader is lost.
+    broadness: toward(mature.broadness, 0.3),
+    profileExponent: toward(mature.profileExponent, 0.82),
+    lobeAmplitude: toward(mature.lobeAmplitude, 0.1),
+    lowestScaffold: toward(mature.lowestScaffold, 0.12),
+    scaffoldRise: [
+      toward(mature.scaffoldRise[0], 0.34),
+      toward(mature.scaffoldRise[1], 0.95),
+    ],
+    scaffoldFollow: toward(mature.scaffoldFollow, 0.5),
+    // Absolute apical dominance. This is the single most recognisable thing
+    // about a sapling and the first thing uniform scaling destroys.
+    upTropism: toward(mature.upTropism, 0.6),
+    sag: toward(mature.sag, 0.04),
+    axialPersistence: toward(mature.axialPersistence, 0.88),
+    wander: toward(mature.wander, 0.05),
+    // A sapling's crown is not a lit shell around a dark interior; it is small
+    // enough that light reaches all of it, and it is filled.
+    shellBias: toward(mature.shellBias, 0.55),
+    attractorCount: Math.round(toward(mature.attractorCount, 700)),
+    // Twigs a few millimetres thick are the whole plant here, so they have to
+    // stay meshed rather than dissolving into cards.
+    meshedTipRadius: toward(mature.meshedTipRadius, 0.011),
+    // Leaves are full size on a plant that is not, so a spray that covers a
+    // branchlet of an adult covers a third of this one. The card has to shrink
+    // toward a single leaf or the sapling wears its parent's foliage.
+    cardSize: toward(mature.cardSize, mature.cardSize * 0.42),
+    farClusterSize: toward(mature.farClusterSize, mature.farClusterSize * 0.5),
+    cardsPerStation: Math.max(2, Math.round(toward(mature.cardsPerStation, 3))),
+    // Young foliage is thinner, yellower and much more translucent than the
+    // shade leaves of a closed canopy, which is exactly what makes a lit
+    // sapling glow against a dark interior in the reference photographs.
+    shadeValue: toward(mature.shadeValue, mature.shadeValue * 1.22),
+    sunValue: toward(mature.sunValue, mature.sunValue * 1.16),
+  }
+}
+
+function matureArchitecture(
+  parameters: TreeParameters,
+  age: number,
+): SpeciesArchitecture {
   switch (parameters.species) {
     case 'windswept-pine':
       return pine(parameters, age)
@@ -227,6 +322,62 @@ export function speciesArchitecture(parameters: TreeParameters): SpeciesArchitec
     case 'ancient-oak':
     case 'field-oak':
       return oak(parameters, age, parameters.species === 'ancient-oak')
+    case 'hazel-thicket':
+    case 'elder-bush':
+      return shrub(parameters, false)
+    case 'common-juniper':
+      return shrub(parameters, true)
+  }
+}
+
+/**
+ * A bush.
+ *
+ * The distinguishing property is not that it is short — a sapling is short —
+ * but that it never had a leader to lose. Mass leaves the ground as several
+ * competing stems at once and fills a rounded, near-solid volume, which is why
+ * a thicket reads as one body rather than as a group of small trees, and why
+ * a shrub layer occludes a forest floor so much more effectively than the same
+ * volume of saplings.
+ *
+ * So: no bole, crown from the ground, low shell bias (a bush has no dark hollow
+ * interior worth speaking of), short segments, and small cards — the leaves are
+ * ordinary size on a plant a fiftieth the volume of a canopy tree.
+ */
+function shrub(parameters: TreeParameters, needled: boolean): SpeciesArchitecture {
+  const gnarl = clamp(parameters.gnarl, 0, 1)
+  return {
+    boleFraction: 0.04,
+    crownBaseFraction: 0.06,
+    broadness: needled ? 0.3 : 0.46,
+    profileExponent: needled ? 0.72 : 0.4,
+    lobeAmplitude: needled ? 0.2 : 0.34,
+    lobeCount: 5,
+    scaffoldCount: parameters.branchCount,
+    lowestScaffold: 0.08,
+    scaffoldRise: needled ? [0.22, 0.86] : [0.3, 0.92],
+    scaffoldFollow: 0.24,
+    upTropism: needled ? 0.44 : 0.3,
+    sag: needled ? 0.06 : 0.16,
+    axialPersistence: 0.5,
+    wander: 0.16 + gnarl * 0.2,
+    // Filled, not shelled. A hollow bush is a wire cage, and unlike a canopy
+    // there is no trunk and no distance to hide it behind.
+    shellBias: needled ? 0.42 : 0.6,
+    // Metres per growth segment is relative to crown radius, and a shrub's is
+    // a couple of metres — the mature default would ramify a whole bush in two
+    // segments.
+    segmentFraction: 0.085,
+    attractorCount: needled ? 2100 : 1500,
+    // A hazel stem is finger-thick at head height, so the cutoff below which
+    // wood becomes cards has to be far lower than a tree's or the entire plant
+    // dissolves into floating foliage.
+    meshedTipRadius: 0.009,
+    cardSize: needled ? 0.155 : 0.26,
+    farClusterSize: needled ? 0.3 : 0.46,
+    cardsPerStation: needled ? 4 : 3,
+    shadeValue: needled ? 0.56 : 0.66,
+    sunValue: needled ? 1.0 : 1.16,
   }
 }
 
@@ -325,9 +476,14 @@ function pine(parameters: TreeParameters, age: number): SpeciesArchitecture {
   const gnarl = clamp(parameters.gnarl, 0, 1)
   return {
     boleFraction: lerpNumber(0.6, 0.72, age),
-    crownBaseFraction: lerpNumber(0.46, 0.58, age),
-    broadness: 0.36,
-    profileExponent: 0.78,
+    // A pine crown is a shallow dome, not a disc. The old base fraction with a
+    // shell bias near two put every station on the outside of a band a couple
+    // of metres deep, so the crown had a silhouette and no interior: from any
+    // angle but dead level it read as a mushroom cap pinned to a pole. This
+    // keeps the high, flat, wind-shaped habit; it simply gives it depth.
+    crownBaseFraction: lerpNumber(0.42, 0.52, age),
+    broadness: 0.42,
+    profileExponent: 0.66,
     lobeAmplitude: 0.2 + gnarl * 0.12,
     lobeCount: 6,
     scaffoldCount: parameters.branchCount,
@@ -338,13 +494,13 @@ function pine(parameters: TreeParameters, age: number): SpeciesArchitecture {
     sag: 0.26,
     axialPersistence: 0.7,
     wander: 0.08 + gnarl * 0.14,
-    shellBias: 1.9,
+    shellBias: 1.45,
     segmentFraction: 0.062,
-    attractorCount: 2600,
+    attractorCount: 3200,
     meshedTipRadius: 0.024,
     cardSize: 0.6,
     farClusterSize: 1.05,
-    cardsPerStation: 3,
+    cardsPerStation: 4,
     shadeValue: 0.52,
     sunValue: 1.02,
   }

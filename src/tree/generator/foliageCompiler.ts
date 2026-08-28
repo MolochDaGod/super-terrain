@@ -63,45 +63,42 @@ function compileCardInstances(
   const colors: number[] = []
   const variants: number[] = []
   const crownCenter = crownCentroid(graph.foliageClusters)
-  // Card count, not merely cards-per-station, is what dominates a forest.
-  // Keep a spatially distributed subset of stations at distance: every item
-  // is still genuine authored foliage, but sub-pixel branchlet sprays are not
-  // submitted hundreds of times per tree.
-  const stationBudget = level === 0 ? Number.POSITIVE_INFINITY : level === 1 ? 560 : 112
-  const stationStride = Math.max(
-    1,
-    Math.ceil(graph.foliageClusters.length / stationBudget),
-  )
-  const perStation = level === 0
-    ? architecture.cardsPerStation
-    : level === 1
-      ? Math.max(1, Math.round(architecture.cardsPerStation * 0.5))
-      : Math.max(1, Math.round(architecture.cardsPerStation * 0.18))
-  // Lower LODs draw fewer, larger sprays. Even the far representation remains
-  // real alpha-cut leaf/frond geometry; it only reduces the number of cards.
-  const sizeCompensation = level === 0
-    ? 1
-    : Math.min(level === 1 ? 1.55 : 1.9,
-        Math.sqrt(architecture.cardsPerStation / Math.max(1, perStation)))
+  // Lower LODs draw fewer, larger sprays — carrying the same leaf area.
+  //
+  // Card count is what dominates a forest, so it has to fall with distance.
+  // Leaf *area* is a different quantity, and it is the one the viewer sees:
+  // it is what occludes the sky, what the shadow map integrates into floor
+  // dapple, and what the eye reads as canopy density. Cutting count without
+  // holding area constant is what makes a stand breathe as the camera moves.
+  //
+  // The rule this replaces compensated only for the cards-per-station cut and
+  // ignored the station stride, which was the larger of the two, then clamped
+  // what remained at 1.55/1.9. Measured area retained: 25–34% at the middle
+  // level and 5–8% at the far one. Walking in ran every crown from a wire
+  // sketch through sparse to full, and moved the floor shadows each time.
+  //
+  // Stations are now grouped spatially down to a card budget, and each merged
+  // station is given exactly the area of the stations it stands for. Count
+  // falls by the budget; area does not move.
+  const stations = lodStations(graph.foliageClusters, architecture, level)
   const frondGeometry = parameters.species === 'doum-palm' ? 'fan-frond' : 'frond'
 
-  for (let clusterIndex = 0; clusterIndex < graph.foliageClusters.length; clusterIndex += stationStride) {
-    const cluster = graph.foliageClusters[clusterIndex]!
+  for (const cluster of stations) {
     const random = new TreeRandom(cluster.seed + level * 7919)
     // Outward from the crown's own centre, not from the world axis: on a
     // lopsided veteran the two are metres apart and the axis version lights the
     // overhanging side as if it faced inward.
     const outward = normalize(subtract(cluster.center, crownCenter), vec3(0, 1, 0))
-    const organCount = cluster.organModel === 'frond' || cluster.organModel === 'terminal-rosette'
-      ? 1
-      : perStation
-    for (let index = 0; index < organCount; index += 1) {
+    for (let index = 0; index < cluster.cards; index += 1) {
       const jitter = cluster.organModel === 'frond' || cluster.organModel === 'terminal-rosette'
         ? vec3()
+        // Spread, not radius. A merged station's cards have to scatter across
+        // the volume the merged members occupied, or the crown collapses onto
+        // a lattice of centres of mass with holes between them.
         : vec3(
-            random.signed() * cluster.radius * 0.42,
-            random.signed() * cluster.radius * 0.34,
-            random.signed() * cluster.radius * 0.42,
+            random.signed() * cluster.spread,
+            random.signed() * cluster.spread * 0.81,
+            random.signed() * cluster.spread,
           )
       const position = add(cluster.center, jitter)
       // The card's own up follows the twig it hangs from, so sprays droop and
@@ -160,7 +157,7 @@ function compileCardInstances(
         multiply(baseNormal, Math.cos(roll)),
         multiply(baseRight, -Math.sin(roll)),
       ), baseNormal)
-      const size = cluster.radius * random.range(0.82, 1.24) * sizeCompensation
+      const size = cluster.radius * random.range(0.82, 1.24)
       const fanFrond = frondGeometry === 'fan-frond' && cluster.organModel === 'frond'
       const scaleX = cluster.organModel === 'frond'
         // `cluster.radius` is the half-width of the whole compound frond. The
@@ -223,6 +220,223 @@ function compileCardInstances(
       : LEAF_CARD_VARIANTS,
     count: matrices.length / 16,
   }
+}
+
+/**
+ * A station as one LOD level sees it: a cluster, or the merger of several.
+ */
+interface LodStation extends FoliageCluster {
+  /** Metres the station's cards scatter around `center`. */
+  spread: number
+  /** Cards this station emits. */
+  cards: number
+}
+
+/**
+ * Card budget per level, as a fraction of what level 0 emits, with a ceiling
+ * so a redwood's five thousand stations do not set the far cost of a stand.
+ *
+ * These two numbers are the whole distance/quality trade. Because area is now
+ * conserved, they buy exactly one thing — card count — and pay for it in card
+ * *size*: the merged spray at level 1 is 1/sqrt(0.4) ≈ 1.6 times the width of
+ * a near one, and at level 2 about 3.2 times. Push the fractions down and the
+ * far crowns get cheaper and blobbier; the density does not change either way.
+ */
+const LOD_CARD_BUDGET: readonly { fraction: number; ceiling: number }[] = [
+  { fraction: 1, ceiling: Number.POSITIVE_INFINITY },
+  { fraction: 0.4, ceiling: 1_600 },
+  { fraction: 0.1, ceiling: 460 },
+]
+
+/**
+ * A merged card may not exceed this multiple of the largest spray it stands
+ * for. It is a backstop against a nearly empty crown whose few stations are
+ * asked to carry the whole budget, not a normal path.
+ *
+ * The growth needed is sqrt(cardsPerStation / cards * members), so a crown
+ * that carries many stations *and* several cards on each — a spruce, at four
+ * — reaches past four at the far level once the absolute ceiling binds. Set
+ * below that, the cap stops being a backstop and starts silently discarding
+ * leaf area, which is the failure this whole file exists to prevent; the
+ * regression test that covers area retention catches it either way.
+ */
+const MAX_MERGED_GROWTH = 5.6
+
+/** Groups the crown's stations down to the level's card budget. */
+function lodStations(
+  clusters: readonly FoliageCluster[],
+  architecture: SpeciesArchitecture,
+  level: TreeLodLevel,
+): LodStation[] {
+  const cardsPerStation = Math.max(1, architecture.cardsPerStation)
+  if (level === 0) {
+    return clusters.map((cluster) => ({
+      ...cluster,
+      spread: cluster.radius * 0.42,
+      cards: solitary(cluster) ? 1 : cardsPerStation,
+    }))
+  }
+  // A frond or a rosette is one authored organ on a crown that has a few dozen
+  // of them, not a branchlet spray among thousands. Merging two of them builds
+  // a palm the species does not have, and there is nothing to win: these are
+  // already the cheapest crowns in the catalogue.
+  const fixed: LodStation[] = []
+  const mergeable: FoliageCluster[] = []
+  for (const cluster of clusters) {
+    if (solitary(cluster)) fixed.push({ ...cluster, spread: 0, cards: 1 })
+    else mergeable.push(cluster)
+  }
+  if (mergeable.length === 0) return fixed
+
+  const budget = LOD_CARD_BUDGET[level] ?? LOD_CARD_BUDGET[LOD_CARD_BUDGET.length - 1]!
+  const cardTarget = Math.max(
+    cardsPerStation,
+    Math.min(
+      Math.round(mergeable.length * cardsPerStation * budget.fraction),
+      budget.ceiling,
+    ),
+  )
+  // Cards per merged station. Fewer, larger sprays read better at distance
+  // than the same area cut into the near tree's confetti, but one card per
+  // station is as far as that goes: below that the station is the card.
+  const cards = level === 1 ? Math.max(1, Math.round(cardsPerStation * 0.5)) : 1
+  const groupTarget = Math.max(
+    1,
+    Math.min(mergeable.length, Math.ceil(cardTarget / cards)),
+  )
+  for (const group of spatialGroups(mergeable, groupTarget)) {
+    fixed.push(mergeStation(group, cardsPerStation, cards))
+  }
+  return fixed
+}
+
+function solitary(cluster: FoliageCluster): boolean {
+  return cluster.organModel === 'frond' || cluster.organModel === 'terminal-rosette'
+}
+
+/**
+ * One station standing in for a spatial group of them.
+ *
+ * The radius is the whole point. A level-0 card's area goes as the square of
+ * its station radius, so a group carrying `cardsPerStation` cards each of
+ * radius r_i is reproduced by `cards` cards of radius
+ * sqrt((cardsPerStation / cards) * sum(r_i^2)) — exact in expectation, with no
+ * tuned compensation constant to drift out of date.
+ */
+function mergeStation(
+  group: readonly FoliageCluster[],
+  cardsPerStation: number,
+  cards: number,
+): LodStation {
+  const first = group[0]!
+  let weight = 0
+  let center = vec3(0, 0, 0)
+  let axis = vec3(0, 0, 0)
+  let depth = 0
+  let occlusion = 0
+  let area = 0
+  let largest = 0
+  for (const member of group) {
+    // Weighted by area, so a merged station sits where the leaf is rather than
+    // at the arithmetic centre of a large spray and a token one.
+    const share = Math.max(1e-9, member.radius * member.radius)
+    weight += share
+    area += share
+    largest = Math.max(largest, member.radius)
+    center = add(center, multiply(member.center, share))
+    axis = add(axis, multiply(member.axis, share))
+    depth += member.depth * share
+    occlusion += member.occlusion * share
+  }
+  center = multiply(center, 1 / weight)
+  let dispersion = 0
+  for (const member of group) {
+    const offset = subtract(member.center, center)
+    dispersion += dot(offset, offset)
+  }
+  dispersion = Math.sqrt(dispersion / group.length)
+  const radius = Math.min(
+    Math.sqrt((cardsPerStation / cards) * area),
+    largest * MAX_MERGED_GROWTH,
+  )
+  return {
+    ...first,
+    center,
+    axis: normalize(axis, first.axis),
+    radius,
+    depth: (depth / weight) * (radius / Math.max(1e-6, first.radius)),
+    occlusion: clamp(occlusion / weight, 0, 1),
+    spread: Math.max(radius * 0.42, dispersion),
+    cards,
+  }
+}
+
+/**
+ * Buckets stations into a uniform grid sized so the occupied cells land near
+ * `target`.
+ *
+ * Grouping by neighbourhood rather than by index is what makes the merge
+ * honest. Striding the cluster list took every Nth station in *traversal*
+ * order, which is branch order — so the survivors were a comb through the
+ * crown's topology, and whichever limbs happened to fall between the teeth
+ * lost their foliage outright.
+ */
+function spatialGroups(
+  clusters: readonly FoliageCluster[],
+  target: number,
+): FoliageCluster[][] {
+  if (clusters.length <= target) return clusters.map((cluster) => [cluster])
+  let minimum = clusters[0]!.center
+  let maximum = clusters[0]!.center
+  for (const cluster of clusters) {
+    minimum = vec3(
+      Math.min(minimum.x, cluster.center.x),
+      Math.min(minimum.y, cluster.center.y),
+      Math.min(minimum.z, cluster.center.z),
+    )
+    maximum = vec3(
+      Math.max(maximum.x, cluster.center.x),
+      Math.max(maximum.y, cluster.center.y),
+      Math.max(maximum.z, cluster.center.z),
+    )
+  }
+  const volume = Math.max(
+    1e-6,
+    (maximum.x - minimum.x) * (maximum.y - minimum.y) * (maximum.z - minimum.z),
+  )
+  // A crown fills a shell, not its bounding box, so a cell size taken straight
+  // from the volume always yields fewer occupied cells than the budget asked
+  // for. A few proportional corrections land within a percent or two, which is
+  // ample: this picks a card count, not a silhouette.
+  let cell = Math.max(1e-4, Math.cbrt(volume / target))
+  let groups = bucketStations(clusters, minimum, cell)
+  for (let pass = 0; pass < 5; pass += 1) {
+    if (Math.abs(groups.length - target) <= target * 0.04) break
+    const corrected = cell * Math.cbrt(groups.length / target)
+    if (!Number.isFinite(corrected) || corrected <= 0) break
+    cell = corrected
+    groups = bucketStations(clusters, minimum, cell)
+  }
+  return groups
+}
+
+function bucketStations(
+  clusters: readonly FoliageCluster[],
+  origin: TreeVec3,
+  cell: number,
+): FoliageCluster[][] {
+  // Insertion-ordered, so the grouping — and therefore every card matrix that
+  // follows from it — is a deterministic function of the graph.
+  const buckets = new Map<string, FoliageCluster[]>()
+  for (const cluster of clusters) {
+    const key = `${Math.floor((cluster.center.x - origin.x) / cell)}|` +
+      `${Math.floor((cluster.center.y - origin.y) / cell)}|` +
+      `${Math.floor((cluster.center.z - origin.z) / cell)}`
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(cluster)
+    else buckets.set(key, [cluster])
+  }
+  return [...buckets.values()]
 }
 
 function crownCentroid(clusters: readonly FoliageCluster[]): TreeVec3 {

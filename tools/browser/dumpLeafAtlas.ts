@@ -22,7 +22,11 @@ const out = process.argv.find((a) => a.startsWith('--out='))?.slice(6) ?? 'captu
 const barkOnly = process.argv.includes('--bark-only')
 const barkSpecies = process.argv.find((a) => a.startsWith('--bark-species='))?.slice(15) ??
   'ancient-oak'
-const size = 512
+const size = Number(process.argv.find((a) => a.startsWith('--size='))?.slice(7) ?? 512)
+// Which species' sprays get dumped. Judging a conifer atlas from the oak bake
+// is how a needle card that covers a twentieth of its cell stays invisible.
+const spraySpecies = (process.argv.find((a) => a.startsWith('--species='))?.slice(10)
+  ?? 'ancient-oak') as (typeof TREE_SPECIES_DEFINITIONS)[number]['id']
 mkdirSync(resolve(out), { recursive: true })
 
 // A single blade at full frame, which is the only way to actually see the
@@ -77,7 +81,7 @@ function tile(
 }
 
 for (let variant = 0; variant < LEAF_CARD_VARIANTS; variant += 1) {
-  const spray = bakeLeafSpray(84721, 'ancient-oak', variant, size)
+  const spray = bakeLeafSpray(84721, spraySpecies, variant, size)
   // Composited over mid grey: judging a cutout against transparency hides
   // exactly the alpha-edge problems worth looking for.
   writeFileSync(resolve(out, `spray-${variant}.png`), encodePng(overGrey(spray), size, size))

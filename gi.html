@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>idTech GI</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #05070a; color: #d7e0d4; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      #c { display: block; width: 100%; height: 100%; }
+      #hud { position: absolute; left: 12px; top: 10px; padding: 6px 10px; background: rgba(5, 7, 10, 0.55); border-radius: 4px; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <div id="hud">starting…</div>
+    <script type="module" src="/packages/idtech-gi/src/demo/main.ts"></script>
+  </body>
+</html>

@@ -38,14 +38,24 @@ const DIVERGENCE = 2.399963229728653
  */
 export function compositionFor(variant: number, profile: LeafProfile): SprayComposition {
   if (profile.family === 'needle-fascicle') {
+    // A conifer branchlet is a dense brush, and this composition used to make
+    // a bare rachis with a few needles on it. Dumped against the beech card it
+    // covered about a eighth of its cell where beech covers two thirds, and a
+    // card that is seven eighths empty is the whole reason a spruce crown read
+    // as black specks on bare orange sticks: the crown was carrying its full
+    // complement of stations and each one was drawing almost nothing.
+    //
+    // Needles are borne all round the shoot at a few millimetres' spacing, so
+    // the count is high, the side shoots are many, and the spray is wide
+    // enough to reach the edges of its cell.
     return styleComposition({
-      primaryCount: 2 + (variant % 2),
-      secondaryChance: 0,
-      axisLeaves: 18,
-      sideLeaves: 12,
-      leafScale: 0.13,
-      axisTop: 0.9,
-      spread: 0.16,
+      primaryCount: 8 + (variant % 3),
+      secondaryChance: 0.85,
+      axisLeaves: 74,
+      sideLeaves: 46,
+      leafScale: 0.125,
+      axisTop: 0.95,
+      spread: 0.34,
     }, variant, profile)
   }
   let composition: SprayComposition

@@ -29,10 +29,13 @@ const SPRUCE: WhorledProfile = {
   tierJitter: 0.004,
   tierRadiusFloor: 0.55,
   tierRadiusExponent: 0.72,
-  branches: [6, 5],
+  branches: [8, 6],
   branchLift: [0.08, 0.06],
   sag: [0.32, 0.18],
-  stationCount: 10,
+  // Fourteen stations along a branch that now starts carrying them near the
+  // bole. A closed spruce tier is a continuous shelf of foliage, and ten
+  // stations over the outer two thirds could not make one.
+  stationCount: 14,
   organRadius: [0.64, 0.78],
   organDepth: 0.9,
   hangingCount: 2,

@@ -9,8 +9,10 @@ import {
   DEFAULT_TREE_ENVIRONMENT,
   DEFAULT_TREE_PARAMETERS,
   MAX_FOLIAGE_DENSITY,
+  TREE_SPECIES_PRESETS,
   normalizeTreeParameters,
 } from './types'
+import type { TreeFoliageData } from './types'
 
 describe('foliage density authoring', () => {
   it('keeps the extended density range through normalization', () => {
@@ -65,6 +67,81 @@ describe('foliage density authoring', () => {
     expect(hero.count).toBe(first.foliageClusters.length * architecture.cardsPerStation)
     expect(hero.count).toBeLessThan(15_000)
     expect(medium.count).toBeLessThan(hero.count)
-    expect(far.count).toBeLessThanOrEqual(121)
+    expect(far.count).toBeLessThan(medium.count)
+    expect(far.count).toBeLessThanOrEqual(480)
   }, 20_000)
+
+  /**
+   * The LOD contract, and the one assertion in this file that describes what a
+   * viewer actually sees. Card count is allowed to fall with distance; leaf
+   * area is not, because area is the canopy — it is what closes the sky and
+   * what the shadow map turns into floor dapple. A level that keeps a quarter
+   * of its area is a level that visibly thins the stand at the boundary and
+   * moves every shadow in it, which is what the striding budget used to do:
+   * 25–34% retained at level 1 and 5–8% at level 2.
+   */
+  it('carries the same leaf area through every LOD', () => {
+    for (const species of [
+      'norway-spruce',
+      'european-beech',
+      'field-oak',
+      // Shrubs carry much smaller cards on a much smaller crown, which is the
+      // case most likely to trip the merge cap.
+      'hazel-thicket',
+      'common-juniper',
+    ] as const) {
+      const parameters = normalizeTreeParameters({ ...TREE_SPECIES_PRESETS[species] })
+      const graph = generateSemanticTree(parameters, DEFAULT_TREE_ENVIRONMENT)
+      const near = cardArea(compileFoliage(graph, parameters, 0))
+      for (const level of [1, 2] as const) {
+        const ratio = cardArea(compileFoliage(graph, parameters, level)) / near
+        expect(ratio, `${species} at LOD ${level}`).toBeGreaterThan(0.85)
+        expect(ratio, `${species} at LOD ${level}`).toBeLessThan(1.15)
+      }
+    }
+  }, 60_000)
+
+  it('groups stations by neighbourhood, so no limb is combed out', () => {
+    const parameters = normalizeTreeParameters({ ...TREE_SPECIES_PRESETS['field-oak'] })
+    const graph = generateSemanticTree(parameters, DEFAULT_TREE_ENVIRONMENT)
+    // At limb scale the far crown occupies the same cells the near one does.
+    // Index striding took every Nth station in *traversal* order, which is
+    // branch order, so whichever limbs fell between the teeth of the comb lost
+    // their foliage outright; a spatial group is a region of the crown and
+    // cannot do that. The remainder is the crown fringe, where a cell holding
+    // one station merges into its neighbour.
+    const occupied = (level: 0 | 2, cell: number): number => {
+      const data = compileFoliage(graph, parameters, level)
+      const cells = new Set<string>()
+      for (let index = 0; index < data.count; index += 1) {
+        const offset = index * 16
+        cells.add([12, 13, 14]
+          .map((axis) => Math.round(data.matrices[offset + axis]! / cell))
+          .join('|'))
+      }
+      return cells.size
+    }
+    for (const cell of [2.5, 4]) {
+      expect(occupied(2, cell), `${cell}m cells`)
+        .toBeGreaterThan(occupied(0, cell) * 0.82)
+    }
+  }, 30_000)
 })
+
+/** Summed card area, the quantity a canopy's density and its shadow both are. */
+function cardArea(data: TreeFoliageData): number {
+  let total = 0
+  for (let index = 0; index < data.count; index += 1) {
+    const offset = index * 16
+    total += Math.hypot(
+      data.matrices[offset]!,
+      data.matrices[offset + 1]!,
+      data.matrices[offset + 2]!,
+    ) * Math.hypot(
+      data.matrices[offset + 4]!,
+      data.matrices[offset + 5]!,
+      data.matrices[offset + 6]!,
+    )
+  }
+  return total
+}

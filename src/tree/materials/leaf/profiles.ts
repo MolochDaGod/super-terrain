@@ -85,12 +85,30 @@ const PINE_NEEDLE: LeafProfile = {
   palette: CONIFER_GREEN,
 }
 
+/**
+ * Picea abies: a deep, slightly blue green — not the grey-green of a Scots
+ * pine.
+ *
+ * Sharing the pine palette put blue within a hundredth of red, which is a
+ * desaturated grey by construction, and a crown of it read as frosted rather
+ * than dark. The blue cast is real and worth keeping — it is what separates a
+ * spruce from a broadleaf at a distance — but it belongs a step behind green,
+ * not level with it.
+ */
+const SPRUCE_GREEN: LeafPalette = {
+  shade: [0.116, 0.196, 0.142],
+  sun: [0.184, 0.298, 0.186],
+  weathered: [0.226, 0.244, 0.176],
+  necrosis: [0.26, 0.226, 0.142],
+}
+
 /** Spruce needles are shorter, squarer in section and darker than a pine's. */
 const SPRUCE_NEEDLE: LeafProfile = {
   ...PINE_NEEDLE,
   aspect: 0.085,
   translucency: 0.6,
   baseRoughness: 0.44,
+  palette: SPRUCE_GREEN,
 }
 
 /** Redwood sprays are flat and two-ranked, with softer, broader needles. */
@@ -476,9 +494,57 @@ const BLACK_PINE_NEEDLE: LeafProfile = {
  * texture layer would be the one that silently fell behind — a new conifer
  * would come out wearing oak leaves and nothing would fail.
  */
+/** Corylus: a broad, round, abruptly-pointed leaf with a doubly toothed edge. */
+const HAZEL_LEAF: LeafProfile = {
+  family: 'broadleaf-lobed',
+  aspect: 0.42,
+  lobePairs: [1, 2],
+  leaflets: [1, 1],
+  baseRoughness: 0.58,
+  translucency: 0.9,
+  damage: 0.9,
+  palette: { ...TEMPERATE_GREEN, sun: [0.284, 0.418, 0.196] },
+}
+
+/** Sambucus: five to seven long-pointed leaflets on one stalk, coarsely toothed. */
+const ELDER_PINNATE: LeafProfile = {
+  family: 'palmate',
+  aspect: 0.28,
+  lobePairs: [0, 0],
+  leaflets: [5, 7],
+  baseRoughness: 0.5,
+  translucency: 0.86,
+  damage: 1,
+  palette: { ...TEMPERATE_GREEN, sun: [0.26, 0.4, 0.19], shade: [0.15, 0.238, 0.14] },
+}
+
+/**
+ * Juniperus: short, stiff, sharply pointed needles in threes, with a white
+ * stomatal band down the upper face that makes a bush read grey-green from a
+ * distance and green only close up.
+ */
+const JUNIPER_NEEDLE: LeafProfile = {
+  family: 'needle-fascicle',
+  aspect: 0.1,
+  lobePairs: [0, 0],
+  leaflets: [1, 1],
+  baseRoughness: 0.5,
+  translucency: 0.52,
+  damage: 0.35,
+  palette: {
+    shade: [0.122, 0.176, 0.144],
+    sun: [0.208, 0.272, 0.214],
+    weathered: [0.226, 0.232, 0.184],
+    necrosis: [0.24, 0.208, 0.14],
+  },
+}
+
 const BY_FOLIAGE_PROFILE: Record<string, LeafProfile> = {
   ...EXTENDED_LEAF_PROFILES,
   'oak-lobed': OAK_LOBED,
+  'hazel-leaf': HAZEL_LEAF,
+  'elder-pinnate': ELDER_PINNATE,
+  'juniper-needle': JUNIPER_NEEDLE,
   'pine-needle': PINE_NEEDLE,
   'spruce-needle': SPRUCE_NEEDLE,
   'redwood-spray': REDWOOD_SPRAY,
