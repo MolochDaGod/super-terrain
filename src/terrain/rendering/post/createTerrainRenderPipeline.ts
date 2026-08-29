@@ -1,4 +1,5 @@
-import { QuadMesh, RenderPipeline } from 'three/webgpu'
+import { QuadMesh, RenderPipeline, Vector3 } from 'three/webgpu'
+import type { DirectionalLight } from 'three/webgpu'
 import type {
   Camera,
   Material,
@@ -27,6 +28,13 @@ import type { TerrainRenderMode } from '../renderModes'
 import { trackGpuCompilation } from '../gpuResourceRetirement'
 import { treeAtmosphericHaze } from '../../../tree/rendering/treeAtmosphericHaze'
 import { volumetricValleyFog } from './volumetricValleyFog'
+import { SunDepthMap } from './sunDepthMap'
+import {
+  createGodrayControls,
+  setGodraySun,
+  volumetricGodrays,
+  type GodrayControls,
+} from './volumetricGodrays'
 
 export type PostLook = 'terrain' | 'tree'
 
@@ -36,7 +44,26 @@ export interface TerrainRenderPipeline {
   warmup(): Promise<void>
   /** Compiles a staged object against this pass's real attachments and scene lights. */
   warmupObject(object: Object3D): Promise<void>
+  /**
+   * Per-frame work the post chain needs done before it runs — currently the
+   * sun depth map the light shafts march against. Absent on looks that have
+   * no such effect.
+   */
+  updateEffects?: () => void
+  /** Live knobs for the light shafts, when the look has them. */
+  godrayControls?: GodrayControls
   dispose(): void
+}
+
+/** The scene's key light: the one directional light that casts shadows. */
+function findShadowSun(scene: Scene): DirectionalLight | null {
+  let found: DirectionalLight | null = null
+  scene.traverse((object) => {
+    const light = object as DirectionalLight
+    if (found || !light.isDirectionalLight || !light.castShadow) return
+    found = light
+  })
+  return found
 }
 
 interface InternalRenderPipeline extends RenderPipeline {
@@ -222,10 +249,15 @@ export function createTerrainRenderPipeline(
   const colour = scenePass.getTextureNode('output')
   const depth = scenePass.getTextureNode('depth')
   if (look === 'tree') {
+    // Shafts are integrated before the bloom so they bloom, which is most of
+    // what makes a beam read as light rather than as a grey wedge.
+    const sunDepth = new SunDepthMap()
+    const godrayControls = createGodrayControls()
     const hazed = treeAtmosphericHaze(colour, depth, camera)
-    const glowing = hazed.rgb.add(cheapTreeBloom(colour))
+    const shafted = volumetricGodrays(hazed, depth, camera, sunDepth, godrayControls)
+    const glowing = shafted.rgb.add(cheapTreeBloom(colour))
     const graded = renderOutput(
-      vec4(glowing, hazed.a),
+      vec4(glowing, shafted.a),
       renderer.toneMapping,
       renderer.outputColorSpace,
     )
@@ -234,14 +266,32 @@ export function createTerrainRenderPipeline(
     const warmup = memoizeWarmup(
       () => warmRenderPipeline(renderer, scenePass, pipeline),
     )
+    const sunWorld = new Vector3()
+    const sunTarget = new Vector3()
     return {
       pipeline,
       warmup,
+      godrayControls,
+      // Runs before the post chain: the depth map has to describe the frame it
+      // is about to light, and the sun has to match the one casting shadows or
+      // the shafts point somewhere the shadows do not.
+      updateEffects: () => {
+        const sun = findShadowSun(scene)
+        if (!sun) return
+        sun.getWorldPosition(sunWorld)
+        sun.target.getWorldPosition(sunTarget)
+        const direction = sunWorld.sub(sunTarget).normalize()
+        setGodraySun(godrayControls, direction, sun.color, sun.intensity)
+        sunDepth.update(renderer, scene, camera, direction)
+      },
       warmupObject: async (object) => {
         await warmup()
         await warmSceneObject(renderer, scenePass, object, scene, camera)
       },
-      dispose: () => pipeline.dispose(),
+      dispose: () => {
+        sunDepth.dispose()
+        pipeline.dispose()
+      },
     }
   }
 

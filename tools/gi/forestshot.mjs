@@ -25,6 +25,7 @@ const options = {
   giMs: Number(flags.get('gi') ?? 20_000),
   preset: flags.get('preset') ?? 'mossy-old-growth',
   patch: JSON.parse(flags.get('patch') ?? '{}'),
+  godray: flags.get('godray') ? JSON.parse(flags.get('godray')) : null,
   eyeHeight: Number(flags.get('eye') ?? 4.5),
   camX: Number(flags.get('camx') ?? 4),
   camZ: Number(flags.get('camz') ?? 33),
@@ -120,6 +121,18 @@ const results = []
 for (const view of VIEWS) {
   await look(view)
   results.push({ view, off: await shoot(`${view.name} off`) })
+}
+
+// Godray knobs, when the probe is driving them.
+if (options.godray) {
+  await page.evaluate((settings) => {
+    const controls = globalThis.__post?.godrays
+    if (!controls) return
+    for (const [key, value] of Object.entries(settings)) {
+      if (controls[key]) controls[key].value = value
+    }
+  }, options.godray)
+  await page.waitForTimeout(1500)
 }
 
 const enabled = await page.evaluate((patch) => {

@@ -142,6 +142,15 @@ export function TerrainRenderPipeline({
     rendering.pipeline.needsUpdate = true
   }, [rendering, size.height, size.width])
 
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const globals = globalThis as Record<string, unknown>
+    globals.__post = { godrays: rendering.godrayControls }
+    return () => {
+      delete globals.__post
+    }
+  }, [rendering])
+
   useFrame(() => {
     // The top of the frame is the one point where the renderer owns no open
     // command encoder, which is what makes destroying GPU buffers safe here
@@ -155,6 +164,10 @@ export function TerrainRenderPipeline({
       scene as unknown as Scene,
       camera,
     )
+    // Effects that need their own pass — the sun depth map the light shafts
+    // march against — run here, after the scene is settled and before the post
+    // chain reads them.
+    rendering.updateEffects?.()
     rendering.pipeline.render()
   }, 1)
 
