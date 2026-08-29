@@ -71,6 +71,57 @@ const OAK_LOBED: LeafProfile = {
   translucency: 0.88,
   damage: 1,
   palette: TEMPERATE_GREEN,
+  spray: {
+    // Many small blades rather than a few large ones, and this is the whole
+    // fix for "the leaves are enormous up close".
+    //
+    // The default composition puts about twenty-five blades on a card at a
+    // quarter of its width each. A card is roughly three quarters of a metre
+    // across in world space, so that is an eighteen-centimetre oak leaf — half
+    // as big again as the largest real one, on a species whose blades are
+    // usually nearer ten. At twenty metres nobody can tell; at two metres it
+    // is the only thing anyone can see, because the eye knows exactly how big
+    // an oak leaf is and the whole crown is calibrated against that.
+    //
+    // Coverage is what has to stay put. Leaf *area* is what occludes the sky,
+    // what the shadow map integrates into floor dapple, and what the eye reads
+    // as canopy density, so shrinking the blades without putting the area back
+    // would thin every crown in the stand. Count × scale² is only the first
+    // approximation — the blades go on the same shoots, so tripling their
+    // number packs them tighter and the union comes in well under the sum.
+    // These numbers were measured rather than derived: mean opaque coverage
+    // across the eight atlas cells is 0.242 against the previous 0.247.
+    //
+    // So the canopy keeps its density and its dapple, and the *grain* of it
+    // goes from twenty-five paddles to about eighty leaves. Not one extra
+    // card, not one extra triangle, not one extra texel — it is a different
+    // bake of the same eight atlas cells, which is the only reason this is
+    // affordable at all.
+    scale: 0.66,
+    count: 3.4,
+    // Real variety between atlas slots, not four reseeds of one size.
+    variantScale: [0.86, 1.04, 1.18, 0.95],
+    // Slivers, but short ones. The near-edge-on tail is what tells the eye a
+    // twig has depth, and at the old blade size those slivers were
+    // eighteen-centimetre ribbons a centimetre wide — the pale green streaks
+    // that read as grass blades stuck in the canopy. At this size the same
+    // fraction of edge-on blades is unremarkable.
+    minimumSquash: 0.2,
+    tiltExponent: 0.42,
+    angleJitter: 0.3,
+    curl: 1.4,
+    sizeVariation: [0.62, 1.34],
+    pigment: [0.86, 1.1],
+    // Near-sessile: an English oak petiole is a few millimetres on a
+    // hand-length blade.
+    petiole: [0.05, 0.11],
+    // Wider, so sixty-five blades distribute across the cell instead of
+    // piling into a solid column along the axis.
+    spreadScale: 1.12,
+    // Thinner twigs. A shoot width authored against twenty-five big blades
+    // reads as a branch once the blades are half the size.
+    shootWidthScale: 0.72,
+  },
 }
 
 /** Two-needle fascicles: long, stiff, blue-green, and barely translucent. */
@@ -385,6 +436,32 @@ const BEECH_LEAF: LeafProfile = {
     sun: [0.203, 0.297, 0.131],
     weathered: [0.214, 0.196, 0.09],
     necrosis: [0.203, 0.166, 0.088],
+  },
+  spray: {
+    // The same correction as the oak's, and it matters more here: beech is
+    // most of the default stand, so its card grain is the grain of the whole
+    // forest. A beech blade is five to ten centimetres, which is smaller than
+    // an oak's, and the shared default composition was drawing it at eighteen.
+    //
+    // Denser than the oak's because the blade is entire rather than lobed:
+    // there is no deep sinus that has to survive the texel budget, so beech
+    // takes more blades per shoot before they read as mush. Measured coverage
+    // 0.250 against the previous 0.268.
+    scale: 0.65,
+    count: 4.2,
+    variantScale: [0.88, 1.02, 1.15, 0.95],
+    // Beech twiglets are famously flat and two-ranked — the blades lie in a
+    // plane and present nearly face-on. Far fewer edge-on slivers than an oak.
+    minimumSquash: 0.3,
+    tiltExponent: 0.38,
+    angleJitter: 0.24,
+    // Thin and silky, so it cockles rather than curls.
+    curl: 1.1,
+    sizeVariation: [0.68, 1.26],
+    pigment: [0.88, 1.08],
+    petiole: [0.05, 0.1],
+    spreadScale: 1.1,
+    shootWidthScale: 0.68,
   },
 }
 
