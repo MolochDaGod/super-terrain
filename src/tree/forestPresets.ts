@@ -93,10 +93,27 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
     // closed-canopy beech runs four to eight hundred stems a hectare, and it
     // is the crowding that closes the canopy, occludes the sky, and leaves the
     // floor lit only by the dapples that make the reference photograph.
-    treesPerHectare: 560,
-    // Almost no clearings. A closed stand has gaps where a veteran has fallen,
-    // not a scattering of bare patches.
-    gapRate: 0.04,
+    // Down from 560, and the reasoning that put it there was half right.
+    //
+    // Four to eight hundred stems a hectare is a real number for closed beech,
+    // and it is a number for a *pole stage* stand: thin stems, twenty
+    // centimetres through, competing for the light that will kill most of
+    // them. This preset's stems are not that. Its mix is veterans at 1.15 to
+    // 1.45 scale over crowded mature trunks, and a mature high forest of that
+    // size carries a hundred and fifty to three hundred. Putting veteran boles
+    // at pole-stage spacing gives a stand with no floor light at all and no
+    // room to stand between the trunks — which is exactly how it read: a wall
+    // of bark in every direction with the ground in permanent shadow.
+    treesPerHectare: 380,
+    // Real glades, not a scattering of bare patches.
+    //
+    // This was 0.04, on the argument that a closed stand has gaps only where a
+    // veteran has fallen. True, and a stand that has been standing for three
+    // hundred years has had a lot of veterans fall: the gaps are where all the
+    // regeneration is, they are where the bracken and bramble actually grow,
+    // and they are the only places a shaft of sun reaches the floor. A closed
+    // canopy with no gaps is not dark and moody, it is evenly grey.
+    gapRate: 0.14,
     clustering: 0.4,
     mix: [
       // The canopy: crowded, near-vertical, competing stems of one species at

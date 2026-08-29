@@ -433,6 +433,37 @@ function createPopulateKernel(
 
       const accept = hash21(vec2(positionZ, positionX).mul(3.37).add(7.91))
 
+      // The ring's width compensation, as much of it as this species can take.
+      //
+      // A coarse ring holds its coverage by drawing fewer, wider blades — the
+      // product of blades per square metre and blade width is what the eye
+      // reads as how thick the sward is, and every ring is calibrated to the
+      // same product. That calibration was written for grass, where a blade is
+      // seven millimetres across and nobody can tell that the ring at thirty
+      // metres is drawing it at two and a half centimetres.
+      //
+      // It is ruinous for a broad leaf. A woodland fern's frond is six
+      // centimetres wide; the middle ring's 3.6 makes it twenty-two, and the
+      // far ring's 7.2 makes it forty-five. That is not a wider frond, it is a
+      // flat green paddle, and a colony of them is the single ugliest thing on
+      // the floor — which is exactly what it looked like.
+      //
+      // So the boost is taken to a fractional power for broad species and the
+      // shortfall is paid back in clump count instead. A fern ends up at
+      // eleven centimetres at the middle ring rather than twenty-two, and
+      // there are twice as many of them.
+      const widthRow = foliageSpeciesRow(species, 0)
+      // 1 for a grass blade, 0 for a broad leaf. The threshold sits between
+      // the widest grass in the palette (sedge, 14mm) and the narrowest
+      // broadleaf (clover, 31mm).
+      const slender = smoothstep(0.042, 0.014, widthRow.z)
+      const ringBoost = mix(
+        float(Math.pow(config.widthBoost, 0.45)),
+        float(config.widthBoost),
+        slender,
+      )
+      const boostShortfall = float(config.widthBoost).div(max(ringBoost, float(0.001)))
+
       // Clumping, gaps and breaks.
       //
       // A painted weight says how much of a plant belongs in a cell, and the
@@ -478,10 +509,11 @@ function createPopulateKernel(
         .mul(foliageDensity)
         .mul(patchiness)
         .mul(opening)
+        .mul(boostShortfall)
 
       If(accept.lessThan(coverage), () => {
         const variation: ShaderValue = hash21(vec2(cellX, cellZ).mul(1.61).add(311.7))
-        const row0 = foliageSpeciesRow(species, 0)
+        const row0 = widthRow
         const row1 = foliageSpeciesRow(species, 1)
 
         const heightScale: ShaderValue = float(1)
@@ -491,7 +523,7 @@ function createPopulateKernel(
         const height = row0.x.mul(heightScale)
         const widthScale: ShaderValue = float(0.82)
           .add(jitter.x.mul(0.36))
-          .mul(config.widthBoost)
+          .mul(ringBoost)
           .mul(fade)
 
         // Sphere-versus-frustum in world space, with a margin that absorbs the

@@ -116,7 +116,14 @@ export function floorStrokes(recipe: FoliageFloorRecipe): FoliagePaintStroke[] {
       toZ: z,
       radius,
       flow,
-      hardness: 0.05,
+      // A solid core with a soft rim, rather than a peak at the very centre.
+      //
+      // At 0.05 the falloff started five per cent of the way out, so a dab
+      // delivered less than half its flow over most of its own footprint and a
+      // colony was a faint smudge with a dot in the middle. Colonies have
+      // interiors: a fern stand is continuous until its edge, and the edge is
+      // where it mixes with what is around it.
+      hardness: 0.42,
       species: index,
       layer,
       mode,

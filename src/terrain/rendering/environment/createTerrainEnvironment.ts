@@ -168,9 +168,17 @@ const LIGHT_RIGS: Record<TerrainEnvironmentLook, LightRig> = {
       cascadeStagger: 1,
       // A closed beech canopy passes something like a twentieth of the light
       // that lands on it, and its gaps pass a good deal more than that at
-      // scales the shadow map cannot resolve. A third is the value at which a
-      // stand this dense reads as shaded rather than as roofed.
-      intensity: 0.66,
+      // scales the shadow map cannot resolve — a shadow map texel is
+      // centimetres across at the near cascade and metres at the far one, so
+      // every gap smaller than that is averaged away into solid occlusion.
+      // The correction has to cover all of it.
+      //
+      // 0.66 was measured against a stand at pole-stage spacing. With the
+      // stems thinned to what a mature high forest actually carries there is
+      // more direct light to begin with, and the remaining shadow can afford
+      // to be softer still: a fifth of the sun surviving in shade is about
+      // what a photograph of a beech interior shows between the dapples.
+      intensity: 0.8,
     },
     // Fill sized to what a closed canopy actually does to light rather than to
     // what it blocks.

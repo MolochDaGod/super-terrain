@@ -398,7 +398,17 @@ export function createFoliageGroundMaterial(
     FOLIAGE_INSTANCED_RANGE * 0.8,
     range,
   )
-  const canopyStrength = cover
+  // The canopy term stands in for blades the instanced rings are not drawing,
+  // so how much of it there should be depends on how many of them there are.
+  //
+  // Near the camera the rings draw the real thing at full density, and painting
+  // the ground under them the aggregate colour of grass as well turns the floor
+  // into a sheet of flat green with a few blades standing on it — the litter,
+  // the twigs and the relief all disappear under paint. Past the rings it is
+  // the only sward there is and has to carry the whole read. `shading` is
+  // already the distance ramp for exactly this range, so the two agree by
+  // construction instead of by two constants that have to be kept in step.
+  const canopyStrength = cover.mul(mix(float(0.42), float(1), shading))
 
   const canopy = canopyBase
     .mul(CANOPY_GAIN)

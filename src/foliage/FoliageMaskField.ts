@@ -201,8 +201,21 @@ export class FoliageMaskField {
         const loss = amount.mul(max(sign.negate(), 0))
         const plantGain = gain.mul(surfaceStroke.oneMinus())
         const surfaceGain = gain.mul(surfaceStroke)
+        // A third, not half.
+        //
+        // At 0.55 a stroke took more than half of whatever was already growing
+        // where it landed, and a seeded floor is a couple of hundred strokes:
+        // the tall layers went in last and were then erased by the ones after
+        // them, so a recipe that asked for ferns, bracken and bramble over a
+        // moss base produced a moss base and almost nothing else. Measured
+        // over the whole field, fern ended at 0.03 average weight against the
+        // 0.5 its own dabs laid down.
+        //
+        // Plants interleave. A fern colony spreading through a moss mat does
+        // not clear the moss, and two strokes that overlap should end up as a
+        // mixture rather than as whichever went last.
         const plantCompetition = clamp(
-          plantGain.mul(0.55).add(loss).oneMinus(), 0, 1,
+          plantGain.mul(0.32).add(loss).oneMinus(), 0, 1,
         )
         // Ground layers displace each other far more completely than plants
         // do: a drift of leaves lying over moss hides it, where a fern growing

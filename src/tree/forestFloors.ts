@@ -60,37 +60,52 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       },
     ],
     colonies: [
-      // A continuous low base, then colonies on top of it.
+      // Washes first, then colonies on top of them.
       //
-      // Colonies alone leave most of the floor as bare litter, because a
-      // scatter of discs over a disc never tiles it — and a floor that is bare
-      // between its plants is the tell this whole recipe exists to avoid. The
-      // two washes below are one stroke each at low flow: a thin, even
-      // presence everywhere, which is what the low tier of a real floor is,
-      // with the patchiness in the population kernel breaking it up again so
-      // it never reads as a lawn.
+      // The wash weights are not the shares you see. The population kernel
+      // multiplies each species' painted weight by its own `densityScale`
+      // before drawing from the mix, and those run from 0.24 for bracken to
+      // 2.4 for moss — a tenfold spread, because a bracken clump is a metre of
+      // frond and a moss clump is a cushion. So a wash of 0.5 bracken and 0.5
+      // moss is not half and half; it is one part bracken to ten parts moss.
       //
-      // Both are species that carry no flower. The floor is graded to a mean
-      // of about a fifth, and the palette's flower colours were authored for
-      // an open meadow at ten times that: a mat species with a one-in-nine
-      // flower chance covers a shaded floor in what reads as torn white paper
-      // long before it reads as wood sorrel. Flowering species belong here as
-      // scattered colonies, not as the base.
-      { species: 'forest-moss', count: 1, spread: 0, radius: [600, 600], flow: [0.34, 0.34], seed: 0x11 },
-      { species: 'wood-rush', count: 1, spread: 0, radius: [600, 600], flow: [0.3, 0.3], seed: 0x12 },
-      // Low: moss cushions over the whole floor, a wood-sorrel carpet in the
-      // damper hollows — the plant a beech floor is famous for — and a fine
-      // rush threading between everything else.
-      { species: 'forest-moss', count: 22, spread: 128, radius: [8, 22], flow: [0.3, 0.55], seed: 0x6e40 },
-      { species: 'clover-mat', count: 16, spread: 128, radius: [7, 18], flow: [0.2, 0.36], seed: 0x6e41 },
-      { species: 'wood-rush', count: 36, spread: 130, radius: [12, 25], flow: [0.26, 0.46], seed: 0x4d63 },
+      // Getting that backwards is what the first version of this did. It laid
+      // a moss wash at 0.34 and a rush wash at 0.3 and left everything else to
+      // colonies, which measured out as a floor that was 58 per cent moss and
+      // 33 per cent rush by clump — and moss is four and a half centimetres
+      // tall. Eighty-five per cent of the ground had a plant on it and the
+      // ground still read as bare, because almost none of those plants had any
+      // height. The numbers below are solved backwards from the shares wanted:
+      // `weight = share / densityScale`.
+      //
+      // The tall tiers are barely in the wash at all. Bracken and fern belong
+      // to their colonies: a wash strong enough to see everywhere is a wash
+      // that puts waist-high fronds over every square metre of the stand, and
+      // a floor you cannot see through is not a forest floor, it is a hedge
+      // laid flat. The wash is there so the colonies have something to fade
+      // into at their edges, not to carry the layer.
+      //
+      // Moss is nearly absent from this list on purpose. It is a film, not a
+      // stand of individuals, and it lives in the ground layer where a film
+      // belongs; what little is here is the cushion on a rotting log.
+      { species: 'meadow-fescue', count: 1, spread: 0, radius: [600, 600], flow: [0.34, 0.34], seed: 0x10 },
+      { species: 'wood-rush', count: 1, spread: 0, radius: [600, 600], flow: [0.22, 0.22], seed: 0x11 },
+      { species: 'woodland-fern', count: 1, spread: 0, radius: [600, 600], flow: [0.12, 0.12], seed: 0x12 },
+      { species: 'bracken', count: 1, spread: 0, radius: [600, 600], flow: [0.07, 0.07], seed: 0x13 },
+      { species: 'clover-mat', count: 1, spread: 0, radius: [600, 600], flow: [0.16, 0.16], seed: 0x14 },
+      { species: 'bramble', count: 1, spread: 0, radius: [600, 600], flow: [0.08, 0.08], seed: 0x15 },
+      // Low: wood sorrel in the damper hollows, moss cushions on the deadfall,
+      // a fine rush threading between everything.
+      { species: 'clover-mat', count: 20, spread: 128, radius: [8, 20], flow: [0.24, 0.4], seed: 0x6e41 },
+      { species: 'forest-moss', count: 16, spread: 128, radius: [6, 15], flow: [0.1, 0.2], seed: 0x6e40 },
+      { species: 'wood-rush', count: 30, spread: 130, radius: [12, 25], flow: [0.28, 0.46], seed: 0x4d63 },
       // Mid: fern colonies in the shade, herbs as the exception rather than
       // the rule — painted at full flow these read as pale plastic leaves.
-      { species: 'woodland-fern', count: 26, spread: 118, radius: [10, 20], flow: [0.38, 0.6], seed: 0x2c71 },
-      { species: 'broadleaf-weed', count: 18, spread: 120, radius: [11, 19], flow: [0.14, 0.25], seed: 0x5b87 },
+      { species: 'woodland-fern', count: 26, spread: 118, radius: [10, 20], flow: [0.4, 0.66], seed: 0x2c71 },
+      { species: 'broadleaf-weed', count: 18, spread: 120, radius: [11, 19], flow: [0.16, 0.28], seed: 0x5b87 },
       // Tall: bracken over the open ground, bramble where a gap lets light in.
-      { species: 'bracken', count: 20, spread: 122, radius: [11, 23], flow: [0.3, 0.54], seed: 0x1f35 },
-      { species: 'bramble', count: 15, spread: 116, radius: [6, 13], flow: [0.26, 0.46], seed: 0x3a19 },
+      { species: 'bracken', count: 22, spread: 122, radius: [11, 23], flow: [0.4, 0.7], seed: 0x1f35 },
+      { species: 'bramble', count: 16, spread: 116, radius: [6, 14], flow: [0.34, 0.6], seed: 0x3a19 },
     ],
     breaks: {
       count: 46,
@@ -113,6 +128,15 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       { surface: 'bare-earth', count: 16, spread: SPREAD, radius: [3, 10], flow: [0.4, 0.75], seed: 0x2288 },
     ],
     colonies: [
+      // A wash per tier, solved backwards from the share wanted: the kernel
+      // weights a painted value by the species' own `densityScale` before it
+      // draws, and those run over a tenfold range. An open mixed wood has a
+      // real sward under it, so the fine grass carries most of the floor.
+      { species: 'meadow-fescue', count: 1, spread: 0, radius: [600, 600], flow: [0.45, 0.45], seed: 0x30 },
+      { species: 'clover-mat', count: 1, spread: 0, radius: [600, 600], flow: [0.12, 0.12], seed: 0x31 },
+      { species: 'woodland-fern', count: 1, spread: 0, radius: [600, 600], flow: [0.3, 0.3], seed: 0x32 },
+      { species: 'bracken', count: 1, spread: 0, radius: [600, 600], flow: [0.3, 0.3], seed: 0x33 },
+      { species: 'bramble', count: 1, spread: 0, radius: [600, 600], flow: [0.25, 0.25], seed: 0x34 },
       { species: 'clover-mat', count: 20, spread: SPREAD, radius: [8, 20], flow: [0.25, 0.45], seed: 0x3311 },
       { species: 'meadow-fescue', count: 22, spread: SPREAD, radius: [14, 32], flow: [0.3, 0.5], seed: 0x4422 },
       { species: 'woodland-fern', count: 16, spread: SPREAD, radius: [8, 17], flow: [0.3, 0.5], seed: 0x5533 },
@@ -175,11 +199,20 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       { surface: 'bare-earth', count: 8, spread: SPREAD, radius: [2.5, 7], flow: [0.3, 0.6], seed: 0xb222 },
     ],
     colonies: [
-      // A boreal floor's vascular cover is genuinely sparse. Three thin
-      // layers, none of them close to continuous.
-      { species: 'wood-rush', count: 18, spread: SPREAD, radius: [10, 22], flow: [0.14, 0.26], seed: 0xb333 },
-      { species: 'woodland-fern', count: 10, spread: SPREAD, radius: [7, 15], flow: [0.2, 0.36], seed: 0xb444 },
-      { species: 'bramble', count: 8, spread: SPREAD, radius: [5, 11], flow: [0.16, 0.3], seed: 0xb555 },
+      // A boreal floor is genuinely sparser than a beech one, but the first
+      // version of this was not sparse — it was empty. Measured over the stand
+      // interior its mean cover came to 0.03, which is three plants in a
+      // hundred square metres. What actually carries a spruce floor is a low
+      // ericaceous shrub layer over the moss: bilberry, cowberry, crowberry,
+      // ankle to knee high and close to continuous where the light gets in.
+      // `bramble` is the palette's only sprawling low shrub, so it stands in.
+      { species: 'bramble', count: 1, spread: 0, radius: [600, 600], flow: [0.34, 0.34], seed: 0x20 },
+      { species: 'wood-rush', count: 1, spread: 0, radius: [600, 600], flow: [0.22, 0.22], seed: 0x21 },
+      { species: 'woodland-fern', count: 1, spread: 0, radius: [600, 600], flow: [0.2, 0.2], seed: 0x22 },
+      { species: 'bramble', count: 24, spread: SPREAD, radius: [10, 24], flow: [0.4, 0.7], seed: 0xb555 },
+      { species: 'wood-rush', count: 22, spread: SPREAD, radius: [10, 22], flow: [0.24, 0.42], seed: 0xb333 },
+      { species: 'woodland-fern', count: 14, spread: SPREAD, radius: [7, 16], flow: [0.34, 0.58], seed: 0xb444 },
+      { species: 'forest-moss', count: 20, spread: SPREAD, radius: [8, 20], flow: [0.12, 0.24], seed: 0xb777 },
     ],
     breaks: {
       count: 22,
@@ -202,6 +235,12 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       { surface: 'ground-moss', fill: 0.24, count: 20, spread: SPREAD, radius: [10, 26], flow: [0.4, 0.75], seed: 0xc222 },
     ],
     colonies: [
+      // Redwood sorrel is the floor of a coast redwood grove — a continuous
+      // clover-leaved carpet — with sword fern standing out of it.
+      { species: 'clover-mat', count: 1, spread: 0, radius: [600, 600], flow: [0.28, 0.28], seed: 0x40 },
+      { species: 'woodland-fern', count: 1, spread: 0, radius: [600, 600], flow: [0.7, 0.7], seed: 0x41 },
+      { species: 'bracken', count: 1, spread: 0, radius: [600, 600], flow: [0.35, 0.35], seed: 0x42 },
+      { species: 'wood-rush', count: 1, spread: 0, radius: [600, 600], flow: [0.08, 0.08], seed: 0x43 },
       { species: 'clover-mat', count: 22, spread: SPREAD, radius: [10, 26], flow: [0.35, 0.6], seed: 0xc333 },
       { species: 'woodland-fern', count: 26, spread: SPREAD, radius: [10, 22], flow: [0.4, 0.65], seed: 0xc444 },
       { species: 'bracken', count: 12, spread: SPREAD, radius: [9, 20], flow: [0.25, 0.45], seed: 0xc555 },
@@ -227,6 +266,12 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       { surface: 'bare-earth', count: 14, spread: SPREAD, radius: [3, 9], flow: [0.4, 0.75], seed: 0xd222 },
     ],
     colonies: [
+      // Wet tropics: ferns everywhere, sedge in the seeps, and a sprawling
+      // low tangle through both.
+      { species: 'woodland-fern', count: 1, spread: 0, radius: [600, 600], flow: [0.8, 0.8], seed: 0x50 },
+      { species: 'clover-mat', count: 1, spread: 0, radius: [600, 600], flow: [0.2, 0.2], seed: 0x51 },
+      { species: 'sedge-reed', count: 1, spread: 0, radius: [600, 600], flow: [0.4, 0.4], seed: 0x52 },
+      { species: 'bramble', count: 1, spread: 0, radius: [600, 600], flow: [0.5, 0.5], seed: 0x53 },
       { species: 'clover-mat', count: 20, spread: SPREAD, radius: [9, 22], flow: [0.3, 0.55], seed: 0xd333 },
       { species: 'woodland-fern', count: 30, spread: SPREAD, radius: [11, 24], flow: [0.45, 0.72], seed: 0xd444 },
       { species: 'sedge-reed', count: 14, spread: SPREAD, radius: [8, 18], flow: [0.25, 0.45], seed: 0xd555 },
@@ -252,6 +297,11 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       { surface: 'leaf-litter', count: 16, spread: 90, radius: [6, 16], flow: [0.35, 0.65], seed: 0xe111 },
     ],
     colonies: [
+      // Thin: an oasis floor is mostly sand, and the wash only has to stop it
+      // being sand with nothing on it at all.
+      { species: 'dry-steppe', count: 1, spread: 0, radius: [600, 600], flow: [0.4, 0.4], seed: 0x60 },
+      { species: 'sedge-reed', count: 1, spread: 0, radius: [600, 600], flow: [0.5, 0.5], seed: 0x61 },
+      { species: 'tussock', count: 1, spread: 0, radius: [600, 600], flow: [0.25, 0.25], seed: 0x62 },
       { species: 'dry-steppe', count: 22, spread: SPREAD, radius: [14, 34], flow: [0.28, 0.5], seed: 0xe222 },
       { species: 'sedge-reed', count: 16, spread: 80, radius: [10, 24], flow: [0.4, 0.7], seed: 0xe333 },
       { species: 'tussock', count: 12, spread: SPREAD, radius: [9, 22], flow: [0.25, 0.45], seed: 0xe444 },
@@ -276,6 +326,9 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       { surface: 'leaf-litter', count: 10, spread: SPREAD, radius: [5, 14], flow: [0.25, 0.45], seed: 0xf111 },
     ],
     colonies: [
+      // Bunchgrass is near-continuous between the acacias; the bare ground is
+      // in the trampled patches the breaks cut, not between every tuft.
+      { species: 'dry-steppe', count: 1, spread: 0, radius: [600, 600], flow: [0.25, 0.25], seed: 0x70 },
       { species: 'dry-steppe', count: 30, spread: 140, radius: [26, 58], flow: [0.5, 0.75], seed: 0xf222 },
       { species: 'tussock', count: 22, spread: 140, radius: [12, 30], flow: [0.35, 0.6], seed: 0xf333 },
       { species: 'wildflower', count: 10, spread: 140, radius: [10, 24], flow: [0.18, 0.34], seed: 0xf444 },
@@ -301,6 +354,10 @@ export const FOREST_FLOORS: Record<ForestPresetId, FoliageFloorRecipe> = {
       { surface: 'needle-duff', count: 8, spread: SPREAD, radius: [4, 12], flow: [0.2, 0.4], seed: 0x1a11 },
     ],
     colonies: [
+      // Genuinely sparse, but not empty: tufts in the hollows where the last
+      // rain collected.
+      { species: 'dry-steppe', count: 1, spread: 0, radius: [600, 600], flow: [0.28, 0.28], seed: 0x80 },
+      { species: 'tussock', count: 1, spread: 0, radius: [600, 600], flow: [0.3, 0.3], seed: 0x81 },
       { species: 'dry-steppe', count: 20, spread: 140, radius: [12, 30], flow: [0.28, 0.5], seed: 0x1a22 },
       { species: 'tussock', count: 16, spread: 140, radius: [8, 20], flow: [0.22, 0.42], seed: 0x1a33 },
     ],

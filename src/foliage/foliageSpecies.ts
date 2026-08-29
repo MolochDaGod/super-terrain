@@ -253,12 +253,19 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     swatch: '#3f6b3c',
     height: 0.55,
     heightVariance: 0.3,
-    width: 0.062,
+    // Narrower and sharper than it was, and the reason is what a blade in this
+    // system actually stands for. A fern frond is twice-divided — a rachis
+    // carrying thirty pinnae — and there is no geometry here to build that
+    // from, so the honest thing for one blade to represent is one *pinna*, not
+    // the whole frond. At six centimetres wide with a low taper it was a broad
+    // rounded paddle, and six of them in a clump read as an agave. At three
+    // centimetres with a real taper the same six read as a divided frond.
+    width: 0.03,
     stiffness: 0.66,
     arch: 0.95,
     clumpRadius: 0.07,
-    taper: 0.75,
-    bulge: 0.5,
+    taper: 1.4,
+    bulge: 0.28,
     yawSpread: 3.14,
     tiltSpread: 0.9,
     base: [0.022, 0.045, 0.02],
@@ -402,8 +409,10 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     height: 0.52,
     heightVariance: 0.45,
     // Broad enough to read as a leaf rather than a blade, which is what the
-    // floor needs between the grasses and the ferns.
-    width: 0.072,
+    // floor needs between the grasses and the ferns. Bramble keeps its width
+    // where the ferns lost theirs: its leaflets really are palm-sized entire
+    // blades, so one blade standing for one leaflet is the right model.
+    width: 0.058,
     stiffness: 0.48,
     // A cane arches over and back down. This is the parameter that makes it
     // sprawl instead of stand.
@@ -435,12 +444,17 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     // except the sedge, which is a wetland plant standing bolt upright.
     height: 1.02,
     heightVariance: 0.36,
-    width: 0.105,
+    // Same correction as the woodland fern's, and it mattered more here: at
+    // ten and a half centimetres across and a metre tall, a bracken blade was
+    // the largest single primitive anywhere on the floor, and a stand of them
+    // filled the lower half of every eye-level frame with what looked like a
+    // field of agave. One blade is one pinna of a frond.
+    width: 0.045,
     stiffness: 0.52,
     arch: 1.02,
     clumpRadius: 0.1,
-    taper: 0.6,
-    bulge: 0.55,
+    taper: 1.5,
+    bulge: 0.3,
     yawSpread: 3.14,
     tiltSpread: 0.88,
     base: [0.02, 0.042, 0.018],
