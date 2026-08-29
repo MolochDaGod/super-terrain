@@ -121,9 +121,15 @@ describe('foliage density authoring', () => {
       }
       return cells.size
     }
+    // Eight tenths, not eighty-two hundredths. The far level's card budget is
+    // an absolute ceiling, so the fraction of the near crown's cells it can
+    // still reach falls slowly as the crown occupies more space — and an oak
+    // now carries lateral limbs down the bole, which is more space. The
+    // failure this guards against is a comb dropping whole limbs, and that
+    // shows up as a third of the cells going missing, not a fiftieth.
     for (const cell of [2.5, 4]) {
       expect(occupied(2, cell), `${cell}m cells`)
-        .toBeGreaterThan(occupied(0, cell) * 0.82)
+        .toBeGreaterThan(occupied(0, cell) * 0.8)
     }
   }, 30_000)
 })

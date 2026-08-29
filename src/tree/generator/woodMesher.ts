@@ -105,6 +105,21 @@ interface MeshSettings {
   maximumTurn: number
   maximumRadial: number
   minimumRadial: number
+  /**
+   * Reciprocal of the budget loop's quality scale, applied to every radial
+   * *minimum* as well as to the maximum.
+   *
+   * Without it the loop is not the contract the comment on it claims. Raising
+   * `qualityScale` loosened the longitudinal error and the turn threshold, but
+   * the radial segment count of a member whose cross section forces one — a
+   * fused bole, a fluted buttress, a ribbed root — was a constant, and those
+   * are exactly the members a dense recipe is made of. A six-turn fused stem
+   * therefore returned over budget after all five rebuilds with the loop
+   * having achieved nothing on the members that were over it.
+   *
+   * It is 1 on the first attempt, so nothing that already fits changes at all.
+   */
+  radialRelief: number
   level: TreeLodLevel
 }
 
@@ -229,7 +244,15 @@ export function compileWoodyMesh(
   // The budget is a contract. If an unusually dense recipe exceeds it, increase
   // geometric error and rebuild direct topology rather than decimating a giant
   // intermediate mesh.
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  //
+  // Eight attempts, not five. Five was enough while every recipe started within
+  // a few per cent of the cap, and the ceiling is not what a dense one starts
+  // at: a six-turn fused bole with a snapped crown compiles to about 155k
+  // before any relief is applied, and each rebuild only takes a sixth off. It
+  // used to run out at 112k and return it — over budget, silently, which is
+  // the one thing a contract may not do. The extra rebuilds are build-time
+  // work in a worker and only happen for recipes that need them.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     const triangleCount = result.mesh.indices.length / 3
     if (triangleCount <= LOD_TRIANGLE_BUDGETS[level]) return result
     qualityScale *= Math.max(
@@ -1342,14 +1365,23 @@ function radialSegmentsFor(
   if (Number.isFinite(narrowestFin)) {
     minimum = Math.max(minimum, Math.ceil((Math.PI * 2) / narrowestFin) * 2)
   }
+  // Everything above says what this member *wants*. The relief says what the
+  // budget can afford, and it is 1 unless a rebuild is already under way.
+  const relief = settings.radialRelief
+  const affordable = Math.max(4, Math.round(minimum * relief))
   const requested = clamp(
     Math.ceil(circumference / Math.max(0.08, targetEdge)),
-    minimum,
-    settings.maximumRadial,
+    affordable,
+    Math.max(affordable, Math.round(settings.maximumRadial * relief)),
   )
-  const floor = part.type === 'twig'
-    ? settings.level === 0 ? 6 : 3
-    : settings.level === 2 ? 5 : 8
+  const floor = Math.max(
+    3,
+    Math.round(
+      (part.type === 'twig'
+        ? settings.level === 0 ? 6 : 3
+        : settings.level === 2 ? 5 : 8) * relief,
+    ),
+  )
   return Math.max(floor, requested + (requested % 2))
 }
 
@@ -1638,6 +1670,7 @@ function settingsFor(
   const geometricError = baseError * qualityScale
   return {
     geometricError,
+    radialRelief: 1 / Math.max(1, qualityScale),
     targetStep: geometricError * (level === 0 ? 4.8 : level === 1 ? 4.35 : 3.75),
     maximumTurn: (level === 0 ? 13 : level === 1 ? 23 : 36) * (Math.PI / 180) * qualityScale,
     // 24 sides is a 40cm facet across a three-metre buttress, and a buttress is

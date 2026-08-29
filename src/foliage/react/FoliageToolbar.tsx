@@ -11,6 +11,7 @@ import {
 import { RangeField } from '../../components/editor/RangeField'
 import type { FoliageEditorStore, FoliageTool } from '../FoliageEditorStore'
 import { FOLIAGE_SPECIES, type FoliageSpeciesId } from '../foliageSpecies'
+import { FOLIAGE_SURFACES, type FoliageSurfaceId } from '../foliageSurfaces'
 import { useFoliageSnapshot } from './useFoliageSnapshot'
 
 const TOOLS: { value: FoliageTool; label: string; icon: typeof Brush; hint: string }[] = [
@@ -30,7 +31,7 @@ const TOOLS: { value: FoliageTool; label: string; icon: typeof Brush; hint: stri
     value: 'erase',
     label: 'Clear',
     icon: Eraser,
-    hint: 'Drag on the ground to thin everything out',
+    hint: 'Drag on the ground to thin the plants and the floor under them',
   },
 ]
 
@@ -136,29 +137,56 @@ export function FoliageToolbar({ store }: { store: FoliageEditorStore }) {
           />
           <IconButton
             icon={PaintBucket}
-            label={`Fill the whole field with ${labelFor(snapshot.species)}`}
+            label={`Fill the whole field with ${armedLabel(snapshot)}`}
             onClick={() => {
-              store.enqueue({ kind: 'fill', species: snapshot.species })
-              store.patch({ status: `Filled with ${labelFor(snapshot.species)}` })
+              store.enqueue({ kind: 'fill' })
+              store.patch({ status: `Filled with ${armedLabel(snapshot)}` })
+            }}
+          />
+          <IconButton
+            icon={Sprout}
+            label="Regrow the preset's floor from scratch"
+            onClick={() => {
+              store.enqueue({ kind: 'reseed' })
+              store.patch({ status: 'Floor regrown from the preset' })
             }}
           />
           <IconButton
             icon={Trash2}
-            label="Clear all ground cover"
+            label="Clear every plant and every ground layer"
             danger
             onClick={() => {
               store.enqueue({ kind: 'clear' })
-              store.patch({ status: 'Ground cover cleared' })
+              store.patch({ status: 'Floor and ground cover cleared' })
             }}
           />
         </div>
 
+        {/* Two palettes, because the floor and the things standing on it are
+            two different sets of data. Picking from either arms that layer,
+            so a brush always knows which field it is writing. */}
+        <SurfaceRow
+          surface={snapshot.surface}
+          active={snapshot.layer === 'surface'}
+          armed={armed}
+          onSelect={(surface) =>
+            store.patch({
+              surface,
+              layer: 'surface',
+              tool: snapshot.tool === 'none' ? 'paint' : snapshot.tool,
+              status: `${surfaceLabelFor(surface)} selected · ground layer`,
+            })
+          }
+        />
+
         <SpeciesRow
           species={snapshot.species}
+          active={snapshot.layer === 'plants'}
           armed={armed}
           onSelect={(species) =>
             store.patch({
               species,
+              layer: 'plants',
               tool: snapshot.tool === 'none' ? 'paint' : snapshot.tool,
               status: `${labelFor(species)} selected`,
             })
@@ -171,12 +199,58 @@ export function FoliageToolbar({ store }: { store: FoliageEditorStore }) {
   )
 }
 
+function SurfaceRow({
+  surface,
+  active,
+  armed,
+  onSelect,
+}: {
+  surface: FoliageSurfaceId
+  active: boolean
+  armed: boolean
+  onSelect: (surface: FoliageSurfaceId) => void
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Ground layer"
+      data-armed={armed && active}
+      className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-white/[0.07] bg-[#07100f]/88 p-1 shadow-xl backdrop-blur-xl data-[armed=false]:opacity-55"
+    >
+      <span className="shrink-0 px-1.5 text-[9px] uppercase tracking-wider text-white/30">
+        Floor
+      </span>
+      {FOLIAGE_SURFACES.map((entry) => (
+        <button
+          key={entry.id}
+          type="button"
+          role="radio"
+          aria-checked={active && surface === entry.id}
+          data-active={active && surface === entry.id}
+          title={entry.hint}
+          className="flex h-6.5 shrink-0 items-center gap-1.5 rounded-lg border border-transparent px-2 py-1 text-[10px] text-white/45 transition hover:text-white/85 data-[active=true]:border-white/[0.09] data-[active=true]:bg-white/[0.08] data-[active=true]:text-white/90"
+          onClick={() => onSelect(entry.id)}
+        >
+          <span
+            aria-hidden="true"
+            className="size-2.5 shrink-0 rounded-sm ring-1 ring-black/40"
+            style={{ background: entry.swatch }}
+          />
+          <span className="whitespace-nowrap">{entry.label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function SpeciesRow({
   species,
+  active,
   armed,
   onSelect,
 }: {
   species: FoliageSpeciesId
+  active: boolean
   armed: boolean
   onSelect: (species: FoliageSpeciesId) => void
 }) {
@@ -184,16 +258,19 @@ function SpeciesRow({
     <div
       role="radiogroup"
       aria-label="Ground cover type"
-      data-armed={armed}
-      className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-white/[0.07] bg-[#07100f]/88 p-1 shadow-xl backdrop-blur-xl data-[armed=false]:opacity-70"
+      data-armed={armed && active}
+      className="flex max-w-full items-center gap-1 overflow-x-auto rounded-xl border border-white/[0.07] bg-[#07100f]/88 p-1 shadow-xl backdrop-blur-xl data-[armed=false]:opacity-55"
     >
+      <span className="shrink-0 px-1.5 text-[9px] uppercase tracking-wider text-white/30">
+        Plants
+      </span>
       {FOLIAGE_SPECIES.map((entry) => (
         <button
           key={entry.id}
           type="button"
           role="radio"
-          aria-checked={species === entry.id}
-          data-active={species === entry.id}
+          aria-checked={active && species === entry.id}
+          data-active={active && species === entry.id}
           title={entry.hint}
           className="flex h-6.5 shrink-0 items-center gap-1.5 rounded-lg border border-transparent px-2 py-1 text-[10px] text-white/45 transition hover:text-white/85 data-[active=true]:border-white/[0.09] data-[active=true]:bg-white/[0.08] data-[active=true]:text-white/90"
           onClick={() => onSelect(entry.id)}
@@ -378,6 +455,20 @@ function Divider() {
 
 function labelFor(id: FoliageSpeciesId): string {
   return FOLIAGE_SPECIES.find((species) => species.id === id)?.label ?? id
+}
+
+function surfaceLabelFor(id: FoliageSurfaceId): string {
+  return FOLIAGE_SURFACES.find((surface) => surface.id === id)?.label ?? id
+}
+
+function armedLabel(snapshot: {
+  layer: string
+  species: FoliageSpeciesId
+  surface: FoliageSurfaceId
+}): string {
+  return snapshot.layer === 'surface'
+    ? surfaceLabelFor(snapshot.surface)
+    : labelFor(snapshot.species)
 }
 
 function clamp(value: number, low: number, high: number): number {

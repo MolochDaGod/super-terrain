@@ -19,6 +19,8 @@ import { useEditorSnapshot } from '../terrain/react/hooks'
 import { TerrainEnvironment } from '../terrain/react/TerrainEnvironment'
 import { TerrainRenderPipeline } from '../terrain/react/TerrainRenderPipeline'
 import { FoliageLayer } from '../foliage/react/FoliageLayer'
+import { forestFloorRecipe } from './forestFloors'
+import { ForestFloorProps } from './ForestFloorProps'
 import type { FoliageEditorStore } from '../foliage/FoliageEditorStore'
 import {
   TreeAssetView,
@@ -111,7 +113,7 @@ export function TreeScene({
   // appeared after the last camera move cast no shadow at all until the view
   // was nudged — which is exactly how it looked: a forest standing in light it
   // was not blocking.
-  const shadowCasters = `${snapshot.placements.length}:${snapshot.lod}:${snapshot.showFoliage}:` +
+  const shadowCasters = `${snapshot.placements.length}:${snapshot.rocks.length}:${snapshot.lod}:${snapshot.showFoliage}:` +
     prototypes.map((prototype) => `${prototype.id}@${prototype.compiledRevision ?? -1}`).join(',')
   useEffect(() => {
     invalidateTerrainShadows()
@@ -125,8 +127,18 @@ export function TreeScene({
         look="forest"
         updatePriority={0}
       />
-      <FoliageLayer store={foliage} floor="forest" warmup={warmupObject} />
+      <FoliageLayer
+        store={foliage}
+        recipe={forestFloorRecipe(snapshot.forestPreset)}
+        warmup={warmupObject}
+      />
       <TreeMaterialPrewarmer warmup={warmupObject} />
+
+      <ForestFloorProps
+        placements={snapshot.placements}
+        prototypes={snapshot.prototypes}
+        rocks={snapshot.rocks}
+      />
 
       <ForestMaterialPreloader prototypes={prototypes} />
 
@@ -238,12 +250,23 @@ function DistanceLodForest({
   const lastCamera = useRef(new Vector3(Number.POSITIVE_INFINITY, 0, 0))
   const sinceReclassify = useRef(0)
   const groupKey = useRef('')
+  // The level each placement was last given. Without it a tree sitting on a
+  // boundary re-crosses it on every reclassification, which rebuilds two
+  // instance buffers a second for a tree that has not moved.
+  const levels = useRef(new Map<string, TreeLodLevel>())
   const [groups, setGroups] = useState<ForestLodGroups>(() =>
-    classifyForestLods(asset, instances, camera.position, lodBias, selectedId),
+    classifyForestLods(asset, instances, camera.position, lodBias, selectedId, levels.current),
   )
 
   const reclassify = useCallback(() => {
-    const next = classifyForestLods(asset, instances, camera.position, lodBias, selectedId)
+    const next = classifyForestLods(
+      asset,
+      instances,
+      camera.position,
+      lodBias,
+      selectedId,
+      levels.current,
+    )
     const nextKey = forestLodGroupsKey(next)
     if (nextKey !== groupKey.current) {
       groupKey.current = nextKey
@@ -258,6 +281,7 @@ function DistanceLodForest({
 
   useEffect(() => {
     groupKey.current = ''
+    levels.current.clear()
     reclassify()
   }, [reclassify])
 
@@ -330,12 +354,29 @@ function forestLodGroupsKey(groups: ForestLodGroups): string {
   ].join(':')).join(',')).join('|')
 }
 
+/**
+ * Fraction of a boundary distance a tree has to travel past it before its
+ * level changes back.
+ *
+ * A pure threshold makes the level a function of a continuous distance, so a
+ * placement standing within a metre of a boundary flips every time the camera
+ * breathes. Each flip is an instance-buffer rebuild for the whole prototype at
+ * both levels, and with a stand's worth of trees strewn along the two
+ * boundaries that is a steady drip of rebuilds all the time the viewer is
+ * moving. Twelve per cent is about a two-metre band at the near boundary and
+ * six at the far one — wide enough that walking pace crosses it in a quarter
+ * of a second, narrow enough that nothing is held at the wrong level long
+ * enough to see.
+ */
+const LOD_HYSTERESIS = 0.12
+
 function classifyForestLods(
   asset: ProceduralTreeAsset,
   instances: readonly ForestTreeInstance[],
   camera: Vector3,
   lodBias: TreeLodLevel,
   selectedId?: string,
+  previous?: Map<string, TreeLodLevel>,
 ): ForestLodGroups {
   const groups: [ForestTreeInstance[], ForestTreeInstance[], ForestTreeInstance[]] = [[], [], []]
   const height = asset.parameters.height
@@ -366,11 +407,18 @@ function classifyForestLods(
       const distanceSquared = dx * dx + dy * dy + dz * dz
       const scaledNear = nearDistance * instance.scale
       const scaledFar = farDistance * instance.scale
-      level = distanceSquared < scaledNear * scaledNear
+      // The boundary a tree has to clear is pushed outward if it is already at
+      // the finer level and inward if it is not, so the crossing distance
+      // differs by direction and a stationary tree cannot oscillate.
+      const held = previous?.get(instance.id)
+      const nearEdge = scaledNear * (held !== undefined && held <= 0 ? 1 + LOD_HYSTERESIS : 1)
+      const farEdge = scaledFar * (held !== undefined && held <= 1 ? 1 + LOD_HYSTERESIS : 1)
+      level = distanceSquared < nearEdge * nearEdge
         ? 0
-        : distanceSquared < scaledFar * scaledFar ? 1 : 2
+        : distanceSquared < farEdge * farEdge ? 1 : 2
       level = Math.max(level, lodBias) as TreeLodLevel
     }
+    previous?.set(instance.id, level)
     groups[level].push(instance)
   }
   return groups

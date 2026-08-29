@@ -438,6 +438,15 @@ export function createFoliageBladeMaterial(
   const shadingNormal = normalize(mix(bladeNormal, UP, settle))
 
   // — Colour ————————————————————————————————————————————————
+  //
+  // How wet the ground under this clump is, at the same broad frequency the
+  // ground material uses for the same purpose. It has to be the same field or
+  // the blades come out glossy in one place and the litter they stand in comes
+  // out glossy in another, which reads as two surfaces rather than one. One
+  // tap rather than the ground's two: at blade scale the fine term is smaller
+  // than a clump and would only add per-clump noise.
+  const damp = smoothstep(0.34, 0.78, valueNoise2(ground.mul(0.052)))
+    .toVar('bladeWetness')
   const vigour = fbm2(
     ground.mul(0.023).add(vec2(float(species).mul(11.3), float(species).mul(7.1))),
   )
@@ -477,7 +486,7 @@ export function createFoliageBladeMaterial(
     flowering,
     aggregate,
     smoothstep(1.6, 12, widen).mul(0.32),
-  )
+  ).mul(mix(vec3(1, 1, 1), vec3(0.83, 0.9, 0.79), damp))
 
   // The floor of a tuft genuinely receives almost no sky, and thicker cover
   // means less. This single gradient does more for grounding than any
@@ -487,11 +496,16 @@ export function createFoliageBladeMaterial(
     float(1),
     pow(t, 0.6),
   )
+  // Wet grass is glossier than dry grass by a wide margin, and it is the one
+  // thing that makes a shaft of light landing on a patch of floor read as a
+  // shaft of light rather than as a brighter patch of paint. Dry blades go the
+  // other way: a strawed blade is matte.
   const roughness = clamp(
     row2.w
       .add(parch.mul(0.24))
       .sub(smoothstep(0.35, 1, t).mul(0.09))
-      .add(dice.x.mul(0.07)),
+      .add(dice.x.mul(0.07))
+      .sub(damp.mul(0.2)),
     0.18,
     0.95,
   )
@@ -506,7 +520,10 @@ export function createFoliageBladeMaterial(
   )
   const normalVarying = varying(shadingNormal, 'foliageNormal')
   const tangentVarying = varying(tangent, 'foliageTangent')
-  const shapeVarying = varying(vec2(t, side), 'foliageShape')
+  // t, the across-blade coordinate, the local damp, and one of the blade's own
+  // dice — everything the fragment stage needs to give a close-up blade some
+  // surface of its own.
+  const shapeVarying = varying(vec4(t, side, damp, dice.x), 'foliageShape')
 
   // — Fragment ————————————————————————————————————————————————
   const sideOfBlade = faceDirection
@@ -519,8 +536,30 @@ export function createFoliageBladeMaterial(
   )
 
   const underside = sideOfBlade.mul(-0.5).add(0.5)
+
+  // — Micro-detail ————————————————————————————————————————————
+  //
+  // Two structures, both essentially free because both are trigonometry on
+  // varyings that already exist, and both faded out the moment the blade is
+  // being widened for distance — at which point they are finer than a pixel
+  // and would only alias.
+  //
+  // The ribs run *along* the blade: a grass leaf is a bundle of parallel veins
+  // with shallow valleys between them, which is why a close blade catches the
+  // light in stripes rather than as one smooth ribbon. The grain runs across
+  // it, standing in for the transverse cell structure that makes a real blade
+  // matte in bands.
+  const microFade = smoothstep(3.2, 1.15, surfaceVarying.w)
+  const ribs = cos(shapeVarying.y.mul(9.42)).mul(0.5).add(0.5)
+  const grain = sin(
+    shapeVarying.x.mul(58).add(shapeVarying.w.mul(37.1)),
+  ).mul(0.5).add(0.5)
+  const micro = ribs.mul(0.62).add(grain.mul(0.38)).sub(0.5).mul(microFade)
+
   const fragmentRoughness = clamp(
-    surfaceVarying.x.add(underside.mul(0.14)),
+    surfaceVarying.x
+      .add(underside.mul(0.14))
+      .add(micro.mul(0.16)),
     0.16,
     0.98,
   )
@@ -533,13 +572,19 @@ export function createFoliageBladeMaterial(
   const litColor = colorVarying
     .mul(mix(vec3(1, 1, 1), vec3(1.1, 1.06, 0.94), underside))
     .mul(midrib)
+    .mul(micro.mul(0.14).add(1))
   // Restrained on purpose. The Kajiya-Kay lobe covers a whole hemisphere of
   // half-vectors, so every blade facing anywhere near the sun contributes at
   // once; at the strength a single surface would want, a field of them turns
   // into a sheet of glare.
-  const sheenStrength = mix(float(0.042), float(0.014), underside).mul(
-    smoothstep(0.95, 0.35, fragmentRoughness).add(0.25),
-  )
+  // The wet/dry difference again, and this is the half of it the eye actually
+  // reads: a damp sward under a shaft of sun throws a sheen back along the
+  // blades, a dry one does not. Restrained even at the wet end — the
+  // Kajiya-Kay lobe covers a whole hemisphere of half-vectors, so every blade
+  // facing anywhere near the sun contributes at once.
+  const sheenStrength = mix(float(0.042), float(0.014), underside)
+    .mul(smoothstep(0.95, 0.35, fragmentRoughness).add(0.25))
+    .mul(shapeVarying.z.mul(1.35).add(0.72))
   const sheenExponent = mix(float(46), float(12), fragmentRoughness)
 
   const material = new GrassNodeMaterial(

@@ -1,6 +1,8 @@
 import { ExternalStore } from '../terrain/core/ExternalStore'
 import { DEFAULT_FOLIAGE_WIND, type FoliageWindSettings } from './FoliageSystem'
+import type { FoliagePaintLayer } from './FoliageMaskField'
 import type { FoliageSpeciesId } from './foliageSpecies'
+import type { FoliageSurfaceId } from './foliageSurfaces'
 
 export type FoliageTool = 'none' | 'paint' | 'erase'
 
@@ -12,15 +14,26 @@ export type FoliageTool = 'none' | 'paint' | 'erase'
  * from an event handler is what keeps the store free of graphics objects.
  */
 export type FoliageCommand =
-  | { kind: 'fill'; species: FoliageSpeciesId }
+  /** Lay the armed brush over the whole field. */
+  | { kind: 'fill' }
+  /** Wipe every plant and every ground layer. */
   | { kind: 'clear' }
+  /** Wipe, then re-run the floor recipe the workspace opened with. */
   | { kind: 'reseed' }
 
 export interface FoliageEditorSnapshot {
   /** Whether the layer draws at all. */
   visible: boolean
   tool: FoliageTool
+  /**
+   * Which field the brush writes: the plants standing on the floor, or the
+   * floor itself. The two palettes are separate because they are separate
+   * data; picking from either one arms it.
+   */
+  layer: FoliagePaintLayer
   species: FoliageSpeciesId
+  /** The armed ground layer, used when `layer` is `surface`. */
+  surface: FoliageSurfaceId
   /** Brush footprint in metres. */
   radius: number
   /** Weight added per second of dragging. */
@@ -41,7 +54,9 @@ export class FoliageEditorStore extends ExternalStore<FoliageEditorSnapshot> {
     super({
       visible: true,
       tool: 'none',
+      layer: 'plants',
       species: 'meadow-fescue',
+      surface: 'leaf-litter',
       radius: 6,
       flow: 0.5,
       hardness: 0.25,

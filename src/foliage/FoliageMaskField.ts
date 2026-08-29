@@ -9,6 +9,7 @@ import {
 } from 'three/webgpu'
 import type ComputeNode from 'three/src/nodes/gpgpu/ComputeNode.js'
 import { FOLIAGE_MASK_ROWS } from './foliageSpecies'
+import { FOLIAGE_SURFACE_ROWS } from './foliageSurfaces'
 import {
   Fn,
   If,
@@ -28,6 +29,9 @@ import {
   vec4,
 } from 'three/tsl'
 
+/** See the note in `FoliagePopulation` — these are node builders, not values. */
+type ShaderValue = any
+
 /** Cells across the painted field. 512 over 400 m gives a 0.78 m footprint. */
 export const FOLIAGE_MASK_RESOLUTION = 512
 
@@ -35,6 +39,22 @@ export const FOLIAGE_MASK_RESOLUTION = 512
 export const FOLIAGE_FIELD_SIZE = 400
 
 export type FoliagePaintMode = 'paint' | 'erase'
+
+/**
+ * Which of the two fields a stroke writes.
+ *
+ * `plants` is the species mask the population kernel draws clumps from;
+ * `surface` is the ground layer the material shades the floor with. They are
+ * painted by the same kernel with the same falloff and the same competition,
+ * because they are the same kind of thing — a weight per cell that other
+ * weights in the same set recede against.
+ *
+ * Erasing ignores this and thins both. A viewer dragging the eraser over a
+ * patch of floor means "take this away", and leaving the leaf litter behind
+ * because a grass was selected in the palette is the behaviour that made the
+ * seeded floor feel like it was welded on.
+ */
+export type FoliagePaintLayer = 'plants' | 'surface'
 
 const createMaskBuffer = (cells: number) =>
   attributeArray(cells * FOLIAGE_MASK_ROWS, 'vec4')
@@ -51,7 +71,10 @@ export interface FoliagePaintStroke {
   flow: number
   /** 0 is a fully feathered dab, 1 a hard-edged one. */
   hardness: number
+  /** Index within `layer`: a species number, or a surface channel. */
   species: number
+  /** Which field the stroke writes. Ignored while erasing, which thins both. */
+  layer?: FoliagePaintLayer
   mode: FoliagePaintMode
 }
 
@@ -83,10 +106,25 @@ export class FoliageMaskField {
   /** `FOLIAGE_MASK_ROWS` vec4 rows per cell, four species weights each. */
   readonly buffer: FoliageMaskBuffer
 
+  /**
+   * Ground layer coverage, filtered, for the ground material.
+   *
+   * See `foliageSurfaces` for the channel order. Only the material reads it —
+   * the population kernel has no use for what the floor is made of — so unlike
+   * the species mask this one needs no storage-buffer mirror for the compute
+   * side, just the buffer the paint kernel does its read-modify-write in.
+   */
+  readonly surfaces: readonly StorageTexture[]
+
+  /** `FOLIAGE_SURFACE_ROWS` vec4 rows per cell. */
+  readonly surfaceBuffer: FoliageMaskBuffer
+
   private readonly strokeSegment = uniform(new Vector4())
   private readonly strokeShape = uniform(new Vector4())
   private readonly strokeSpecies = uniform(0)
   private readonly strokeSign = uniform(1)
+  /** 1 while the stroke is writing the ground layers rather than the plants. */
+  private readonly strokeSurface = uniform(0)
   private readonly paintKernel: ComputeNode
   private disposed = false
 
@@ -101,6 +139,10 @@ export class FoliageMaskField {
       ),
     )
     this.buffer = createMaskBuffer(cells)
+    this.surfaces = Array.from({ length: FOLIAGE_SURFACE_ROWS }, (_, row) =>
+      createWeightTexture(`foliage-mask-surfaces-${row}`, resolution),
+    )
+    this.surfaceBuffer = attributeArray(cells * FOLIAGE_SURFACE_ROWS, 'vec4')
 
     const texel = float(this.fieldSize / resolution)
     const halfField = float(this.fieldSize * 0.5)
@@ -108,8 +150,11 @@ export class FoliageMaskField {
     const shape = this.strokeShape
     const species = this.strokeSpecies
     const sign = this.strokeSign
+    const surfaceStroke = this.strokeSurface
     const buffer = this.buffer
     const weights = this.weights
+    const surfaceBuffer = this.surfaceBuffer
+    const surfaces = this.surfaces
 
     this.paintKernel = Fn(() => {
       const cellX = instanceIndex.mod(uint(resolution)).toVar()
@@ -137,6 +182,10 @@ export class FoliageMaskField {
       const rows = Array.from({ length: FOLIAGE_MASK_ROWS }, (_, row) =>
         buffer.element(base.add(uint(row))).toVar(`foliageWeights${row}`),
       )
+      const surfaceBase = instanceIndex.mul(uint(FOLIAGE_SURFACE_ROWS))
+      const surfaceRows = Array.from({ length: FOLIAGE_SURFACE_ROWS }, (_, row) =>
+        surfaceBuffer.element(surfaceBase.add(uint(row))).toVar(`foliageSurface${row}`),
+      )
 
       If(amount.greaterThan(0.0002), () => {
         // Adding to one species while the others recede is what makes a second
@@ -145,19 +194,44 @@ export class FoliageMaskField {
         // the mixed band at the edge of a stroke survives and the population
         // kernel turns it into genuinely interleaved plants.
         const gain = amount.mul(max(sign, 0))
+        // Erasing thins both fields; painting only touches the one the brush
+        // is aimed at. `surfaceStroke` is a uniform, so both halves of this
+        // are a multiply by a constant for the whole dispatch rather than a
+        // divergent branch.
         const loss = amount.mul(max(sign.negate(), 0))
-        const competition = clamp(gain.mul(0.55).add(loss).oneMinus(), 0, 1)
+        const plantGain = gain.mul(surfaceStroke.oneMinus())
+        const surfaceGain = gain.mul(surfaceStroke)
+        const plantCompetition = clamp(
+          plantGain.mul(0.55).add(loss).oneMinus(), 0, 1,
+        )
+        // Ground layers displace each other far more completely than plants
+        // do: a drift of leaves lying over moss hides it, where a fern growing
+        // through a sward does not hide the sward.
+        const surfaceCompetition = clamp(
+          surfaceGain.mul(0.9).add(loss).oneMinus(), 0, 1,
+        )
         const selected = int(species)
         const one = float(1)
         const zero = float(0)
+        const channelMask = (row: number, weight: ShaderValue): ShaderValue => vec4(
+          select(selected.equal(int(row * 4)), one, zero),
+          select(selected.equal(int(row * 4 + 1)), one, zero),
+          select(selected.equal(int(row * 4 + 2)), one, zero),
+          select(selected.equal(int(row * 4 + 3)), one, zero),
+        ).mul(weight)
         rows.forEach((current, row) => {
-          const add = vec4(
-            select(selected.equal(int(row * 4)), one, zero),
-            select(selected.equal(int(row * 4 + 1)), one, zero),
-            select(selected.equal(int(row * 4 + 2)), one, zero),
-            select(selected.equal(int(row * 4 + 3)), one, zero),
-          ).mul(gain)
-          current.assign(clamp(current.mul(competition).add(add), 0, 1))
+          current.assign(
+            clamp(current.mul(plantCompetition).add(channelMask(row, plantGain)), 0, 1),
+          )
+        })
+        surfaceRows.forEach((current, row) => {
+          current.assign(
+            clamp(
+              current.mul(surfaceCompetition).add(channelMask(row, surfaceGain)),
+              0,
+              1,
+            ),
+          )
         })
       })
 
@@ -165,6 +239,10 @@ export class FoliageMaskField {
       rows.forEach((current, row) => {
         buffer.element(base.add(uint(row))).assign(current)
         textureStore(weights[row]!, coord, current)
+      })
+      surfaceRows.forEach((current, row) => {
+        surfaceBuffer.element(surfaceBase.add(uint(row))).assign(current)
+        textureStore(surfaces[row]!, coord, current)
       })
     })().compute(cells)
   }
@@ -181,11 +259,17 @@ export class FoliageMaskField {
     )
     this.strokeSpecies.value = stroke.species
     this.strokeSign.value = stroke.mode === 'erase' ? -1 : 1
+    this.strokeSurface.value = stroke.layer === 'surface' ? 1 : 0
     renderer.compute(this.paintKernel)
   }
 
-  /** Lays the given species over the whole field, or clears it when erasing. */
-  fill(renderer: Renderer, species: number, mode: FoliagePaintMode): void {
+  /** Lays the given channel over the whole field, or clears it when erasing. */
+  fill(
+    renderer: Renderer,
+    species: number,
+    mode: FoliagePaintMode,
+    layer: FoliagePaintLayer = 'plants',
+  ): void {
     this.paint(renderer, {
       fromX: 0,
       fromZ: 0,
@@ -195,6 +279,7 @@ export class FoliageMaskField {
       flow: 1,
       hardness: 0.98,
       species,
+      layer,
       mode,
     })
   }
@@ -203,6 +288,7 @@ export class FoliageMaskField {
     if (this.disposed) return
     this.disposed = true
     for (const texture of this.weights) texture.dispose()
+    for (const texture of this.surfaces) texture.dispose()
   }
 }
 

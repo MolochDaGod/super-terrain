@@ -80,6 +80,34 @@ export interface FoliageSpecies {
   densityScale: number
   /** Blades drawn per clump at the closest level of detail. */
   bladesPerClump: number
+
+  /**
+   * How much of the species' abundance is decided by *where* rather than by
+   * how much was painted, 0..1.
+   *
+   * The paint mask has a 0.78-metre cell, which is a fine resolution for
+   * saying where a fern colony is and a useless one for saying what the ground
+   * looks like between the ferns. Left at zero, a painted weight of 0.6 means
+   * every square metre of the stroke carries six tenths of the plants it could
+   * — an even thinning, which is the single most recognisable tell that a
+   * floor was scattered rather than grown. At one the same weight means the
+   * plant is absent from most of the stroke and continuous in the patches it
+   * did take, which is what a colony actually is.
+   *
+   * Mats are near zero: moss and clover really do cover the ground evenly
+   * wherever they cover it at all. Everything that spreads from a rootstock —
+   * bracken, bramble, fern — is high.
+   */
+  clumping: number
+  /**
+   * Metres across the patches that clumping carves, roughly.
+   *
+   * A bracken stand is tens of metres; a tussock's ground is a couple. Getting
+   * this wrong in either direction is what makes procedural scatter look
+   * procedural: one scale for everything gives the whole floor the same
+   * blotchiness whatever is growing on it.
+   */
+  patchScale: number
 }
 
 export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
@@ -107,6 +135,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.78,
     densityScale: 1,
     bladesPerClump: 6,
+    clumping: 0.18,
+    patchScale: 9,
   },
   {
     id: 'tussock',
@@ -132,6 +162,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.72,
     densityScale: 0.42,
     bladesPerClump: 7,
+    clumping: 0.55,
+    patchScale: 6,
   },
   {
     id: 'dry-steppe',
@@ -157,6 +189,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.9,
     densityScale: 0.72,
     bladesPerClump: 6,
+    clumping: 0.42,
+    patchScale: 14,
   },
   {
     id: 'clover-mat',
@@ -182,6 +216,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.6,
     densityScale: 1.5,
     bladesPerClump: 5,
+    clumping: 0.12,
+    patchScale: 5,
   },
   {
     id: 'broadleaf-weed',
@@ -207,6 +243,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.55,
     densityScale: 0.4,
     bladesPerClump: 5,
+    clumping: 0.5,
+    patchScale: 4,
   },
   {
     id: 'woodland-fern',
@@ -232,6 +270,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.68,
     densityScale: 0.3,
     bladesPerClump: 6,
+    clumping: 0.72,
+    patchScale: 7,
   },
   {
     id: 'wildflower',
@@ -257,6 +297,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.8,
     densityScale: 0.8,
     bladesPerClump: 6,
+    clumping: 0.46,
+    patchScale: 8,
   },
   {
     id: 'sedge-reed',
@@ -282,6 +324,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.62,
     densityScale: 0.32,
     bladesPerClump: 7,
+    clumping: 0.66,
+    patchScale: 11,
   },
   // The woodland floor. The set above was written for open ground, and a stand
   // painted with it reads as a lawn under trees: everything in it sits between
@@ -320,6 +364,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     // Dense: a mat is continuous or it is not a mat.
     densityScale: 2.4,
     bladesPerClump: 8,
+    clumping: 0.22,
+    patchScale: 3.5,
   },
   {
     id: 'wood-rush',
@@ -345,6 +391,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.72,
     densityScale: 0.95,
     bladesPerClump: 7,
+    clumping: 0.4,
+    patchScale: 5,
   },
   {
     id: 'bramble',
@@ -374,6 +422,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     translucency: 0.48,
     densityScale: 0.34,
     bladesPerClump: 6,
+    clumping: 0.78,
+    patchScale: 6,
   },
   {
     id: 'bracken',
@@ -404,6 +454,8 @@ export const FOLIAGE_SPECIES: readonly FoliageSpecies[] = [
     // Sparse and large, like the fern it is.
     densityScale: 0.24,
     bladesPerClump: 5,
+    clumping: 0.8,
+    patchScale: 16,
   },
 ]
 
@@ -424,7 +476,7 @@ export function foliageSpeciesIndex(id: FoliageSpeciesId): number {
 }
 
 /** Rows per species in the packed uniform table. */
-export const FOLIAGE_SPECIES_STRIDE = 6
+export const FOLIAGE_SPECIES_STRIDE = 7
 
 /**
  * The species table as the shaders see it.
@@ -457,6 +509,7 @@ export function packFoliageSpecies(
         entry.tiltSpread,
         entry.densityScale,
       ),
+      new Vector4(entry.clumping, entry.patchScale, 0, 0),
     )
   }
   return rows

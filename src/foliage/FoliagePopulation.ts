@@ -17,7 +17,9 @@ import {
   instanceIndex,
   instancedArray,
   int,
+  max,
   min,
+  mix,
   smoothstep,
   sqrt,
   step,
@@ -29,7 +31,7 @@ import {
 } from 'three/tsl'
 import { createFoliageClumpGeometry } from './foliageClumpGeometry'
 import type { FoliageMaskField } from './FoliageMaskField'
-import { hash21, hash22 } from './foliageNoise'
+import { fbm2, hash21, hash22, valueNoise2 } from './foliageNoise'
 import {
   foliageCameraPosition,
   foliageDensity,
@@ -430,7 +432,52 @@ function createPopulateKernel(
       const species = int(min(speciesFloat, float(scales.length - 1)))
 
       const accept = hash21(vec2(positionZ, positionX).mul(3.37).add(7.91))
-      const coverage = clamp(total, 0, 1).mul(foliageDensity)
+
+      // Clumping, gaps and breaks.
+      //
+      // A painted weight says how much of a plant belongs in a cell, and the
+      // mask's cell is 0.78 metres. Spending that weight evenly — which is
+      // what a bare `weight × density` acceptance does — gives a floor whose
+      // every square metre carries the same fraction of everything, and no
+      // real ground is like that at any scale. Two fields fix it, and both are
+      // functions of position alone so nothing swims as the grid slides.
+      //
+      // The first is per species: a patch field at the species' own scale,
+      // mixed in by its own `clumping`. A moss mat is barely touched by it; a
+      // bracken stand is almost entirely decided by it, which is what turns a
+      // painted weight of 0.5 from "half as many fronds everywhere" into "a
+      // continuous stand here and nothing there".
+      //
+      // The second applies to everything at once: the openings. A closed floor
+      // still has bare patches a couple of metres across where a root plate,
+      // a rotting log or simply the drip line has kept the cover off, and it
+      // is those interruptions — not the plants — that read as forest rather
+      // than as lawn.
+      const row6 = foliageSpeciesRow(species, 6)
+      const patchScale = max(row6.y, float(0.5))
+      const patchField = fbm2(
+        vec2(positionX, positionZ)
+          .div(patchScale)
+          .add(vec2(float(species).mul(31.7), float(species).mul(17.3))),
+      )
+      // 1.9 rather than 1: the smoothstep's mean over an fbm is close to a
+      // half, and a multiplier that did not put it back would quietly halve
+      // the density of every clumping species relative to what was painted.
+      const patchiness = mix(
+        float(1),
+        smoothstep(0.3, 0.66, patchField).mul(1.9),
+        clamp(row6.x, 0, 1),
+      )
+      const opening = smoothstep(
+        0.08,
+        0.3,
+        valueNoise2(vec2(positionX, positionZ).mul(0.055).add(19.7)),
+      ).mul(0.78).add(0.22)
+
+      const coverage = clamp(total, 0, 1)
+        .mul(foliageDensity)
+        .mul(patchiness)
+        .mul(opening)
 
       If(accept.lessThan(coverage), () => {
         const variation: ShaderValue = hash21(vec2(cellX, cellZ).mul(1.61).add(311.7))

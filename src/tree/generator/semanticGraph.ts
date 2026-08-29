@@ -849,6 +849,49 @@ function transportedLoadFrames(axis: readonly TreeVec3[]): LoadFrame[] {
   return frames
 }
 
+/** The highest a scaffold is allowed to leave the bole, leaving a leader above. */
+const SCAFFOLD_TOP = 0.97
+
+/**
+ * Where the scaffolds leave the bole, as an ascending list with uneven gaps.
+ *
+ * The jitter here used to be ±0.045 of total height against a mean gap several
+ * times that, which is to say the ladder was even and the jitter was a rounding
+ * error on it. Even spacing is the thing itself: a stem carrying limbs at
+ * regular intervals is legible as a ladder from any distance, and real limb
+ * spacing is nothing like it — it is the record of which buds broke in which
+ * years and which of those survived the next twenty, so two limbs land a
+ * handspan apart, then three metres of clean bole, then a cluster of three.
+ *
+ * Jittering by a large fraction of the *gap* rather than by a fixed fraction of
+ * the tree gets that at every size, and — unlike redistributing the gaps
+ * freely — it keeps the limb count, the span and the mean spacing exactly where
+ * the architecture put them. That matters for more than tidiness: the woody
+ * mesher's cost is superlinear in how much of the crown each limb ends up
+ * carrying, and a free redistribution moved enough of the crown onto the lower,
+ * thicker attachments to put a hero oak fifty per cent over its triangle
+ * budget. This is the same silhouette change for none of that.
+ */
+function scaffoldHeights(
+  count: number,
+  lowest: number,
+  random: TreeRandom,
+): number[] {
+  const span = Math.max(0.02, SCAFFOLD_TOP - lowest)
+  const gap = count > 1 ? span / (count - 1) : span
+  const heights: number[] = []
+  for (let index = 0; index < count; index += 1) {
+    const even = count === 1 ? 0.5 : index / (count - 1)
+    // Up to two fifths of a gap either way, so a pair can end up at 0.2 of the
+    // mean spacing and the next pair at 1.8 of it.
+    const along = lowest + span * even + random.range(-0.42, 0.42) * gap
+    heights.push(clamp(along, 0.12, 0.985))
+  }
+  // Jitter can swap the order of a close pair, and a scaffold list that is not
+  // ascending would deal limbs to the wrong stem on a divided bole.
+  return heights.sort((a, b) => a - b)
+}
+
 function growCrownParts(
   parameters: TreeParameters,
   architecture: SpeciesArchitecture,
@@ -902,26 +945,30 @@ function growCrownParts(
   // Golden-angle phyllotaxy with real jitter: evenly spaced scaffolds around a
   // bole is the single most recognisable procedural tell.
   const azimuthOffset = random.range(0, Math.PI * 2)
+  const lowest = architecture.lowestScaffold
+  const scaffoldSpan = Math.max(0.02, SCAFFOLD_TOP - lowest)
+  const heights = scaffoldHeights(scaffoldCount, lowest, random)
   for (let index = 0; index < scaffoldCount; index += 1) {
     // Dealt alternately between the stems, so a divided bole ends up with two
     // competing crowns rather than one stem carrying everything.
     const bole = boles[index % boles.length]!
-    const along = clamp(
-      lerpNumber(
-        architecture.lowestScaffold,
-        0.97,
-        scaffoldCount === 1 ? 0.5 : index / (scaffoldCount - 1),
-      ) + random.range(-0.045, 0.045),
-      0.16,
-      0.985,
-    )
+    const along = heights[index]!
+    // Where this limb sits between the lowest one and the leader. Nearly
+    // everything about a scaffold follows from it.
+    const heightBias = clamp((along - lowest) / scaffoldSpan, 0, 1)
     const source = samplePart(bole, along)
     const azimuth = azimuthOffset + index * GOLDEN_ANGLE + random.range(-0.5, 0.5)
     const outward = vec3(Math.cos(azimuth), 0, Math.sin(azimuth))
+    // Low limbs leave the bole flatter than high ones, and that is not a
+    // stylistic choice — a limb low on a stem spent its life reaching sideways
+    // past its neighbours for light it could not get from above, while one at
+    // the top has only ever had to keep up with the leader. Drawing every
+    // limb's angle from the same distribution is what makes a crown read as a
+    // shuttlecock: a fan of identical sticks at identical angles.
     const rise = lerpNumber(
       architecture.scaffoldRise[0],
       architecture.scaffoldRise[1],
-      random.unit() * random.unit(),
+      clamp(heightBias * 0.72 + random.unit() * random.unit() * 0.46, 0, 1),
     )
     const tangent = tangentAt(bole, along)
     seeds.push({
@@ -931,7 +978,54 @@ function growCrownParts(
         multiply(tangent, architecture.scaffoldFollow),
       )),
       attachment: along,
-      availableRadius: source.radius * random.range(0.44, 0.66),
+      // The lowest limb on a veteran is the heaviest thing on it after the
+      // bole. Taking the same random share at every height instead flattens
+      // the hierarchy, and a crown of equal limbs has no hierarchy to read.
+      availableRadius: source.radius
+        * lerpNumber(0.62, 0.46, heightBias)
+        * random.range(0.9, 1.06),
+    })
+    seedAttachments.push(along)
+    seedParents.push(bole)
+  }
+
+  // Lateral limbs: the thinner, older, near-horizontal ones further down the
+  // bole. See `SpeciesArchitecture.lateralLimbs` — they are zero for anything
+  // grown in a closed canopy, because a clean bole is precisely what a closed
+  // canopy produces.
+  const lateralCount = Math.max(0, Math.round(architecture.lateralLimbs ?? 0))
+  const lateralSpan = architecture.lateralSpan ?? [0.2, 0.55]
+  for (let index = 0; index < lateralCount; index += 1) {
+    const bole = boles[index % boles.length]!
+    // Biased low within the band. The band is where limbs *can* be; most of
+    // the survivors are near its bottom, because those are the ones that were
+    // already big enough to hold their own when the crown closed over them.
+    const along = clamp(
+      lerpNumber(
+        lateralSpan[0],
+        lateralSpan[1],
+        Math.pow(random.unit(), 0.7),
+      ),
+      0.1,
+      Math.max(0.12, lowest - 0.02),
+    )
+    const source = samplePart(bole, along)
+    const azimuth = azimuthOffset
+      + (scaffoldCount + index) * GOLDEN_ANGLE
+      + random.range(-0.75, 0.75)
+    const outward = vec3(Math.cos(azimuth), 0, Math.sin(azimuth))
+    // Level, and occasionally below level. A limb that has carried its own
+    // weight for two centuries does not point upward at the bole.
+    const rise = random.range(-0.08, 0.26)
+    const tangent = tangentAt(bole, along)
+    seeds.push({
+      position: add(source.position, multiply(outward, source.radius * 0.78)),
+      direction: normalize(add(
+        add(multiply(outward, 1.3), vec3(0, rise, 0)),
+        multiply(tangent, architecture.scaffoldFollow * 0.45),
+      )),
+      attachment: along,
+      availableRadius: source.radius * random.range(0.1, 0.2),
     })
     seedAttachments.push(along)
     seedParents.push(bole)
@@ -2160,7 +2254,17 @@ function solveRadiusInheritance(parts: SemanticTreePart[]): void {
         // full Leonardo ratio and produced a visible knuckle at every semantic
         // part boundary. Preserve the shared ring, then reach the conserved
         // daughter girth smoothly through its emergence zone.
-        const junctionScale = continuation ? parentRadius / startRadius : scale
+        //
+        // Sampled at *this* child's attachment, not the group's. The bucket is
+        // a twelfth of the member wide, so a scaffold leaving the bole just
+        // under the apex shares a bucket with the leader — and if it happened
+        // to be first in the list, the leader's shared ring was taken from the
+        // parent's radius a twelfth of the way down, which is measurably wider
+        // on a tapering bole. The result was a step at the top of the trunk
+        // exactly where the mesher assumes there is none.
+        const junctionScale = continuation
+          ? samplePart(parent, child.attachment).radius / startRadius
+          : scale
         for (let index = 0; index < child.spine.length; index += 1) {
           const station = index / Math.max(1, child.spine.length - 1)
           const emergence = continuation ? smoothstep(0, 0.28, station) : 1

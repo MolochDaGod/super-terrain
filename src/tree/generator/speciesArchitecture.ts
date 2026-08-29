@@ -27,6 +27,23 @@ export interface SpeciesArchitecture {
   lobeCount: number
   /** Scaffold limbs leaving the bole. */
   scaffoldCount: number
+  /**
+   * Smaller limbs off the bole *below* the main scaffolds.
+   *
+   * The thing that separates a tree skeleton from a lollipop is that a real
+   * bole does not carry one tidy band of limbs at the top. It carries a few
+   * heavy ones there and a scatter of thinner, older, more horizontal ones
+   * below them — some still alive and reaching out sideways under the canopy,
+   * some reduced to short spurs. Without them a crown sits on a clean pole and
+   * every tree in a stand reads as the same pole.
+   *
+   * Zero is correct for anything grown in a closed canopy, which self-prunes
+   * its lower limbs — that is what a clean bole *is*. It is open-grown trees,
+   * and veterans in particular, that carry them.
+   */
+  lateralLimbs?: number
+  /** Fraction of total height the laterals occupy, low to high. */
+  lateralSpan?: readonly [number, number]
   /** Where on the bole the lowest scaffold departs. */
   lowestScaffold: number
   /** Initial rise of a scaffold: near 0 is a horizontal veteran limb. */
@@ -124,6 +141,9 @@ function juvenileArchitecture(
     profileExponent: toward(mature.profileExponent, 0.82),
     lobeAmplitude: toward(mature.lobeAmplitude, 0.1),
     lowestScaffold: toward(mature.lowestScaffold, 0.12),
+    // A sapling's crown already runs to the ground, so a separate low-limb
+    // pass would only double up on what the scaffolds are doing.
+    lateralLimbs: Math.round(toward(mature.lateralLimbs ?? 0, 0)),
     scaffoldRise: [
       toward(mature.scaffoldRise[0], 0.34),
       toward(mature.scaffoldRise[1], 0.95),
@@ -445,7 +465,18 @@ function oak(
     // Seed variation belongs in their placement and development, not in
     // silently overriding a visible editor parameter.
     scaffoldCount: parameters.branchCount,
-    lowestScaffold: lerpNumber(0.72, 0.42, veteran),
+    // Lower than it was, and it is the number the "long pole with a crown on
+    // it" read came from. At 0.72 a young oak put every limb it had in the top
+    // quarter of its height, which is a plantation conifer's habit, not an
+    // oak's: an oak's lowest live limb leaves the bole at about the top of the
+    // clear bole itself, and on a veteran a good deal below that.
+    lowestScaffold: lerpNumber(0.54, 0.4, veteran),
+    // The heavy low limbs a veteran oak is known for, and the short spurs a
+    // younger one still carries under its crown. Scaled by veteran-ness
+    // because a young oak in a wood has shed most of them and an old open-grown
+    // one has kept and thickened every survivor.
+    lateralLimbs: Math.round(parameters.branchCount * lerpNumber(0.18, 0.32, veteran)),
+    lateralSpan: [lerpNumber(0.26, 0.18, veteran), lerpNumber(0.5, 0.37, veteran)],
     scaffoldRise: ancient ? [0.05, 0.62] : [0.34, 0.95],
     scaffoldFollow: lerpNumber(0.34, 0.2, veteran),
     upTropism: lerpNumber(0.36, 0.27, veteran),

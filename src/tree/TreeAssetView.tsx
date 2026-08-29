@@ -65,35 +65,42 @@ function disposeAfterGpuSubmission(dispose: () => void): void {
 /**
  * Which LODs cast into the sun's shadow map.
  *
- * Not the same question as which LOD to draw, and tying the two together was a
- * bug: `castShadow` was `lodLevel === 0` everywhere, so a tree stopped casting
- * the instant it crossed the near LOD boundary. Its shadow did not fade, it
- * vanished — and once the near band was retuned to a stand-sized 21 metres,
- * that meant 26 of 158 trees cast anything at all, and a stand viewed from
- * outside cast nothing whatsoever.
+ * All of them, and the reason is worth recording because it has now been got
+ * wrong in both directions.
  *
- * The distances are unrelated. The near LOD boundary is about when a crown's
- * individual leaves stop being resolvable; the shadow question is whether the
- * caster lands inside the cascades, which reach 260 metres. A reduced LOD is a
- * *better* shadow caster, not a disqualified one — the same silhouette for a
- * fraction of the geometry.
+ * The first version tied casting to the near LOD, so a tree stopped casting
+ * the instant it crossed a 21-metre boundary and a stand seen from outside
+ * cast nothing at all. The second held it to LOD 1, which fixed the stand but
+ * left the boundary — at 26 to 62 metres, right in the middle of everything
+ * the viewer is looking at. Walking forward through a wood then pulled whole
+ * groups of crowns into the shadow map at once, and the floor a few tens of
+ * metres ahead went from unshadowed to dappled in a single frame. That is not
+ * a subtle LOD seam; it is the brightest change in the frame, because a
+ * canopy's shadow *is* most of the contrast on a forest floor.
+ *
+ * There is no distance at which switching a caster on or off is invisible, so
+ * the switch has to go. What pays for it is the cascade schedule in
+ * `createTerrainEnvironment`: the near cascade redraws every frame, the ones
+ * behind it redraw every second and third frame. The saving is roughly
+ * proportional — three full cascade passes a frame become about 1.8 — and it
+ * is spent where it cannot be seen, because a hundred metres away a shadow
+ * that is two frames stale has moved by less than a texel.
  *
  * Measured at an eye-level interior station, production, DPR 2, with the
  * camera moving so the cascade maps actually redraw each frame:
  *
  *   wood only, 316 casters        56ms
- *   previous rule, 171k casters   59ms
+ *   foliage to LOD 1, 171k        59ms
  *   every LOD casting, 243k       73ms
+ *   every LOD casting, staggered  ~62ms
  *
- * So trunks are close to free and are always worth casting — they carry the
- * long floor shadows that give a stand its depth. Foliage is where the cost
- * is, and the third LOD starts beyond 62 metres, where a crown's dapple is
- * too small and too far to be worth 14ms. Hence: all wood, foliage to LOD 1.
+ * Trunks were always free and always worth casting: they carry the long floor
+ * shadows that give a stand its depth.
  */
 const WOOD_CASTS_SHADOW = true
 
-function foliageCastsShadow(lodLevel: TreeLodLevel): boolean {
-  return lodLevel <= 1
+function foliageCastsShadow(_lodLevel: TreeLodLevel): boolean {
+  return true
 }
 
 /**

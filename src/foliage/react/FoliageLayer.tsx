@@ -20,9 +20,11 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib'
 import groundArmUrl from '../../terrain/react/assets/rock-ground-arm-1k.jpg'
 import groundMapUrl from '../../terrain/react/assets/rock-ground-diffuse-1k.jpg'
 import groundNormalUrl from '../../terrain/react/assets/rock-ground-normal-gl-1k.jpg'
-import { FoliageSystem, type FoliageFloor } from '../FoliageSystem'
+import { FoliageSystem } from '../FoliageSystem'
+import { MEADOW_FLOOR, type FoliageFloorRecipe } from '../foliageFloor'
 import type { FoliageEditorStore } from '../FoliageEditorStore'
 import { foliageSpeciesIndex } from '../foliageSpecies'
+import { foliageSurfaceIndex } from '../foliageSurfaces'
 import { useFoliageSnapshot } from './useFoliageSnapshot'
 
 /** Metres of soil texture per tile. Matches the tree workspace's review ground. */
@@ -30,23 +32,18 @@ const SOIL_TILE_SIZE = 5
 
 const GROUND_PLANE = /*@__PURE__*/ new Plane(new Vector3(0, 1, 0), 0)
 
-/** Linear soil multipliers per floor. See `FoliageGroundTextures.soilTint`. */
-const SOIL_TINTS: Record<FoliageFloor, readonly [number, number, number]> = {
-  meadow: [1, 1, 1],
-  // Damp humus: dark, warm, and well under the mineral ground's own value.
-  forest: [0.3, 0.255, 0.205],
-}
-
-/** How much fallen leaf covers each floor. See `FoliageGroundTextures.litter`. */
-const LITTER: Record<FoliageFloor, number> = {
-  meadow: 0,
-  forest: 0.88,
-}
-
 export interface FoliageLayerProps {
   store: FoliageEditorStore
-  /** Which ground cover the layer opens on, and how dark its soil reads. */
-  floor?: FoliageFloor
+  /**
+   * The floor this layer opens on: which ground layers cover the soil, which
+   * plants colonise it, and how dark the soil under all of it reads.
+   *
+   * Everything in it is laid down as ordinary brush strokes, so nothing here
+   * is privileged over what the user paints afterwards — including the ground
+   * layers, which used to be constants compiled into the material and were
+   * therefore impossible to erase.
+   */
+  recipe?: FoliageFloorRecipe
   /**
    * Compiles the layer against the real multisampled scene attachment before
    * anything is shown. Without it the first frame that includes the grass
@@ -56,7 +53,11 @@ export interface FoliageLayerProps {
   warmup?: (object: Object3D) => Promise<void>
 }
 
-export function FoliageLayer({ store, floor = 'meadow', warmup }: FoliageLayerProps) {
+export function FoliageLayer({
+  store,
+  recipe = MEADOW_FLOOR,
+  warmup,
+}: FoliageLayerProps) {
   const renderer = useThree((state) => state.gl) as unknown as Renderer
   const camera = useThree((state) => state.camera)
   const canvas = useThree((state) => state.gl.domElement)
@@ -80,6 +81,12 @@ export function FoliageLayer({ store, floor = 'meadow', warmup }: FoliageLayerPr
     map.colorSpace = SRGBColorSpace
   }, [armMap, map, normalMap])
 
+  // Keyed by the soil tint alone. The rest of the recipe is painted through
+  // the mask at runtime, so changing preset does not rebuild the material — it
+  // repaints the field. The tint is the one part that is genuinely baked in,
+  // because it multiplies the soil map before anything samples it.
+  const soilTint = recipe.soilTint
+  const tintKey = soilTint.join(',')
   const system = useMemo(
     () =>
       new FoliageSystem({
@@ -87,10 +94,11 @@ export function FoliageLayer({ store, floor = 'meadow', warmup }: FoliageLayerPr
         normalMap,
         armMap,
         tileSize: SOIL_TILE_SIZE,
-        soilTint: SOIL_TINTS[floor],
-        litter: LITTER[floor],
+        soilTint: tintKey.split(',').map(Number) as unknown as
+          readonly [number, number, number],
       }),
-    [armMap, floor, map, normalMap],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [armMap, map, normalMap, tintKey],
   )
   useEffect(() => () => system.dispose(), [system])
 
@@ -156,27 +164,36 @@ export function FoliageLayer({ store, floor = 'meadow', warmup }: FoliageLayerPr
   const pointer = usePointerPainting(store, camera, canvas, controls, snapshot.tool)
 
   const elapsed = useRef(0)
-  const seeded = useRef(false)
 
   useFrame((_, delta) => {
     const state = store.getSnapshot()
     elapsed.current += Math.min(delta, 0.1)
 
-    if (!seeded.current) {
-      seeded.current = true
-      system.seed(renderer, floor)
-    }
+    // Idempotent: it returns immediately once this recipe has been queued, and
+    // re-queues from scratch when the workspace switches to another preset.
+    system.seed(recipe)
 
     for (const command of store.takeCommands()) {
       if (command.kind === 'clear') {
-        system.fill(renderer, 0, 'erase')
+        system.clear(renderer)
       } else if (command.kind === 'fill') {
-        system.fill(renderer, foliageSpeciesIndex(command.species), 'paint')
+        system.fill(
+          renderer,
+          state.layer === 'surface'
+            ? foliageSurfaceIndex(state.surface)
+            : foliageSpeciesIndex(state.species),
+          'paint',
+          state.layer,
+        )
       } else {
-        system.fill(renderer, 0, 'erase')
-        seeded.current = false
+        system.reseed(renderer, recipe)
       }
     }
+
+    // Before the visibility gate: the floor has to be laid down whether or not
+    // anyone is looking at it, or hiding the layer while it seeds would leave
+    // it permanently half-painted.
+    system.pump(renderer)
 
     system.setDensity(state.density)
     system.setWind(state.wind)
@@ -185,7 +202,10 @@ export function FoliageLayer({ store, floor = 'meadow', warmup }: FoliageLayerPr
     if (stroke) {
       system.paint(renderer, {
         ...stroke,
-        species: foliageSpeciesIndex(state.species),
+        species: state.layer === 'surface'
+          ? foliageSurfaceIndex(state.surface)
+          : foliageSpeciesIndex(state.species),
+        layer: state.layer,
         radius: state.radius,
         hardness: state.hardness,
         mode: state.tool === 'erase' ? 'erase' : 'paint',

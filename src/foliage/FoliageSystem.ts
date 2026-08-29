@@ -7,9 +7,16 @@ import type {
 } from 'three/webgpu'
 import {
   FoliageMaskField,
+  type FoliagePaintLayer,
   type FoliagePaintMode,
   type FoliagePaintStroke,
 } from './FoliageMaskField'
+import { floorStrokes, type FoliageFloorRecipe } from './foliageFloor'
+import {
+  createFoliageDebris,
+  runFoliageDebris,
+  type FoliageDebrisField,
+} from './foliageDebris'
 import {
   createFoliageBladeMaterial,
 } from './foliageBladeMaterial'
@@ -31,7 +38,6 @@ import {
   foliageWindDirection,
   updateFoliageRuntime,
 } from './foliageRuntime'
-import { foliageSpeciesIndex } from './foliageSpecies'
 
 export interface FoliageWindSettings {
   /** 0 is still air, 1 a strong steady breeze. */
@@ -55,6 +61,19 @@ export const DEFAULT_FOLIAGE_WIND: FoliageWindSettings = {
 }
 
 /**
+ * Seeding strokes run per frame.
+ *
+ * Each one is a dispatch over the whole 512² mask, and a forest recipe is a
+ * couple of hundred of them. Running them all in the frame the layer first
+ * appears is a quarter-second of compute inside one frame — which is exactly
+ * the kind of stall the rest of this system is built to avoid, and it lands on
+ * the worst possible frame, the first one. Spreading them costs nothing: the
+ * floor fills in over about a fifth of a second while the trees are still
+ * compiling, and nobody is looking at bare ground during a build anyway.
+ */
+const SEED_STROKES_PER_FRAME = 12
+
+/**
  * Everything the ground-cover layer owns, and the one place a frame touches it.
  *
  * The contract with the rest of the editor is deliberately small: hand it a
@@ -63,93 +82,6 @@ export const DEFAULT_FOLIAGE_WIND: FoliageWindSettings = {
  * culling, not for painting — so none of this can stall the frame waiting on
  * the device.
  */
-/** Which ground cover the layer opens on. */
-export type FoliageFloor = 'meadow' | 'forest'
-
-type FloorSeed = [string, number, number, number, number]
-
-/**
- * Deterministic colonies of one species scattered over a disc.
- *
- * Seeded rather than hand-placed so the layout covers whatever the stand
- * actually spans, and so adding a layer is one line instead of twenty
- * coordinates that have to be kept clear of each other by eye.
- */
-function scatterColonies(
-  species: string,
-  count: number,
-  spread: number,
-  radius: readonly [number, number],
-  flow: readonly [number, number],
-  seed: number,
-): FloorSeed[] {
-  let state = seed >>> 0
-  const random = () => {
-    state = (state + 0x6d2b79f5) >>> 0
-    let t = state
-    t = Math.imul(t ^ (t >>> 15), t | 1)
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-  const seeds: FloorSeed[] = []
-  for (let i = 0; i < count; i += 1) {
-    const angle = random() * Math.PI * 2
-    // Square-rooted so colonies are spread evenly over the disc rather than
-    // piled around the origin.
-    const distance = Math.sqrt(random()) * spread
-    seeds.push([
-      species,
-      Math.round(Math.cos(angle) * distance),
-      Math.round(Math.sin(angle) * distance),
-      radius[0] + random() * (radius[1] - radius[0]),
-      flow[0] + random() * (flow[1] - flow[0]),
-    ])
-  }
-  return seeds
-}
-
-const FLOOR_SEEDS: Record<FoliageFloor, readonly FloorSeed[]> = {
-  meadow: [
-    ['tussock', -46, 28, 52, 0.55],
-    ['tussock', 63, -71, 44, 0.5],
-    ['dry-steppe', 78, 62, 66, 0.62],
-    ['dry-steppe', -95, -40, 58, 0.5],
-    ['wildflower', -18, -64, 40, 0.55],
-    ['clover-mat', 24, 46, 34, 0.5],
-    ['woodland-fern', -84, 88, 38, 0.6],
-    ['sedge-reed', 108, -18, 30, 0.58],
-    ['broadleaf-weed', 6, 96, 32, 0.45],
-  ],
-  // Colonies, not a sward.
-  //
-  // The floor is built in layers the way a real one is, because a single
-  // species painted anywhere always reads as a texture: bracken over the open
-  // ground, fern colonies in the shade under it, bramble sprawling where a
-  // gap lets light in, and a fine rush threading between all of them. Flows
-  // stay well under one so the patches keep soft, incomplete edges and
-  // overlap into mixtures rather than stacking as decals.
-  //
-  // Scattered rather than listed. The stand now spreads across most of a
-  // four-hundred-metre ground, and a hand-placed list of nine colonies inside
-  // forty metres of the origin left everything beyond that bare — which is
-  // most of what made the floor read as a demo.
-  //
-  // Moss is deliberately absent. A mat of blades is the wrong model for it
-  // twice over: moss is a film on a surface rather than a stand of
-  // individuals, and it lives in the ground material where a film belongs.
-  // The species exists in the palette for painting cushions by hand.
-  forest: [
-    ...scatterColonies('bracken', 20, 122, [11, 23], [0.3, 0.54], 0x1f35),
-    ...scatterColonies('woodland-fern', 24, 118, [10, 19], [0.34, 0.56], 0x2c71),
-    ...scatterColonies('bramble', 15, 116, [6, 13], [0.26, 0.46], 0x3a19),
-    ...scatterColonies('wood-rush', 28, 130, [12, 25], [0.18, 0.32], 0x4d63),
-    // Scattered, not a sward. Painted at full flow these read as a layer of
-    // pale plastic leaves over the litter — the herbs are the exception on a
-    // forest floor rather than the rule.
-    ...scatterColonies('broadleaf-weed', 18, 120, [11, 19], [0.14, 0.25], 0x5b87),
-  ],
-}
-
 export class FoliageSystem {
   readonly group = new Group()
   readonly mask = new FoliageMaskField()
@@ -157,9 +89,11 @@ export class FoliageSystem {
   readonly bladeMaterial: MeshStandardNodeMaterial
   readonly groundMaterial: MeshPhysicalNodeMaterial
   readonly ground: Mesh
+  readonly debris: FoliageDebrisField
 
   private readonly groundGeometry: PlaneGeometry
-  private seeded = false
+  private pendingSeed: FoliagePaintStroke[] = []
+  private seededRecipe: string | null = null
   private disposed = false
 
   constructor(groundTextures: FoliageGroundTextures) {
@@ -183,9 +117,12 @@ export class FoliageSystem {
     this.ground.matrixAutoUpdate = false
     this.ground.updateMatrix()
 
+    this.debris = createFoliageDebris(this.mask)
+
     this.group.name = 'ground-foliage'
     this.group.add(this.ground)
     for (const ring of this.rings) this.group.add(ring.mesh)
+    for (const mesh of this.debris.meshes) this.group.add(mesh)
   }
 
   setDensity(value: number): void {
@@ -212,42 +149,65 @@ export class FoliageSystem {
    * Laid down as real brush strokes through the same kernel the toolbar uses,
    * which means the competition between species applies and the result is a
    * genuine mix — not a uniform field of one type with three others stamped
-   * over it.
+   * over it. It also means the result is *ordinary painted data*: the eraser
+   * takes it off, a different brush replaces it, and nothing about the seeded
+   * floor is privileged over anything the user does afterwards. That was the
+   * whole problem with the previous arrangement, where the litter and the moss
+   * lived as constants inside the ground material and no tool could reach them.
    *
-   * `meadow` fills first and scatters over the fill, because open pasture is
-   * continuous. `forest` never fills: the floor of a closed stand is mostly
-   * bare litter, and the cover on it is colonies — a fern stand here, a moss
-   * mat over a rotting log there — with dark humus between them. Filling it
-   * and then darkening the result gives a lawn in the shade, which is exactly
-   * the tell this avoids.
+   * Queued rather than run. See `SEED_STROKES_PER_FRAME`.
    */
-  seed(renderer: Renderer, floor: FoliageFloor = 'meadow'): void {
-    if (this.seeded || this.disposed) return
-    this.seeded = true
-    if (floor === 'meadow') {
-      this.mask.fill(renderer, foliageSpeciesIndex('meadow-fescue'), 'paint')
+  seed(recipe: FoliageFloorRecipe): void {
+    if (this.disposed || this.seededRecipe === recipe.id) return
+    this.seededRecipe = recipe.id
+    this.pendingSeed = floorStrokes(recipe)
+  }
+
+  /** Re-runs the recipe from scratch, clearing whatever is on the field now. */
+  reseed(renderer: Renderer, recipe: FoliageFloorRecipe): void {
+    if (this.disposed) return
+    this.clear(renderer)
+    this.seededRecipe = null
+    this.seed(recipe)
+  }
+
+  /** Wipes both fields: every plant and every ground layer. */
+  clear(renderer: Renderer): void {
+    if (this.disposed) return
+    this.pendingSeed = []
+    // Erasing thins both fields at once, so one dispatch does it.
+    this.mask.fill(renderer, 0, 'erase')
+  }
+
+  /** True while the opening floor is still being laid down. */
+  get seeding(): boolean {
+    return this.pendingSeed.length > 0
+  }
+
+  /**
+   * Drains the seeding queue. Safe to call every frame whether or not the
+   * layer is visible — the floor has to exist before it is shown.
+   */
+  pump(renderer: Renderer): void {
+    if (this.disposed || this.pendingSeed.length === 0) return
+    const batch = Math.min(SEED_STROKES_PER_FRAME, this.pendingSeed.length)
+    for (let index = 0; index < batch; index += 1) {
+      this.mask.paint(renderer, this.pendingSeed[index]!)
     }
-    for (const [species, x, z, radius, flow] of FLOOR_SEEDS[floor]) {
-      this.mask.paint(renderer, {
-        fromX: x,
-        fromZ: z,
-        toX: x,
-        toZ: z,
-        radius,
-        flow,
-        hardness: 0.05,
-        species: foliageSpeciesIndex(species as never),
-        mode: 'paint',
-      })
-    }
+    this.pendingSeed = this.pendingSeed.slice(batch)
   }
 
   paint(renderer: Renderer, stroke: FoliagePaintStroke): void {
     this.mask.paint(renderer, stroke)
   }
 
-  fill(renderer: Renderer, species: number, mode: FoliagePaintMode): void {
-    this.mask.fill(renderer, species, mode)
+  fill(
+    renderer: Renderer,
+    species: number,
+    mode: FoliagePaintMode,
+    layer: FoliagePaintLayer = 'plants',
+  ): void {
+    this.mask.fill(renderer, species, mode, layer)
   }
 
   /** Call once per frame, before the scene is submitted. */
@@ -260,6 +220,7 @@ export class FoliageSystem {
     if (this.disposed) return
     updateFoliageRuntime(camera, elapsedSeconds, viewportHeight)
     runFoliagePopulation(renderer, this.rings)
+    runFoliageDebris(renderer, this.debris)
   }
 
   setVisible(visible: boolean): void {
@@ -270,6 +231,7 @@ export class FoliageSystem {
     if (this.disposed) return
     this.disposed = true
     disposeFoliageRings(this.rings)
+    this.debris.dispose()
     this.groundGeometry.dispose()
     this.bladeMaterial.dispose()
     this.groundMaterial.dispose()

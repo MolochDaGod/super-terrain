@@ -71,7 +71,47 @@ export interface TerrainEnvironmentOptions {
 interface LightRig {
   sun: { elevation: number; azimuth: number; colour: number; intensity: number }
   /** Shadow map edge in texels, and how far the cascades reach in metres. */
-  shadow: { mapSize: number; maxFar: number; lightMargin: number; cascades: number }
+  shadow: {
+    mapSize: number
+    maxFar: number
+    lightMargin: number
+    cascades: number
+    /**
+     * How many frames apart successive cascades redraw.
+     *
+     * Cascade `i` redraws every `1 + i * cascadeStagger` frames while the
+     * camera is moving; 0 keeps every cascade on every frame. Only the near
+     * cascade carries shadows the eye can resolve edges in, and the far one
+     * covers a box hundreds of metres across whose texels are the better part
+     * of a metre — two frames of lag there moves its contents by a fraction of
+     * a texel at any speed a person walks or flies at.
+     *
+     * This is what buys the budget for every LOD to cast (see
+     * `foliageCastsShadow`). Three full cascade passes a frame become about
+     * 1.8, and the saving lands on exactly the passes whose staleness cannot
+     * be seen.
+     */
+    cascadeStagger: number
+    /**
+     * How completely a shadowed surface loses the sun, 0..1.
+     *
+     * 1 is a lid. That is right for rock and for a building, and wrong for a
+     * canopy: a leaf transmits a few per cent of what lands on it, a canopy is
+     * full of gaps smaller than the shadow map's texel, and the light that
+     * comes through both is what a forest interior is actually lit by.
+     *
+     * It also replaces something that used to happen by accident. While the
+     * far LOD of a crown cast nothing, a stand leaked a great deal of sun in
+     * from every tree more than sixty metres off, and the fill in this rig was
+     * tuned on top of that leak. Making every LOD cast (see
+     * `foliageCastsShadow`) closed the lid properly and the interior went
+     * nearly black — correct for an opaque canopy, and not what a wood looks
+     * like. This is the same light back, minus the popping: it arrives evenly,
+     * from a physical cause, instead of appearing whenever a tree crossed a
+     * distance threshold.
+     */
+    intensity: number
+  }
   hemisphere: { sky: number; ground: number; intensity: number }
   ambient: { colour: number; intensity: number }
   frontFill: { colour: number; intensity: number }
@@ -89,7 +129,14 @@ const LIGHT_RIGS: Record<TerrainEnvironmentLook, LightRig> = {
   // Late afternoon over open ground: warm raking sun, blue sky bounce.
   terrain: {
     sun: { elevation: 14, azimuth: 142, colour: 0xffd0a6, intensity: 4.35 },
-    shadow: { mapSize: 1536, maxFar: 2_200, lightMargin: 800, cascades: 3 },
+    shadow: {
+      mapSize: 1536,
+      maxFar: 2_200,
+      lightMargin: 800,
+      cascades: 3,
+      cascadeStagger: 1,
+      intensity: 1,
+    },
     hemisphere: { sky: 0x748ba8, ground: 0x292a2d, intensity: 0.92 },
     ambient: { colour: 0x303947, intensity: 0.052 },
     frontFill: { colour: 0x879bb8, intensity: 0.94 },
@@ -113,7 +160,18 @@ const LIGHT_RIGS: Record<TerrainEnvironmentLook, LightRig> = {
     // is what sends light *between* the trunks and gives a stand its lit
     // mid-ground and its long floor shadows.
     sun: { elevation: 24, azimuth: 152, colour: 0xffeccb, intensity: 5.2 },
-    shadow: { mapSize: 2048, maxFar: 260, lightMargin: 120, cascades: 3 },
+    shadow: {
+      mapSize: 2048,
+      maxFar: 260,
+      lightMargin: 120,
+      cascades: 3,
+      cascadeStagger: 1,
+      // A closed beech canopy passes something like a twentieth of the light
+      // that lands on it, and its gaps pass a good deal more than that at
+      // scales the shadow map cannot resolve. A third is the value at which a
+      // stand this dense reads as shaded rather than as roofed.
+      intensity: 0.66,
+    },
     // Fill sized to what a closed canopy actually does to light rather than to
     // what it blocks.
     //
@@ -217,6 +275,7 @@ function createFullEnvironment(
   sun.position.copy(DEFAULT_SUN.direction).multiplyScalar(2_400)
   sun.castShadow = options.shadows ?? true
   sun.shadow.mapSize.set(rig.shadow.mapSize, rig.shadow.mapSize)
+  sun.shadow.intensity = rig.shadow.intensity
   sun.shadow.bias = -0.0004
   sun.shadow.normalBias = 0.35
   // The terrain, sun and camera are persistent. Redrawing four 2048² maps
@@ -294,7 +353,20 @@ function createFullEnvironment(
     })),
   })
 
-  const invalidateShadowMaps = (): void => {
+  let shadowFrame = 0
+
+  /**
+   * Dirties the cascades that are due this frame.
+   *
+   * `everyCascade` is for changes that are not the camera moving — a caster
+   * appeared, the terrain remeshed, the cascade lights were just created. Those
+   * invalidate the *contents* of every map, and a schedule that skipped one
+   * would leave a tree standing in the far field casting nothing for two
+   * frames after it appeared. Camera motion is the opposite case: the contents
+   * are unchanged and only the box has slid, which is precisely the update the
+   * far cascades can afford to take late.
+   */
+  const invalidateShadowMaps = (everyCascade: boolean): void => {
     const lights = cascades?.lights ?? []
     if (lights.length === 0) {
       // CSM creates its private lights lazily during async material setup. The
@@ -302,11 +374,13 @@ function createFullEnvironment(
       sun.shadow.needsUpdate = true
       return
     }
-    for (const light of lights) {
-      const shadow = light.shadow
+    const stagger = Math.max(0, rig.shadow.cascadeStagger)
+    for (let index = 0; index < lights.length; index += 1) {
+      const shadow = lights[index]!.shadow
       if (!shadow) continue
       shadow.autoUpdate = false
-      shadow.needsUpdate = true
+      const period = everyCascade ? 1 : 1 + index * stagger
+      if (shadowFrame % period === 0) shadow.needsUpdate = true
     }
   }
 
@@ -332,9 +406,10 @@ function createFullEnvironment(
       if (terrainChanged) shadowDebug.terrainChanges += 1
       if (cascadesCreated) shadowDebug.cascadeChanges += 1
 
+      shadowFrame += 1
       if (projectionChanged && cascades?.camera) cascades.updateFrustums()
       if (cameraChanged || terrainChanged || cascadesCreated) {
-        invalidateShadowMaps()
+        invalidateShadowMaps(terrainChanged || cascadesCreated || projectionChanged)
       }
 
       previousCameraWorld.copy(camera.matrixWorld)
