@@ -44,6 +44,13 @@
         "three": "^0.185.0",
       },
     },
+    "packages/idtech-gi": {
+      "name": "@workspace/idtech-gi",
+      "version": "0.0.1",
+      "peerDependencies": {
+        "three": "^0.185.0",
+      },
+    },
   },
   "trustedDependencies": [
     "@kmamal/gpu",
@@ -232,6 +239,8 @@
     "@vitest/utils": ["@vitest/utils@4.1.10", "", { "dependencies": { "@vitest/pretty-format": "4.1.10", "convert-source-map": "^2.0.0", "tinyrainbow": "^3.1.0" } }, "sha512-fy9am/HWxbaGt/Sawrp90vt6Y6jQwf1RX77cz3uwoJwJVMli/e1IEwRPnMNJ7vKfPTwo0diXifkpPvwH9v7nGA=="],
 
     "@workspace/clustered-webgpu-lighting": ["@workspace/clustered-webgpu-lighting@workspace:packages/clustered-webgpu-lighting"],
+
+    "@workspace/idtech-gi": ["@workspace/idtech-gi@workspace:packages/idtech-gi"],
 
     "abbrev": ["abbrev@3.0.1", "", {}, "sha512-AO2ac6pjRB3SJmGJo+v5/aK6Omggp6fsLrs6wN9bd35ulu4cCwaAU9+7ZhXjeqHVkaHThLuzH0nZr0YpCDhygg=="],
 
