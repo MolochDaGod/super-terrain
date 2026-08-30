@@ -14,6 +14,7 @@ export function DevSceneHandle({ terrain }: { terrain: WorldTerrain }) {
   const gl = useThree((state) => state.gl)
   const scene = useThree((state) => state.scene)
   const camera = useThree((state) => state.camera)
+  const controls = useThree((state) => state.controls)
   const mountedAt = useRef(performance.now())
   const quietSince = useRef(0)
   const settledAt = useRef(0)
@@ -84,6 +85,31 @@ export function DevSceneHandle({ terrain }: { terrain: WorldTerrain }) {
       gl,
       scene,
       camera,
+      /**
+       * Moves the view, controller and all.
+       *
+       * Setting `camera.position` from a console does not stick: the orbit
+       * controller owns the camera and writes its own state back on the next
+       * frame, so an external move survives for one frame and is then undone.
+       * Anything driving the editor from outside — the review harness, a
+       * reproduction script — has to go through the controller, and this is the
+       * one place that knows where it is.
+       */
+      placeCamera(
+        position: [number, number, number],
+        target: [number, number, number],
+      ) {
+        camera.position.set(position[0], position[1], position[2])
+        const controller = controls as {
+          target?: { set(x: number, y: number, z: number): void }
+          update?: () => void
+        } | null
+        controller?.target?.set(target[0], target[1], target[2])
+        controller?.update?.()
+        camera.lookAt(target[0], target[1], target[2])
+        camera.updateMatrixWorld(true)
+        return { position: camera.position.toArray(), target }
+      },
       /** Browser-review diagnostic: identifies the actual surface at a pixel. */
       raycastPixel(x: number, y: number, width: number, height: number) {
         pointer.current.set(x / width * 2 - 1, -(y / height * 2 - 1))
@@ -100,7 +126,7 @@ export function DevSceneHandle({ terrain }: { terrain: WorldTerrain }) {
       gl.domElement.removeAttribute('role')
       gl.domElement.removeAttribute('aria-label')
     }
-  }, [camera, gl, scene])
+  }, [camera, controls, gl, scene])
 
   return null
 }

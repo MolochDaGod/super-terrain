@@ -27,6 +27,38 @@ bun run test
 bun run build
 ```
 
+## Forests
+
+Forests are drawn on the terrain as splines, in the same way Unreal's spline
+tools work, and grown from them on demand.
+
+1. Pick the **Forest** tool (`B`) and press **New field**.
+2. Click the terrain to drop control points. **Enter** finishes the shape.
+3. Drag a node to reshape it; **Alt-click** removes one. Nothing regenerates
+   while a node is moving — the stand regrows once, when the drag ends.
+4. The inspector carries the field's forest type, its edge fringe, its density
+   and its seed. **Grow field** replants it.
+
+A field is authoritative and everything inside it is derived: the stems, the
+boulders, the ground cover and the floor the terrain shades. That is what lets a
+forest exist anywhere in the four-kilometre world without storing a texel of
+painted data, and it is why the ground-cover *brush* lives only in the tree
+workspace — on terrain, editing the field's forest type is the edit.
+
+Three things follow the ground rather than a plane:
+
+- stems and boulders are planted at the terrain's own height, and stems are
+  refused on ground steeper than about forty degrees;
+- ground cover reads a height window filled from the same height function, so a
+  tuft of grass and the tree beside it stand on the same number;
+- the floor itself — litter, needle duff, moss, scuffed earth — is shaded by the
+  *terrain material*, weighted by the same painted mask, so a stand's floor fades
+  into the hillside across the field's fringe with no second surface and no edge.
+
+The tree workspace (**Tree** in the title bar) remains the asset lab: it authors
+the species and variations a forest field references, on flat ground, with the
+ground-cover brush and the diagnostic views.
+
 ## Visual review
 
 Review frames are captured from the running editor in real Chrome, because the

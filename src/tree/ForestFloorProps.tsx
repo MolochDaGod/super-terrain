@@ -49,14 +49,29 @@ export function ForestFloorProps({
   placements,
   prototypes,
   rocks,
+  groundNormals,
 }: {
   placements: readonly TreePlacement[]
   prototypes: Readonly<Record<string, TreePrototype>>
   rocks: readonly GeneratedForestRock[]
+  /**
+   * Ground normal per placement id, where the floor is not a plane.
+   *
+   * The lab's ground is flat and needs none of this. A forest grown on terrain
+   * does: a disc lying in the XZ plane on a one-in-three slope has half its rim
+   * a metre underground and the other half a metre in the air, which turns the
+   * one element whose whole job is to hide the seam between a trunk and the
+   * ground into the thing that advertises it.
+   */
+  groundNormals?: ReadonlyMap<string, readonly [number, number, number]>
 }) {
   return (
     <>
-      <TrunkContactSkirts placements={placements} prototypes={prototypes} />
+      <TrunkContactSkirts
+        placements={placements}
+        prototypes={prototypes}
+        groundNormals={groundNormals}
+      />
       <ForestBoulders rocks={rocks} />
     </>
   )
@@ -77,9 +92,11 @@ export function ForestFloorProps({
 function TrunkContactSkirts({
   placements,
   prototypes,
+  groundNormals,
 }: {
   placements: readonly TreePlacement[]
   prototypes: Readonly<Record<string, TreePrototype>>
+  groundNormals?: ReadonlyMap<string, readonly [number, number, number]>
 }) {
   const geometry = useMemo(() => skirtGeometry(), [])
   const material = useMemo(() => skirtMaterial(), [])
@@ -106,6 +123,8 @@ function TrunkContactSkirts({
     const matrix = new Matrix4()
     const position = new Vector3()
     const rotation = new Quaternion()
+    const yaw = new Quaternion()
+    const normal = new Vector3()
     const scale = new Vector3()
     standing.forEach((placement, index) => {
       const trunk = prototypes[placement.prototypeId]?.parameters.trunkRadius ?? 0.4
@@ -113,15 +132,29 @@ function TrunkContactSkirts({
       // reaches a good deal further than the trunk is wide, because it is the
       // root plate and the banked leaves doing it, not the cylinder.
       const span = Math.max(0.75, trunk * placement.scale * SKIRT_SPAN)
-      position.set(placement.position[0], 0.02, placement.position[2])
-      rotation.setFromAxisAngle(UP, placement.rotation)
+      // Lifted proportionally to its own span, not by a fixed two centimetres:
+      // a wide skirt on a slope needs more clearance than a narrow one, and the
+      // amount it needs is exactly the relief across its own footprint.
+      const ground = groundNormals?.get(placement.id)
+      position.set(
+        placement.position[0],
+        placement.position[1] + (ground ? 0.02 + span * 0.06 : 0.02),
+        placement.position[2],
+      )
+      yaw.setFromAxisAngle(UP, placement.rotation)
+      if (ground) {
+        normal.set(ground[0], ground[1], ground[2]).normalize()
+        rotation.setFromUnitVectors(UP, normal).multiply(yaw)
+      } else {
+        rotation.copy(yaw)
+      }
       scale.set(span, 1, span)
       matrix.compose(position, rotation, scale)
       instanced.setMatrixAt(index, matrix)
     })
     instanced.instanceMatrix.needsUpdate = true
     return instanced
-  }, [geometry, material, prototypes, standing])
+  }, [geometry, groundNormals, material, prototypes, standing])
 
   useEffect(() => () => mesh.dispose(), [mesh])
   if (standing.length === 0) return null

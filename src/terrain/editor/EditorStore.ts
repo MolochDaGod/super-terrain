@@ -6,6 +6,7 @@ import type {
   PaintMode,
 } from '../modifiers/types'
 import type { TerrainPaintChannelId } from '../rendering/materialSettings'
+import type { TerrainEnvironmentLook } from '../rendering/environment/createTerrainEnvironment'
 import type { TerrainRenderMode } from '../rendering/renderModes'
 import {
   DEFAULT_GRANITE_ROCK_PARAMETERS,
@@ -34,6 +35,7 @@ export type EditorTool =
   | 'terrace'
   | 'noise'
   | 'paint'
+  | 'forest'
   | 'remesh'
   | 'tunnel'
   | 'dig'
@@ -61,6 +63,7 @@ export type InspectorSection =
   | 'csg'
   | 'lights'
   | 'modifiers'
+  | 'forests'
 
 /**
  * The section a tool needs. Switching tools opens it, so the panel below the
@@ -70,6 +73,8 @@ export function inspectorSectionForTool(tool: EditorTool): InspectorSection {
   switch (tool) {
     case 'paint':
       return 'materials'
+    case 'forest':
+      return 'forests'
     case 'camera':
     case 'cursor':
     case 'water':
@@ -117,6 +122,15 @@ export interface EditorSnapshot {
   /** Undefined when every scene section is collapsed. */
   openSection?: InspectorSection
   renderMode: TerrainRenderMode
+  /**
+   * Which light and sky rig the world is lit by.
+   *
+   * Switchable because the change is a matter of taste and the two are worth
+   * putting side by side: `wooded-landscape` is the physical sky model with
+   * nothing in front of it, `terrain` is the older rig with the authored alpine
+   * cloud photograph behind the ridges.
+   */
+  environmentLook: TerrainEnvironmentLook
   cameraMode: CameraMode
   uiViewMode: UiViewMode
   dprMode: DprMode
@@ -187,6 +201,7 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   overlay: 'none',
   openSection: 'modifiers',
   renderMode: 'full',
+  environmentLook: 'wooded-landscape',
   cameraMode: 'orbit',
   uiViewMode: 'editor',
   dprMode: 'medium',

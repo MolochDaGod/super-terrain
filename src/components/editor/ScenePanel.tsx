@@ -5,6 +5,8 @@ import type {
   InspectorSection,
 } from '../../terrain/editor/EditorStore'
 import { useEditorSnapshot } from '../../terrain/react/hooks'
+import type { ForestFieldStore } from '../../forest/ForestFieldStore'
+import { ForestFieldsSection } from '../../forest/react/ForestFieldPanels'
 import { LightsSection } from './LightsSection'
 import { ModifierStackPanel } from './ModifierStackPanel'
 import { RocksSection } from './RocksSection'
@@ -22,9 +24,11 @@ import { SculptLayersPanel } from './SculptLayersPanel'
 export function ScenePanel({
   terrain,
   editor,
+  forest,
 }: {
   terrain: WorldTerrain
   editor: EditorStore
+  forest: ForestFieldStore
 }) {
   const snapshot = useEditorSnapshot(editor)
   const sectionProps = (section: InspectorSection) => ({
@@ -44,6 +48,7 @@ export function ScenePanel({
         <Boxes size={12} strokeWidth={1.7} className="shrink-0 text-white/45" />
         <span className="panel-title min-w-0 flex-1 truncate">Scene</span>
       </div>
+      <ForestFieldsSection forest={forest} {...sectionProps('forests')} />
       <LightsSection editor={editor} {...sectionProps('lights')} />
       <RocksSection terrain={terrain} editor={editor} {...sectionProps('rocks')} />
       <SculptLayersPanel terrain={terrain} editor={editor} {...sectionProps('layers')} />

@@ -29,7 +29,7 @@ import { WebGpuCanvas } from './terrain/react/WebGpuCanvas'
 import { useEditorSnapshot } from './terrain/react/hooks'
 import { currentViewUrlState } from './terrain/react/viewUrlState'
 import { FoliageEditorStore } from './foliage/FoliageEditorStore'
-import { FoliageToolbar } from './foliage/react/FoliageToolbar'
+import { ForestFieldStore } from './forest/ForestFieldStore'
 import { TreeMenuBar } from './tree/TreeMenuBar'
 import { TreeEditorStore } from './tree/TreeEditorStore'
 import { TreeScene } from './tree/TreeScene'
@@ -39,6 +39,11 @@ function App() {
   const editor = useMemo(() => new EditorStore(), [])
   const treeEditor = useMemo(() => new TreeEditorStore(), [])
   const foliageEditor = useMemo(() => new FoliageEditorStore(), [])
+  // Forest fields outlive a world rebuild deliberately: a spline is drawn in
+  // world coordinates and a new world is the same coordinate space. What it
+  // does not outlive is the ground under it, so every field is marked for
+  // regrowing when the world changes.
+  const forestFields = useMemo(() => new ForestFieldStore(), [])
   const view = useMemo(() => currentViewUrlState(), [])
   const [workspace, setWorkspace] = useState<Workspace>(() => view.editor ?? 'terrain')
   const changeWorkspace = useCallback((next: Workspace) => {
@@ -74,8 +79,11 @@ function App() {
         lights: [],
         status: 'Building a new world…',
       })
+      // The splines survive; what grew from them does not. A stand planted on
+      // the old world's heights would stand in the new world's air.
+      forestFields.markAllDirty()
     },
-    [editor],
+    [editor, forestFields],
   )
   const editorSnapshot = useEditorSnapshot(editor)
   const terrainWorkspace = workspace === 'terrain'
@@ -122,10 +130,12 @@ function App() {
     if (!import.meta.env.DEV) return
     const globals = globalThis as Record<string, unknown>
     globals.__meshterrain = { terrain, editor }
+    globals.__forestFields = forestFields
     return () => {
       delete globals.__meshterrain
+      delete globals.__forestFields
     }
-  }, [editor, terrain])
+  }, [editor, forestFields, terrain])
 
   useEffect(() => {
     terrain.setOverlay(editorUiVisible ? editorSnapshot.overlay : 'none')
@@ -148,7 +158,14 @@ function App() {
             cameraPosition={terrainWorkspace ? undefined : view.position ?? [45, 13, 48]}
           >
             {terrainWorkspace ? (
-              <TerrainScene key={worldGeneration} terrain={terrain} editor={editor} />
+              <TerrainScene
+              key={worldGeneration}
+              terrain={terrain}
+              editor={editor}
+              forest={forestFields}
+              trees={treeEditor}
+              foliage={foliageEditor}
+            />
             ) : (
               <TreeScene
                 editor={editor}
@@ -182,15 +199,23 @@ function App() {
             workspace={workspace}
             onWorkspaceChange={changeWorkspace}
           />
-          <FoliageToolbar store={foliageEditor} />
-          <TreeWorkspacePanels store={treeEditor} />
+          <TreeWorkspacePanels
+            editor={editor}
+            store={treeEditor}
+            foliage={foliageEditor}
+          />
         </>
       )}
       {editorUiVisible && (
         <>
           <Toolbar terrain={terrain} editor={editor} />
-          <ScenePanel terrain={terrain} editor={editor} />
-          <InspectorPanel terrain={terrain} editor={editor} />
+          <ScenePanel terrain={terrain} editor={editor} forest={forestFields} />
+          <InspectorPanel
+            terrain={terrain}
+            editor={editor}
+            forest={forestFields}
+            foliage={foliageEditor}
+          />
           <RenderQuickControls editor={editor} />
           <OverlayQuickControl terrain={terrain} editor={editor} />
           <PerformanceHud terrain={terrain} editor={editor} />

@@ -10,6 +10,7 @@ import {
 } from 'three/webgpu'
 import type ComputeNode from 'three/src/nodes/gpgpu/ComputeNode.js'
 import * as TSL from 'three/tsl'
+import type { FoliageGroundHeightField } from './foliageGroundHeight'
 import type { FoliageMaskField } from './FoliageMaskField'
 import { hash21, hash22, hash24, valueNoise2 } from './foliageNoise'
 import { foliageCameraPosition, foliageFrustumPlanes } from './foliageRuntime'
@@ -218,7 +219,10 @@ function concatenate(parts: readonly BufferGeometry[]): BufferGeometry {
  * offset as a constant vertex attribute, exactly as the blade rings do, so all
  * three share a single pipeline.
  */
-export function createFoliageDebris(mask: FoliageMaskField): FoliageDebrisField {
+export function createFoliageDebris(
+  mask: FoliageMaskField,
+  ground: FoliageGroundHeightField,
+): FoliageDebrisField {
   const capacity = DEBRIS_CAPACITY * DEBRIS_VARIANTS.length
   const instances = instancedArray(capacity * 2, 'vec4')
   const reader = storage(
@@ -268,7 +272,9 @@ export function createFoliageDebris(mask: FoliageMaskField): FoliageDebrisField 
       atomicStore(indirect.element(uint(1)), uint(0))
     })().compute(1))
 
-    populate.push(createDebrisKernel(variant, index, offset, mask, instances, indirect))
+    populate.push(
+      createDebrisKernel(variant, index, offset, mask, instances, indirect, ground),
+    )
   })
 
   return {
@@ -289,10 +295,12 @@ function createDebrisKernel(
   mask: FoliageMaskField,
   instances: ShaderValue,
   indirect: ShaderValue,
+  ground: FoliageGroundHeightField,
 ): ComputeNode {
   const half = (DEBRIS_GRID * DEBRIS_CELL) / 2
   const maskResolution = mask.resolution
   const maskField = mask.fieldSize
+  const maskOrigin = mask.origin
   const surfaceBuffer = mask.surfaceBuffer
   const lowShare = index === 0 ? 0 : DEBRIS_VARIANTS[index - 1]!.share
   const highShare = variant.share
@@ -334,8 +342,8 @@ function createDebrisKernel(
       // Debris collects where litter does. A meadow has none of this, and the
       // gate is the painted ground layer rather than a constant, so clearing
       // the litter with the eraser clears the sticks lying on it too.
-      const maskU = positionX.div(maskField).add(0.5)
-      const maskV = positionZ.div(maskField).add(0.5)
+      const maskU = positionX.sub(maskOrigin.x).div(maskField).add(0.5)
+      const maskV = positionZ.sub(maskOrigin.y).div(maskField).add(0.5)
       const inField = step(0, maskU).mul(step(maskU, 1))
         .mul(step(0, maskV)).mul(step(maskV, 1))
       const column = clamp(floor(maskU.mul(maskResolution)), 0, maskResolution - 1)
@@ -384,7 +392,12 @@ function createDebrisKernel(
             const base = slot.add(uint(offset)).mul(uint(2))
             instances
               .element(base)
-              .assign(vec4(positionX, 0, positionZ, yaw))
+              .assign(vec4(
+                positionX,
+                ground.sampleHeight(positionX, positionZ),
+                positionZ,
+                yaw,
+              ))
             instances
               .element(base.add(uint(1)))
               .assign(vec4(length.mul(fade), roll, dice.w, bed))
@@ -457,7 +470,10 @@ function createDebrisMaterial(
   // Moss grows on the upper faces of anything that has been lying still, and
   // this is where the ground layer earns its keep twice: the same painted moss
   // that greens the floor greens the sticks on it, so the two never disagree.
-  const fieldUv = positionWorld.xz.div(mask.fieldSize).add(0.5)
+  const fieldUv = positionWorld.xz
+    .sub(mask.origin)
+    .div(mask.fieldSize)
+    .add(0.5)
   const mossWeight: ShaderValue = texture(mask.surfaces[0]!, fieldUv).z
   const upward = clamp(worldNormal.y, 0, 1)
   const mossPatch = smoothstep(0.35, 0.75, valueNoise2(positionWorld.xz.mul(4.6)))

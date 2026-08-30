@@ -319,6 +319,28 @@ export function EditorMenuBar({
             onSelect={() => editor.patch({ cameraMode: 'fly' })}
           />
           <MenuSeparator />
+          <MenuGroupLabel>Sky and light</MenuGroupLabel>
+          <MenuItem
+            label="Sky shader"
+            checked={snapshot.environmentLook === 'wooded-landscape'}
+            onSelect={() =>
+              editor.patch({
+                environmentLook: 'wooded-landscape',
+                status: 'Physical sky model · no authored backdrop',
+              })
+            }
+          />
+          <MenuItem
+            label="Alpine backdrop"
+            checked={snapshot.environmentLook === 'terrain'}
+            onSelect={() =>
+              editor.patch({
+                environmentLook: 'terrain',
+                status: 'Authored cloud panorama behind the sky model',
+              })
+            }
+          />
+          <MenuSeparator />
           <MenuGroupLabel>Rendering</MenuGroupLabel>
           {QUALITY_OPTIONS.map(({ value, label }) => (
             <MenuItem

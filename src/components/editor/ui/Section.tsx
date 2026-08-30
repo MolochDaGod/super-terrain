@@ -21,7 +21,9 @@ export function Section({ icon: Icon, title, badge, children }: SectionProps) {
       <div className="flex items-center gap-2 px-3 pb-2 pt-3">
         <Icon size={12} strokeWidth={1.7} className="shrink-0 text-white/45" />
         <span className="panel-title min-w-0 flex-1 truncate">{title}</span>
-        {badge !== undefined && <span className="panel-meta font-mono">{badge}</span>}
+        {badge !== undefined && (
+          <span className="panel-meta max-w-[76px] shrink truncate font-mono">{badge}</span>
+        )}
       </div>
       <div className="space-y-3 px-3 pb-3.5">{children}</div>
     </section>
@@ -51,7 +53,9 @@ export function CollapsibleSection({
         />
         <Icon size={12} strokeWidth={1.7} className="shrink-0 text-white/45" />
         <span className="panel-title min-w-0 flex-1 truncate">{title}</span>
-        {badge !== undefined && <span className="panel-meta font-mono">{badge}</span>}
+        {badge !== undefined && (
+          <span className="panel-meta max-w-[76px] shrink truncate font-mono">{badge}</span>
+        )}
       </button>
       {open && <div className="space-y-3 px-3 pb-3.5">{children}</div>}
     </section>

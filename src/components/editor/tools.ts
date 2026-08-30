@@ -16,12 +16,13 @@ import {
   Pickaxe,
   Drill,
   Sparkles,
+  Trees,
   Waves,
 } from 'lucide-react'
 import type { EditorTool } from '../../terrain/editor/EditorStore'
 
 /** Decides which parameters the inspector shows for a tool. */
-export type ToolKind = 'viewport' | 'sculpt' | 'paint' | 'topology' | 'water'
+export type ToolKind = 'viewport' | 'sculpt' | 'paint' | 'topology' | 'water' | 'forest'
 
 export interface ToolDefinition {
   id: EditorTool
@@ -32,7 +33,7 @@ export interface ToolDefinition {
   icon: LucideIcon
   kind: ToolKind
   /** Rail rendering inserts a divider between groups. */
-  group: 'viewport' | 'primary' | 'detail' | 'paint' | 'topology'
+  group: 'viewport' | 'primary' | 'detail' | 'paint' | 'forest' | 'topology'
   /** Shown on hover only; the inspector no longer prints it as body copy. */
   description: string
 }
@@ -52,6 +53,7 @@ export const TOOLS: ToolDefinition[] = [
   { id: 'noise', label: 'Noise', shortcut: '0', code: 'Digit0', icon: Sparkles, kind: 'sculpt', group: 'detail', description: 'Blend seeded surface breakup at a configurable world scale. Depth follows the scale you set.' },
   { id: 'water', label: 'Water', shortcut: 'K', code: 'KeyK', icon: Droplets, kind: 'water', group: 'paint', description: 'Brush standing water in or out. The shoreline follows the ground, so sculpting under a lake moves its edge.' },
   { id: 'paint', label: 'Paint', shortcut: 'P', code: 'KeyP', icon: Paintbrush, kind: 'paint', group: 'paint', description: 'Paint or erase one of four material weight channels.' },
+  { id: 'forest', label: 'Forest', shortcut: 'B', code: 'KeyB', icon: Trees, kind: 'forest', group: 'forest', description: 'Draw a forest as a spline on the ground. Click to drop nodes, drag a node to reshape it, then grow the field to plant it.' },
   { id: 'remesh', label: 'Density', shortcut: 'G', code: 'KeyG', icon: Grid3X3, kind: 'topology', group: 'topology', description: 'Inject local coordinate bands at the requested edge length.' },
   { id: 'tunnel', label: 'Tunnel', shortcut: 'T', code: 'KeyT', icon: Pickaxe, kind: 'topology', group: 'topology', description: 'Press one portal, drag to the second, then release. The swept Boolean stays editable in the modifier stack.' },
   { id: 'dig', label: 'Cave dig', shortcut: 'C', code: 'KeyC', icon: Drill, kind: 'topology', group: 'topology', description: 'Hold on the terrain to drill along the camera ray. Touching an existing subtractive CSG hole extends that modifier.' },

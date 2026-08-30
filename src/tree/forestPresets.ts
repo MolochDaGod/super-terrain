@@ -420,6 +420,162 @@ export function generateForestLayout(
 }
 
 /**
+ * The same layout, over an arbitrary painted region rather than a disc.
+ *
+ * A forest drawn on terrain is a shape somebody dragged, not a circle centred
+ * on the origin, and the two differ in exactly one place: where a candidate
+ * comes from and whether it is inside. Everything downstream — the budget, the
+ * mix, the deadfall, the open-grown size bias, the spacing test — is the disc
+ * generator's, unchanged, because none of it ever depended on the shape.
+ *
+ * The fringe term is gone because the region carries its own: `feather` on the
+ * field already thins the stand across the boundary, and applying a second
+ * radial taper on top of it would thin a wood twice at an edge that is not
+ * radial in the first place.
+ */
+export function generateForestLayoutInRegion(
+  presetId: ForestPresetId,
+  seed: number,
+  region: LayoutRegion,
+  density: number,
+): GeneratedForestTree[] {
+  const preset = FOREST_PRESETS.find((candidate) => candidate.id === presetId)
+    ?? FOREST_PRESETS[0]
+  const random = mulberry32(seed ^ hashString(preset.id))
+
+  const hectares = Math.max(1e-4, region.area / 10_000)
+  const budget = Math.max(
+    4,
+    Math.min(
+      MAX_STEMS,
+      Math.round(
+        preset.treesPerHectare * Math.sqrt(hectares * REFERENCE_HECTARES) * density,
+      ),
+    ),
+  )
+
+  const thinnest = 0.42
+  const accepted: Array<GeneratedForestTree & { spacing: number }> = []
+  const grid = new SpacingGrid(24)
+  const spanX = region.bounds.maxX - region.bounds.minX
+  const spanZ = region.bounds.maxZ - region.bounds.minZ
+
+  const maxAttempts = Math.min(600_000, budget * 120)
+  const saturatedAfter = 6_000
+  let sinceAccepted = 0
+
+  for (let attempt = 0; attempt < maxAttempts && accepted.length < budget; attempt += 1) {
+    if (sinceAccepted > saturatedAfter) break
+    sinceAccepted += 1
+    const x = region.bounds.minX + random() * spanX
+    const z = region.bounds.minZ + random() * spanZ
+
+    // The drawn shape decides whether there is forest here at all; the habitat
+    // noise decides how thick it is where there is.
+    const inRegion = region.coverage(x, z)
+    if (inRegion <= 0.002) continue
+    const field = standCover(x, z, seed) - preset.gapRate
+    const inStand = thinnest + (1 - thinnest) * Math.min(1, Math.max(0, field))
+    if (random() > inStand * inRegion) continue
+
+    const mixIndex = weightedIndex(preset.mix, random())
+    const entry = preset.mix[mixIndex]!
+    const deadfall = preset.deadfall && random() < preset.deadfall.rate
+      ? preset.deadfall
+      : undefined
+    const source = deadfall ?? entry
+    const variation = source.variations[Math.floor(random() * source.variations.length)]!
+    const openness = 1 - Math.min(1, Math.max(0, field))
+    const roll = lerp(random(), openness, 0.35)
+    const scale = source.scale[0] + roll * (source.scale[1] - source.scale[0])
+    const species = deadfall?.species ?? entry.species
+    const speciesPreset = TREE_SPECIES_PRESETS[species]
+    const crown = speciesPreset.crownRadius
+    const spacing = deadfall
+      ? Math.max(0.8, speciesPreset.trunkRadius * 1.6) * scale
+      : Math.max(1.35, Math.min(5.2, crown * 0.2)) * scale
+    if (grid.overlaps(x, z, spacing)) continue
+
+    grid.insert(x, z, spacing)
+    sinceAccepted = 0
+    accepted.push({
+      species,
+      variation,
+      position: [x, deadfall ? speciesPreset.trunkRadius * scale * 0.82 : 0, z],
+      rotation: random() * Math.PI * 2,
+      scale,
+      tilt: deadfall ? Math.PI * 0.5 + (random() - 0.5) * 0.22 : 0,
+      spacing,
+    })
+  }
+  return accepted.map(({ spacing: _spacing, ...tree }) => tree)
+}
+
+/** Boulders over the same region, on the same terms. */
+export function generateForestRockLayoutInRegion(
+  presetId: ForestPresetId,
+  seed: number,
+  region: LayoutRegion,
+  density: number,
+): GeneratedForestRock[] {
+  const preset = FOREST_PRESETS.find((candidate) => candidate.id === presetId)
+    ?? FOREST_PRESETS[0]
+  const hectares = Math.max(0, region.area / 10_000)
+  const openness = 0.75 + preset.gapRate * 1.5
+  const targetCount = Math.min(
+    48,
+    Math.max(0, Math.round(hectares * 42 * density * openness)),
+  )
+  if (targetCount === 0) return []
+
+  const random = mulberry32(seed ^ hashString(`${preset.id}:rocks`))
+  const accepted: Array<GeneratedForestRock & { spacing: number }> = []
+  const spanX = region.bounds.maxX - region.bounds.minX
+  const spanZ = region.bounds.maxZ - region.bounds.minZ
+
+  for (
+    let attempt = 0;
+    attempt < targetCount * 60 && accepted.length < targetCount;
+    attempt += 1
+  ) {
+    const x = region.bounds.minX + random() * spanX
+    const z = region.bounds.minZ + random() * spanZ
+    if (random() > region.coverage(x, z)) continue
+    const scale = 0.65 + random() * 1.35
+    const spacing = 1.8 * scale
+    const overlaps = accepted.some((rock) => {
+      const dx = rock.position[0] - x
+      const dz = rock.position[2] - z
+      const minimum = (rock.spacing + spacing) * 0.72
+      return dx * dx + dz * dz < minimum * minimum
+    })
+    if (overlaps) continue
+    accepted.push({
+      seed: Math.floor(random() * 0x7fffffff) + 1,
+      position: [x, 0, z],
+      rotation: random() * Math.PI * 2,
+      scale,
+      spacing,
+    })
+  }
+  return accepted.map(({ spacing: _spacing, ...rock }) => rock)
+}
+
+/**
+ * What a layout needs to know about a drawn shape.
+ *
+ * Deliberately structural rather than an import of `ForestRegion`: the preset
+ * table has no business depending on the editor's spline representation, and
+ * anything that can answer "how much forest is at this point" can drive it.
+ */
+export interface LayoutRegion {
+  bounds: { minX: number; minZ: number; maxX: number; maxZ: number }
+  /** Square metres of forest, coverage-weighted. Sets the stem budget. */
+  area: number
+  coverage(x: number, z: number): number
+}
+
+/**
  * Uniform-grid neighbour lookup for the spacing test.
  *
  * Every candidate used to be compared against every tree already placed, which

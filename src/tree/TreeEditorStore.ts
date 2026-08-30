@@ -28,6 +28,15 @@ export type TreeDebugMode =
 
 export type ForestPosition = readonly [number, number, number]
 
+/**
+ * The collections the scene panel lists, one open at a time.
+ *
+ * Same arrangement as the terrain editor's `InspectorSection`, and for the same
+ * reason: a single column that answers "what is in this forest" without also
+ * trying to answer "what are this tree's numbers".
+ */
+export type TreeSceneSection = 'forest' | 'catalogue' | 'floor' | 'placements'
+
 export interface TreePrototype {
   id: string
   species: TreeSpecies
@@ -61,6 +70,17 @@ export interface TreeEditorSnapshot {
   rocks: readonly GeneratedForestRock[]
   selectedPlacementId?: string
   armedPrototypeId?: string
+  /**
+   * The variation the Plant tool re-arms with.
+   *
+   * Placing a tree disarms the brush, which is right — one click, one tree —
+   * but it also used to mean the toolbar's Plant button had nothing to arm on
+   * the next press and silently did nothing. Remembering the last choice makes
+   * the tool a mode you stay in rather than a one-shot.
+   */
+  lastArmedPrototypeId?: string
+  /** Undefined when every scene section is collapsed. */
+  openSection?: TreeSceneSection
   lod: TreeLodLevel
   debugMode: TreeDebugMode
   showFoliage: boolean
@@ -289,6 +309,8 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
         scale: 1,
       }],
       selectedPlacementId: 'tree-1',
+      lastArmedPrototypeId: initial.id,
+      openSection: 'forest',
       lod: 0,
       debugMode: 'surface',
       showFoliage: true,
@@ -323,8 +345,32 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
         ? current.prototypes
         : { ...current.prototypes, [id]: createPrototype(species, variation) },
       armedPrototypeId: id,
+      lastArmedPrototypeId: id,
       status: `${TREE_VARIATION_NAMES[variation] ?? 'Variation'} ${species.replaceAll('-', ' ')} armed · click the ground to place`,
     }))
+  }
+
+  /**
+   * Makes sure every prototype in the list exists, without disturbing any that
+   * already do.
+   *
+   * The terrain workspace's forests reference prototypes by id and never author
+   * them: the catalogue and its compiled assets belong to the tree lab, and a
+   * forest field grown on terrain is a list of placements pointing into it.
+   * This is the one call that crosses between them.
+   */
+  ensurePrototypes(
+    entries: readonly { species: TreeSpecies; variation: number }[],
+  ): void {
+    const current = this.getSnapshot()
+    const added: Record<string, TreePrototype> = {}
+    for (const entry of entries) {
+      const id = treePrototypeId(entry.species, entry.variation)
+      if (current.prototypes[id] || added[id]) continue
+      added[id] = createPrototype(entry.species, entry.variation)
+    }
+    if (Object.keys(added).length === 0) return
+    this.patch({ prototypes: { ...current.prototypes, ...added } })
   }
 
   cancelPlacement(): void {
@@ -351,9 +397,14 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
   }
 
   selectPlacement(id?: string): void {
+    const current = this.getSnapshot()
+    const prototypeId = id
+      ? current.placements.find((placement) => placement.id === id)?.prototypeId
+      : undefined
     this.patch({
       selectedPlacementId: id,
       armedPrototypeId: undefined,
+      lastArmedPrototypeId: prototypeId ?? current.lastArmedPrototypeId,
       status: id ? 'Tree selected' : 'Selection cleared',
     })
   }

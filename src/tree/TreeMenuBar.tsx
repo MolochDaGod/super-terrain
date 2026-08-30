@@ -20,8 +20,24 @@ import {
 import { WorkspaceToggle, type Workspace } from '../components/editor/WorkspaceToggle'
 import type { CameraMode, EditorStore } from '../terrain/editor/EditorStore'
 import { useEditorSnapshot } from '../terrain/react/hooks'
-import type { TreeEditorStore } from './TreeEditorStore'
+import type { TreeDebugMode, TreeEditorStore } from './TreeEditorStore'
 import { useTreeEditorSnapshot } from './useTreeEditorSnapshot'
+
+/**
+ * The diagnostic views, which used to live as seven two-letter pills on a bar
+ * floating over the middle of the ground. They are a menu because that is what
+ * they are: a rarely-used exclusive choice with names too long to abbreviate
+ * into a viewport overlay without becoming unreadable.
+ */
+const DEBUG_MODES: { value: TreeDebugMode; label: string }[] = [
+  { value: 'surface', label: 'Lit surface' },
+  { value: 'skeleton', label: 'Skeleton' },
+  { value: 'hierarchy', label: 'Branch hierarchy' },
+  { value: 'continuations', label: 'Growth continuations' },
+  { value: 'radii', label: 'Radii' },
+  { value: 'contacts', label: 'Contacts' },
+  { value: 'topology', label: 'Topology' },
+]
 
 interface TreeMenuBarProps {
   editor: EditorStore
@@ -54,7 +70,17 @@ export function TreeMenuBar({
       <MenuBar>
         <Menu label="Forest">
           <MenuItem
+            label="Generate forest"
+            onSelect={() => store.generateForest()}
+          />
+          <MenuItem
+            label="Generate a different seed"
+            onSelect={() => store.randomizeForest()}
+          />
+          <MenuSeparator />
+          <MenuItem
             label="Cancel placement"
+            shortcut="Esc"
             disabled={!snapshot.armedPrototypeId}
             onSelect={() => store.cancelPlacement()}
           />
@@ -138,12 +164,17 @@ export function TreeMenuBar({
             checked={snapshot.showHud}
             onSelect={() => store.patch({ showHud: !snapshot.showHud })}
           />
-          <MenuItem
-            label="Surface render mode"
-            icon={Eye}
-            checked={snapshot.debugMode === 'surface'}
-            onSelect={() => store.patch({ debugMode: 'surface' })}
-          />
+          <MenuSeparator />
+          <MenuGroupLabel>Diagnostic view</MenuGroupLabel>
+          {DEBUG_MODES.map((mode) => (
+            <MenuItem
+              key={mode.value}
+              label={mode.label}
+              icon={mode.value === 'surface' ? Eye : undefined}
+              checked={snapshot.debugMode === mode.value}
+              onSelect={() => store.patch({ debugMode: mode.value })}
+            />
+          ))}
         </Menu>
       </MenuBar>
 

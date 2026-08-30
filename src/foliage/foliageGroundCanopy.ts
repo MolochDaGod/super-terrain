@@ -51,7 +51,7 @@ const AGGREGATE_COLOURS = FOLIAGE_SPECIES.map((species) => [
 ] as const)
 
 /** Roughness each ground layer reads at when it is dry, in channel order. */
-const SURFACE_ROUGHNESS = FOLIAGE_SURFACES.map((surface) => surface.roughness)
+export const SURFACE_ROUGHNESS = FOLIAGE_SURFACES.map((surface) => surface.roughness)
 
 /**
  * Brightness the canopy needs to sit level with the blades standing on it.
@@ -101,7 +101,7 @@ export interface FoliageGroundTextures {
  * Two scales: where the ground drains at all, and the small dark hollows where
  * water sits under the litter.
  */
-const wetness = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
+export const wetness = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
   return clamp(
     smoothstep(0.34, 0.82, fbm2(ground.mul(0.052))).mul(0.68)
       .add(smoothstep(0.42, 0.88, fbm2(ground.mul(0.44))).mul(0.32)),
@@ -125,7 +125,7 @@ const wetness = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
  * Two frequencies: where the beds are, and how ragged their edges are. The
  * beds also follow the damp, because that is where moss actually is.
  */
-const mossed = /*@__PURE__*/ TSL.Fn((
+export const mossed = /*@__PURE__*/ TSL.Fn((
   [base, ground, amount, damp]: [ShaderValue, ShaderValue, ShaderValue, ShaderValue],
 ) => {
   const beds = fbm2(ground.mul(0.16))
@@ -176,7 +176,7 @@ const litterHeight = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
  * cover of exactly 1 everywhere is the flat brown carpet this pass exists to
  * avoid.
  */
-const litterCover = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
+export const litterCover = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
   const drift = fbm2(ground.mul(0.21))
   const scuff = valueNoise2(ground.mul(1.4))
   // Close to complete. The bare mineral soil underneath is a pale dry tile,
@@ -199,7 +199,7 @@ const litterCover = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
  * leaves rather than as one mottled surface — and why the hash driving the
  * ramp must not be the same one driving anything spatial.
  */
-const litterColour = /*@__PURE__*/ TSL.Fn((
+export const litterColour = /*@__PURE__*/ TSL.Fn((
   [ground, damp]: [ShaderValue, ShaderValue],
 ) => {
   // 5cm, 9cm and 16cm cells. Real leaves overlap at every scale at once.
@@ -236,7 +236,7 @@ const litterColour = /*@__PURE__*/ TSL.Fn((
  * above is the same mistake as painting a lawn under a canopy: right value,
  * wrong structure, and the structure is what the eye reads.
  */
-const duffColour = /*@__PURE__*/ TSL.Fn((
+export const duffColour = /*@__PURE__*/ TSL.Fn((
   [ground, damp]: [ShaderValue, ShaderValue],
 ) => {
   // 2cm and 4cm cells: individual needles, not leaves.
@@ -250,7 +250,7 @@ const duffColour = /*@__PURE__*/ TSL.Fn((
   return base.mul(mix(float(1), float(0.66), damp))
 })
 
-const duffCover = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
+export const duffCover = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
   // Far more even than leaf litter — that evenness is the point.
   return clamp(smoothstep(0.1, 0.5, fbm2(ground.mul(0.3))).mul(0.22).add(0.78), 0, 1)
 })
@@ -291,7 +291,7 @@ export function createFoliageGroundMaterial(
   const arm = texture(textures.armMap, soilUv)
 
   const ground: ShaderValue = positionWorld.xz
-  const fieldUv = ground.div(mask.fieldSize).add(0.5)
+  const fieldUv = ground.sub(mask.origin).div(mask.fieldSize).add(0.5)
 
   const weightRows = mask.weights.map((row) => texture(row, fieldUv))
   const total = weightRows

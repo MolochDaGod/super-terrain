@@ -30,6 +30,7 @@ import { createGeologyDetailTexture } from '../textures/createSurfaceDetailTextu
 import { getProceduralSurfaceTextures } from '../textures/proceduralSurfaceTextures'
 import { THRUST_FACE_NORMAL } from '../../demo/createThrustFormation'
 import { layerWeights, reliefNormal, terrainSlowFields } from './surface'
+import { forestFloorBlend } from '../../../foliage/forestFloorBlend'
 
 /**
  * The steep and flat surfaces are procedural bakes rather than scans.
@@ -626,12 +627,19 @@ export function createFullTerrainMaterial(
       // mineral between those pockets remains dark, brown-grey stone.
       .mul(vec3(0.24, 0.18, 0.13))
       .add(vec3(0.008, 0.002, 0.001))
-    material.colorNode = mix(
+    const rock = mix(
       painted.color,
       emberRock,
       emberMask,
     )
-    material.roughnessNode = painted.roughness
+    // The forest floor, where a forest has been drawn over this ground. The
+    // blend is a multiply by zero everywhere else — see `forestFloorBlend` —
+    // and it is applied to the terrain's own shaded surface rather than drawn
+    // as a second one, which is what lets a stand's litter fade into a
+    // hillside over tens of metres instead of ending at a silhouette.
+    const floor = forestFloorBlend(rock, painted.roughness, positionWorld.xz)
+    material.colorNode = floor.colour
+    material.roughnessNode = floor.roughness
     material.normalNode = shadedNormal.transformDirection(cameraViewMatrix)
     material.aoNode = cavity
     material.emissiveNode = emberEmission

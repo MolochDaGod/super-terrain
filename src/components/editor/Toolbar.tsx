@@ -45,6 +45,7 @@ const GROUPS: ToolDefinition['group'][] = [
   'primary',
   'detail',
   'paint',
+  'forest',
   'topology',
 ]
 

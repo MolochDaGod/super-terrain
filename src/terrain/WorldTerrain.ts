@@ -669,7 +669,11 @@ export class WorldTerrain {
       editor.tool === 'select' ||
       editor.tool === 'camera' ||
       editor.tool === 'cursor' ||
-      editor.tool === 'water'
+      editor.tool === 'water' ||
+      // Drawing a forest spline never touches the terrain. It reaches here at
+      // all only if a pointer path is added that does not know that; a stroke
+      // opened for it would deform the ground under the spline being drawn.
+      editor.tool === 'forest'
     ) {
       return
     }

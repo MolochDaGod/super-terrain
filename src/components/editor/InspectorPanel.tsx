@@ -6,6 +6,12 @@ import { inspectorSectionForTool } from '../../terrain/editor/EditorStore'
 import type { BrushDomain, PaintMode } from '../../terrain/modifiers/types'
 import { BRUSH_DEPTH_PER_RADIUS } from '../../terrain/modifiers/brushKernel'
 import { useEditorSnapshot } from '../../terrain/react/hooks'
+import type { ForestFieldStore } from '../../forest/ForestFieldStore'
+import type { FoliageEditorStore } from '../../foliage/FoliageEditorStore'
+import {
+  ForestFieldPanel,
+  ForestGroundCoverPanel,
+} from '../../forest/react/ForestFieldPanels'
 import { RangeField } from './RangeField'
 import { MaterialChannelsPanel } from './MaterialChannelsPanel'
 import { CsgObjectsPanel } from './CsgObjectsPanel'
@@ -37,9 +43,13 @@ const PAINT_MODES: SegmentedOption<PaintMode>[] = [
 export function InspectorPanel({
   terrain,
   editor,
+  forest,
+  foliage,
 }: {
   terrain: WorldTerrain
   editor: EditorStore
+  forest: ForestFieldStore
+  foliage: FoliageEditorStore
 }) {
   const snapshot = useEditorSnapshot(editor)
   const tool = TOOL_BY_ID[snapshot.tool]
@@ -61,7 +71,9 @@ export function InspectorPanel({
   )
   // A viewport verb has no parameters of its own, so showing its section would
   // be a heading over an explanation and nothing else.
-  const showToolSection = tool.kind !== 'viewport'
+  // Water and forests each own their whole tool section, so the generic one
+  // would only stack a second heading above them.
+  const showToolSection = tool.kind !== 'viewport' && tool.kind !== 'forest'
 
   return (
     <aside
@@ -69,6 +81,12 @@ export function InspectorPanel({
       className="pointer-events-auto absolute bottom-7 right-3 top-[46px] z-20 hidden w-[272px] overflow-y-auto rounded-lg border border-white/[0.09] bg-[#0b1312]/92 shadow-2xl shadow-black/30 backdrop-blur-xl md:block"
     >
       {tool.kind === 'water' && <WaterPanel terrain={terrain} editor={editor} />}
+      {tool.kind === 'forest' && (
+        <>
+          <ForestFieldPanel forest={forest} />
+          <ForestGroundCoverPanel foliage={foliage} />
+        </>
+      )}
       {showToolSection && tool.kind !== 'water' && (
       <Section icon={tool.icon} title={tool.label} badge={tool.shortcut}>
         <div className="flex items-start gap-2 text-[11px] leading-relaxed text-white/34">

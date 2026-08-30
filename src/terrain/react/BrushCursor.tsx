@@ -85,6 +85,7 @@ export function BrushCursor({ editor }: BrushCursorProps) {
       snapshot.cursorVisible &&
       snapshot.tool !== 'select' &&
       snapshot.tool !== 'camera' &&
+      snapshot.tool !== 'forest' &&
       snapshot.tool !== 'cursor'
     if (!cursor.visible) return
 

@@ -48,7 +48,7 @@ const SKY_SCALE = 45_000
  * and the shadow budget belongs in the first fifty metres where the dapples
  * are, not spread over two kilometres of ridge.
  */
-export type TerrainEnvironmentLook = 'terrain' | 'forest'
+export type TerrainEnvironmentLook = 'terrain' | 'forest' | 'wooded-landscape'
 
 export interface TerrainEnvironmentOptions {
   /** Cascaded shadows. Disable to fall back to one wide shadow frustum. */
@@ -215,6 +215,47 @@ const LIGHT_RIGS: Record<TerrainEnvironmentLook, LightRig> = {
       // stand photographed against a light box.
       intensity: 0.1,
       cloudCoverage: 0.3,
+      backdrop: false,
+    },
+  },
+  'wooded-landscape': {
+    // The authored hero angle, kept.
+    //
+    // The forest rig's 24-degree mid-morning sun is right for getting light
+    // between trunks and wrong for this world: the whole demo composition —
+    // the thrust slab's bedding shadows, the backlit ranges, the rim on every
+    // ridge — is built around a low three-quarter backlight, and raising the
+    // sun ten degrees flattens all of it at once. What is taken from the forest
+    // rig is its *fill*: a warm, strong, leaf-and-litter bounce that keeps
+    // shade readable instead of the blue near-black an open-sky rig gives.
+    sun: { elevation: 14, azimuth: 142, colour: 0xffd9b0, intensity: 4.5 },
+    shadow: {
+      mapSize: 2048,
+      maxFar: 2_200,
+      lightMargin: 800,
+      cascades: 3,
+      cascadeStagger: 1,
+      // Not the forest rig's 0.8. That number corrects for a canopy whose gaps
+      // fall below a shadow-map texel; applied to rock it would simply mean
+      // rock that does not cast a proper shadow.
+      intensity: 1,
+    },
+    hemisphere: { sky: 0x8194a4, ground: 0x40382c, intensity: 1.02 },
+    ambient: { colour: 0x3f4c3d, intensity: 0.24 },
+    frontFill: { colour: 0x9aa79b, intensity: 0.82 },
+    sky: {
+      turbidity: 4.4,
+      rayleigh: 1.1,
+      // Four times the old look's 0.18, because the sky model is now the sky.
+      // That number was a dim wash sitting behind an authored photograph; with
+      // the photograph gone it has to carry the horizon on its own, and at 0.18
+      // it read as a flat grey card behind the ridges.
+      intensity: 0.46,
+      cloudCoverage: 0.42,
+      // The authored panorama is what this look exists to remove. The sky model
+      // draws its own clouds and horizon gradient in the same physical units as
+      // the sun lighting the ground, so the horizon no longer carries a
+      // photograph's own exposure baked into it.
       backdrop: false,
     },
   },

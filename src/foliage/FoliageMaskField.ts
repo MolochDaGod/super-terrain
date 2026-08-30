@@ -4,12 +4,15 @@ import {
   RGBAFormat,
   StorageTexture,
   UnsignedByteType,
+  Vector2,
   Vector4,
   type Renderer,
 } from 'three/webgpu'
 import type ComputeNode from 'three/src/nodes/gpgpu/ComputeNode.js'
 import { FOLIAGE_MASK_ROWS } from './foliageSpecies'
 import { FOLIAGE_SURFACE_ROWS } from './foliageSurfaces'
+import { fbm2 } from './foliageNoise'
+import { FoliageWorldRaster } from './foliageWorldRaster'
 import {
   Fn,
   If,
@@ -35,7 +38,7 @@ type ShaderValue = any
 /** Cells across the painted field. 512 over 400 m gives a 0.78 m footprint. */
 export const FOLIAGE_MASK_RESOLUTION = 512
 
-/** Metres covered by the mask, centred on the world origin. */
+/** Metres covered by the mask. Its centre is `FoliageMaskField.origin`. */
 export const FOLIAGE_FIELD_SIZE = 400
 
 export type FoliagePaintMode = 'paint' | 'erase'
@@ -95,7 +98,26 @@ export interface FoliagePaintStroke {
  */
 export class FoliageMaskField {
   readonly resolution = FOLIAGE_MASK_RESOLUTION
-  readonly fieldSize = FOLIAGE_FIELD_SIZE
+  readonly fieldSize: number
+
+  /**
+   * Where the field is, in the world.
+   *
+   * It used to be nailed to the world origin, which is fine for a lab whose
+   * whole ground is four hundred metres across and useless for a four-kilometre
+   * terrain: a forest drawn on a ridge a kilometre out would have had no ground
+   * cover at all, because every cell of the mask was somewhere else.
+   *
+   * Moving it is cheap precisely because nothing in the mask is authored by
+   * hand on terrain — the forest splines are the record, and the mask is a
+   * cache rasterised from them. Recentring is therefore: clear, repaint the
+   * fields that overlap the new window, and carry on.
+   */
+  readonly origin = uniform(new Vector2())
+
+  /** Mirror of `origin` for the CPU side, which needs it to place fills. */
+  originX = 0
+  originZ = 0
 
   /**
    * Species weights in groups of four, linear filtered, for the ground canopy.
@@ -126,9 +148,26 @@ export class FoliageMaskField {
   /** 1 while the stroke is writing the ground layers rather than the plants. */
   private readonly strokeSurface = uniform(0)
   private readonly paintKernel: ComputeNode
+
+  /**
+   * Painting a shape rather than a stroke.
+   *
+   * A forest drawn on terrain is a region, and the floor inside it wants a
+   * whole recipe laid down across it — four ground layers and half a dozen
+   * plants. As brush dabs that is on the order of a thousand dispatches over
+   * the whole 512² mask, and the result still looks like a thousand circles.
+   * As one dispatch per channel, reading the region's own coverage raster, it
+   * is ten dispatches with the shape's real edge, feather included.
+   */
+  readonly region = new FoliageWorldRaster()
+  private readonly regionChannel = uniform(0)
+  /** x weight, y noise scale in metres, z noise amount, w surface flag. */
+  private readonly regionShape = uniform(new Vector4())
+  private readonly regionKernel: ComputeNode
   private disposed = false
 
-  constructor() {
+  constructor(fieldSize: number = FOLIAGE_FIELD_SIZE) {
+    this.fieldSize = fieldSize
     const resolution = this.resolution
     const cells = resolution * resolution
 
@@ -146,6 +185,7 @@ export class FoliageMaskField {
 
     const texel = float(this.fieldSize / resolution)
     const halfField = float(this.fieldSize * 0.5)
+    const origin = this.origin
     const segment = this.strokeSegment
     const shape = this.strokeShape
     const species = this.strokeSpecies
@@ -159,8 +199,8 @@ export class FoliageMaskField {
     this.paintKernel = Fn(() => {
       const cellX = instanceIndex.mod(uint(resolution)).toVar()
       const cellY = instanceIndex.div(uint(resolution)).toVar()
-      const worldX = float(cellX).add(0.5).mul(texel).sub(halfField)
-      const worldZ = float(cellY).add(0.5).mul(texel).sub(halfField)
+      const worldX = float(cellX).add(0.5).mul(texel).sub(halfField).add(origin.x)
+      const worldZ = float(cellY).add(0.5).mul(texel).sub(halfField).add(origin.y)
 
       // Distance to the stroke *segment*, not to its end point. A pointer that
       // travels thirty pixels between two frames would otherwise leave a row of
@@ -258,6 +298,117 @@ export class FoliageMaskField {
         textureStore(surfaces[row]!, coord, current)
       })
     })().compute(cells)
+
+    const region = this.region
+    const regionChannel = this.regionChannel
+    const regionShape = this.regionShape
+
+    this.regionKernel = Fn(() => {
+      const cellX = instanceIndex.mod(uint(resolution)).toVar()
+      const cellY = instanceIndex.div(uint(resolution)).toVar()
+      const worldX = float(cellX).add(0.5).mul(texel).sub(halfField).add(origin.x)
+      const worldZ = float(cellY).add(0.5).mul(texel).sub(halfField).add(origin.y)
+
+      // The shape's own coverage, broken up by a noise field at the scale the
+      // recipe asked for. Without the break-up every species in a stand would
+      // have exactly the painted weight in every square metre of it, which is
+      // the "lawn" failure the colony scatter existed to avoid — and the
+      // population kernel's own patchiness cannot fix it, because that is a
+      // per-species field and this would be a per-species *constant*.
+      const coverage = region.sample(worldX, worldZ)
+      const noiseScale = max(regionShape.y, float(1))
+      const breakUp = fbm2(vec2(worldX, worldZ).div(noiseScale)
+        .add(vec2(float(regionChannel).mul(37.1), float(regionChannel).mul(19.7))))
+      const variation = float(1).sub(regionShape.z)
+        .add(breakUp.mul(regionShape.z).mul(1.8))
+      const amount = clamp(coverage.mul(regionShape.x).mul(variation), 0, 1)
+
+      const base = instanceIndex.mul(uint(FOLIAGE_MASK_ROWS))
+      const rows = Array.from({ length: FOLIAGE_MASK_ROWS }, (_, row) =>
+        buffer.element(base.add(uint(row))).toVar(`regionWeights${row}`),
+      )
+      const surfaceBase = instanceIndex.mul(uint(FOLIAGE_SURFACE_ROWS))
+      const surfaceRows = Array.from({ length: FOLIAGE_SURFACE_ROWS }, (_, row) =>
+        surfaceBuffer.element(surfaceBase.add(uint(row))).toVar(`regionSurface${row}`),
+      )
+
+      If(amount.greaterThan(0.0002), () => {
+        const surfaceStrokeFlag = regionShape.w
+        const plantGain = amount.mul(surfaceStrokeFlag.oneMinus())
+        const surfaceGain = amount.mul(surfaceStrokeFlag)
+        const plantCompetition = clamp(plantGain.mul(0.32).oneMinus(), 0, 1)
+        const surfaceCompetition = clamp(surfaceGain.mul(0.9).oneMinus(), 0, 1)
+        const selected = int(regionChannel)
+        const one = float(1)
+        const zero = float(0)
+        const channelMask = (row: number, weight: ShaderValue): ShaderValue => vec4(
+          select(selected.equal(int(row * 4)), one, zero),
+          select(selected.equal(int(row * 4 + 1)), one, zero),
+          select(selected.equal(int(row * 4 + 2)), one, zero),
+          select(selected.equal(int(row * 4 + 3)), one, zero),
+        ).mul(weight)
+        rows.forEach((current, row) => {
+          current.assign(
+            clamp(current.mul(plantCompetition).add(channelMask(row, plantGain)), 0, 1),
+          )
+        })
+        surfaceRows.forEach((current, row) => {
+          current.assign(
+            clamp(
+              current.mul(surfaceCompetition).add(channelMask(row, surfaceGain)),
+              0,
+              1,
+            ),
+          )
+        })
+      })
+
+      const coord = ivec2(int(cellX), int(cellY))
+      rows.forEach((current, row) => {
+        buffer.element(base.add(uint(row))).assign(current)
+        textureStore(weights[row]!, coord, current)
+      })
+      surfaceRows.forEach((current, row) => {
+        surfaceBuffer.element(surfaceBase.add(uint(row))).assign(current)
+        textureStore(surfaces[row]!, coord, current)
+      })
+    })().compute(cells)
+  }
+
+  /** Uploads the shape subsequent `paintRegion` calls write through. */
+  setRegion(
+    centreX: number,
+    centreZ: number,
+    width: number,
+    depth: number,
+    coverage: (x: number, z: number) => number,
+  ): void {
+    this.region.update(centreX, centreZ, width, depth, coverage)
+  }
+
+  /** Lays one channel over the uploaded shape. One dispatch. */
+  paintRegion(
+    renderer: Renderer,
+    options: {
+      channel: number
+      layer: FoliagePaintLayer
+      /** Peak weight inside the shape, 0..1. */
+      weight: number
+      /** Metres of the break-up noise. */
+      noiseScale?: number
+      /** How much of the weight the noise is allowed to take away, 0..1. */
+      noiseAmount?: number
+    },
+  ): void {
+    if (this.disposed) return
+    this.regionChannel.value = options.channel
+    this.regionShape.value.set(
+      Math.min(Math.max(options.weight, 0), 1),
+      Math.max(options.noiseScale ?? 24, 1),
+      Math.min(Math.max(options.noiseAmount ?? 0.45, 0), 1),
+      options.layer === 'surface' ? 1 : 0,
+    )
+    renderer.compute(this.regionKernel)
   }
 
   /** Runs one stroke segment. One dispatch per frame while the pointer is down. */
@@ -276,6 +427,13 @@ export class FoliageMaskField {
     renderer.compute(this.paintKernel)
   }
 
+  /** Moves the window. The caller is responsible for repainting into it. */
+  setOrigin(x: number, z: number): void {
+    this.originX = x
+    this.originZ = z
+    this.origin.value.set(x, z)
+  }
+
   /** Lays the given channel over the whole field, or clears it when erasing. */
   fill(
     renderer: Renderer,
@@ -284,10 +442,10 @@ export class FoliageMaskField {
     layer: FoliagePaintLayer = 'plants',
   ): void {
     this.paint(renderer, {
-      fromX: 0,
-      fromZ: 0,
-      toX: 0,
-      toZ: 0,
+      fromX: this.originX,
+      fromZ: this.originZ,
+      toX: this.originX,
+      toZ: this.originZ,
       radius: this.fieldSize,
       flow: 1,
       hardness: 0.98,

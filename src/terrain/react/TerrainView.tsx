@@ -243,6 +243,12 @@ export function TerrainView({
 
       if (snapshot.tool === 'camera') return
 
+      // The forest tool draws and drags spline nodes, and does it from its own
+      // capture-phase listener so a drag on a node never reaches the sculpt
+      // path below. Falling through to that path is what would otherwise
+      // happen: an unrecognised tool becomes a terrain stroke.
+      if (snapshot.tool === 'forest') return
+
       if (snapshot.tool === 'cursor') {
         placeWorldCursor(event)
         return

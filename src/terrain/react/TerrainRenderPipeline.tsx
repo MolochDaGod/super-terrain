@@ -11,6 +11,13 @@ import { currentViewUrlState } from './viewUrlState'
 export interface TerrainRenderPipelineProps {
   mode: TerrainRenderMode
   look?: PostLook
+  /**
+   * Tone-mapping exposure, when the look's own default is wrong for the
+   * subject. The terrain workspace runs the tree look's post chain — haze,
+   * light shafts, bloom — over a landscape rather than an interior, and an
+   * interior's exposure would print that landscape a third of a stop hot.
+   */
+  exposure?: number
   onCompilingChange?: (compiling: boolean) => void
   beforeRender?: (renderer: Renderer, scene: Scene, camera: Camera) => void
   prewarmObject?: Object3D | null
@@ -54,6 +61,7 @@ const TREE_EXPOSURE = 1.4
 export function TerrainRenderPipeline({
   mode,
   look = 'terrain',
+  exposure,
   onCompilingChange,
   beforeRender,
   prewarmObject,
@@ -85,12 +93,13 @@ export function TerrainRenderPipeline({
     renderer.toneMapping = mode === 'full' ? AgXToneMapping : ACESFilmicToneMapping
     renderer.toneMappingExposure =
       currentViewUrlState().exposure ??
+        exposure ??
         (mode === 'full' ? (look === 'tree' ? TREE_EXPOSURE : FULL_EXPOSURE) : 1.08)
     // Shadow map enablement and type are declared on the Canvas instead: R3F
     // rewrites both from its `shadows` prop after effects run, so setting them
     // here is silently undone. Preview mode has no shadow-casting lights and no
     // meshes flagged to cast, so leaving the map enabled there costs nothing.
-  }, [gl, look, mode])
+  }, [exposure, gl, look, mode])
 
   useEffect(() => {
     let cancelled = false

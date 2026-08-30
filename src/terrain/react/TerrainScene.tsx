@@ -1,5 +1,6 @@
-import { lazy, Suspense, useCallback, useMemo } from 'react'
+import { lazy, Suspense, useCallback, useMemo, useState } from 'react'
 import { Group } from 'three/webgpu'
+import type { Object3D } from 'three/webgpu'
 import type { WorldTerrain } from '../WorldTerrain'
 import type { EditorStore } from '../editor/EditorStore'
 import { useEditorSnapshot, useGraniteRockRevision } from './hooks'
@@ -17,10 +18,19 @@ import { EditorLights } from './EditorLights'
 import { LightTransformGizmo } from './LightTransformGizmo'
 import { ThreeTerrainRenderBackend } from '../rendering/ThreeTerrainRenderBackend'
 import { currentViewUrlState } from './viewUrlState'
+import type { ForestFieldStore } from '../../forest/ForestFieldStore'
+import type { TreeEditorStore } from '../../tree/TreeEditorStore'
+import { ForestSplineOverlay } from '../../forest/react/ForestSplineOverlay'
+import { TerrainForestLayer } from '../../forest/react/TerrainForestLayer'
+import { TerrainGroundCover } from '../../forest/react/TerrainGroundCover'
+import type { FoliageEditorStore } from '../../foliage/FoliageEditorStore'
 
 interface TerrainSceneProps {
   terrain: WorldTerrain
   editor: EditorStore
+  forest: ForestFieldStore
+  trees: TreeEditorStore
+  foliage: FoliageEditorStore
 }
 
 // Granite authoring owns seven topology/bake sources and its own large node
@@ -31,13 +41,28 @@ const GraniteRockScene = lazy(async () => {
   return { default: module.GraniteRockScene }
 })
 
-export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
-  const { renderMode, uiViewMode } = useEditorSnapshot(editor)
+export function TerrainScene({
+  terrain,
+  editor,
+  forest,
+  trees,
+  foliage,
+}: TerrainSceneProps) {
+  const { environmentLook, renderMode, uiViewMode } = useEditorSnapshot(editor)
   useGraniteRockRevision(terrain)
   const hasGraniteRocks = terrain.rocks.count > 0
   const showEditorOverlays = uiViewMode === 'editor'
   const terrainGroup = useMemo(() => new Group(), [])
   const debugView = useMemo(() => currentViewUrlState().debug ?? 'none', [])
+  // Published by the post stack so a layer mounted elsewhere can compile
+  // against the same multisampled attachment the frame is drawn into.
+  const [warmupObject, setWarmupObject] = useState<
+    ((object: Object3D) => Promise<void>) | undefined
+  >(undefined)
+  const publishWarmup = useCallback(
+    (warm: (object: Object3D) => Promise<void>) => setWarmupObject(() => warm),
+    [],
+  )
   const terrainBackend = useMemo(
     () => new ThreeTerrainRenderBackend(
       terrainGroup,
@@ -62,7 +87,11 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
 
   return (
     <>
-      <TerrainEnvironment mode={renderMode} config={terrain.config} />
+      <TerrainEnvironment
+        mode={renderMode}
+        config={terrain.config}
+        look={environmentLook}
+      />
       <HorizonProxy
         terrain={terrain}
         mode={renderMode}
@@ -80,9 +109,27 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
           <GraniteRockScene terrain={terrain} editor={editor} />
         </Suspense>
       )}
+      <TerrainForestLayer
+        terrain={terrain}
+        forest={forest}
+        trees={trees}
+        warmup={warmupObject}
+      />
+      <TerrainGroundCover
+        terrain={terrain}
+        forest={forest}
+        foliage={foliage}
+        warmup={warmupObject}
+      />
       <EditorLights editor={editor} />
       {showEditorOverlays && (
         <>
+          <ForestSplineOverlay
+            terrain={terrain}
+            forest={forest}
+            editor={editor}
+            backend={terrainBackend}
+          />
           <LightTransformGizmo editor={editor} />
           <ModifierBounds terrain={terrain} editor={editor} />
           <ModifierTransformGizmo terrain={terrain} editor={editor} />
@@ -92,6 +139,13 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
       <EditorCamera terrain={terrain} editor={editor} />
       <TerrainRenderPipeline
         mode={renderMode}
+        // The forest workspace's chain: atmospheric haze, sun shafts against a
+        // depth map, a cheap bloom and its grade. It is also the shorter of the
+        // two — no SMAA resolve, no separate valley-fog march — which is most
+        // of why it is the faster one.
+        look="tree"
+        exposure={LANDSCAPE_EXPOSURE}
+        onWarmupReady={publishWarmup}
         onCompilingChange={onCompilingChange}
         beforeRender={(renderer, scene, camera) => {
           terrainBackend.updateOcclusion(renderer, camera, scene)
@@ -100,3 +154,12 @@ export function TerrainScene({ terrain, editor }: TerrainSceneProps) {
     </>
   )
 }
+
+/**
+ * What the tree look's chain is printed at over open ground.
+ *
+ * The forest interior it was written for is a low-key subject and runs at 1.4.
+ * A valley under the same sun is not: most of the frame is directly lit rock
+ * and sky, and an interior's exposure puts both at the top of the curve.
+ */
+const LANDSCAPE_EXPOSURE = 0.94

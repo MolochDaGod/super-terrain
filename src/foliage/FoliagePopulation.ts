@@ -30,6 +30,7 @@ import {
   vec4,
 } from 'three/tsl'
 import { createFoliageClumpGeometry } from './foliageClumpGeometry'
+import type { FoliageGroundHeightField } from './foliageGroundHeight'
 import type { FoliageMaskField } from './FoliageMaskField'
 import { fbm2, hash21, hash22, valueNoise2 } from './foliageNoise'
 import {
@@ -258,9 +259,17 @@ export function createFoliageRings(
   mask: FoliageMaskField,
   instances: FoliageInstanceBuffer,
   material: Material,
+  ground: FoliageGroundHeightField,
 ): FoliageRing[] {
   return FOLIAGE_RINGS.map((config, index) =>
-    createFoliageRing(config, FOLIAGE_RING_OFFSETS[index], mask, instances, material),
+    createFoliageRing(
+      config,
+      FOLIAGE_RING_OFFSETS[index],
+      mask,
+      instances,
+      material,
+      ground,
+    ),
   )
 }
 
@@ -270,6 +279,7 @@ function createFoliageRing(
   mask: FoliageMaskField,
   instances: FoliageInstanceBuffer,
   material: Material,
+  ground: FoliageGroundHeightField,
 ): FoliageRing {
   const capacity = config.grid * config.grid
   const geometry = createFoliageClumpGeometry({
@@ -311,6 +321,7 @@ function createFoliageRing(
     mask,
     instances,
     indirect,
+    ground,
   )
 
   return { config, capacity, offset, geometry, mesh, populate, reset }
@@ -323,12 +334,14 @@ function createPopulateKernel(
   mask: FoliageMaskField,
   instances: FoliageInstanceBuffer,
   indirect: ShaderValue,
+  ground: FoliageGroundHeightField,
 ): ComputeNode {
   const { cell, grid, inner, outer, fadeIn, fadeOut } = config
   const half = (grid * cell) / 2
   const maskResolution = mask.resolution
   const maskField = mask.fieldSize
   const maskBuffer = mask.buffer
+  const maskOrigin = mask.origin
   const scales = FOLIAGE_DENSITY_SCALES
 
   return Fn(() => {
@@ -386,8 +399,8 @@ function createPopulateKernel(
       const texel = maskField / maskResolution
       const sampleX = positionX.add(blur.x.sub(0.5).mul(texel * 1.7))
       const sampleZ = positionZ.add(blur.y.sub(0.5).mul(texel * 1.7))
-      const maskU = sampleX.div(maskField).add(0.5)
-      const maskV = sampleZ.div(maskField).add(0.5)
+      const maskU = sampleX.sub(maskOrigin.x).div(maskField).add(0.5)
+      const maskV = sampleZ.sub(maskOrigin.y).div(maskField).add(0.5)
       const inField = step(0, maskU)
         .mul(step(maskU, 1))
         .mul(step(0, maskV))
@@ -527,11 +540,17 @@ function createPopulateKernel(
           .mul(ringBoost)
           .mul(fade)
 
+        // Where the ground is under this clump. Zero in the lab, whose floor
+        // is a plane; the terrain's own height everywhere else, sampled from
+        // the same field the stems were planted against so a tuft and the tree
+        // beside it agree.
+        const groundY = ground.sampleHeight(positionX, positionZ).toVar('foliageGroundY')
+
         // Sphere-versus-frustum in world space, with a margin that absorbs the
         // single frame of latency between the CPU publishing the planes and
         // this dispatch reading them. Grass that pops in at the very edge of
         // the screen is worse than grass that is culled a metre late.
-        const centre = vec3(positionX, height.mul(0.5), positionZ)
+        const centre = vec3(positionX, groundY.add(height.mul(0.5)), positionZ)
         const radius = height.mul(0.62).add(row1.y).add(cell * 0.6).add(1.5)
         const visible = float(1).toVar('foliageVisible')
         for (let plane = 0; plane < 6; plane += 1) {
@@ -548,7 +567,7 @@ function createPopulateKernel(
             const base = slot.add(uint(ringOffset)).mul(uint(2))
             instances
               .element(base)
-              .assign(vec4(positionX, 0, positionZ, yaw))
+              .assign(vec4(positionX, groundY, positionZ, yaw))
             // Species and local coverage share a lane: the integer part names
             // the plant, the fraction records how thickly the mask says it is
             // growing here. The material needs both and neither justifies a

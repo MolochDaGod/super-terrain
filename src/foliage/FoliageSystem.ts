@@ -6,6 +6,7 @@ import type {
   Renderer,
 } from 'three/webgpu'
 import {
+  FOLIAGE_FIELD_SIZE,
   FoliageMaskField,
   type FoliagePaintLayer,
   type FoliagePaintMode,
@@ -24,6 +25,7 @@ import {
   createFoliageGroundMaterial,
   type FoliageGroundTextures,
 } from './foliageGroundCanopy'
+import { FoliageGroundHeightField } from './foliageGroundHeight'
 import {
   createFoliageInstanceBuffer,
   createFoliageInstanceReader,
@@ -82,9 +84,30 @@ const SEED_STROKES_PER_FRAME = 12
  * culling, not for painting — so none of this can stall the frame waiting on
  * the device.
  */
+export interface FoliageSystemOptions extends FoliageGroundTextures {
+  /**
+   * Metres the painted window covers. The lab's ground is four hundred across;
+   * a terrain world wants a wider one so a forest and its surroundings fit
+   * inside a single window and the camera can move without it recentring
+   * constantly.
+   */
+  fieldSize?: number
+  /**
+   * Whether to draw the flat ground plane the cover stands on.
+   *
+   * The lab has no other floor, so it must. A terrain world already has one —
+   * a real, sculpted, streamed one — and laying a 400-metre plane over it would
+   * z-fight along every square metre of the overlap. There the terrain material
+   * blends the same painted layers itself; see `forestFloorBlend`.
+   */
+  drawGround?: boolean
+}
+
 export class FoliageSystem {
   readonly group = new Group()
-  readonly mask = new FoliageMaskField()
+  readonly mask: FoliageMaskField
+  /** Ground the cover stands on. Flat until a terrain fills it in. */
+  readonly ground3d = new FoliageGroundHeightField()
   readonly rings: FoliageRing[]
   readonly bladeMaterial: MeshStandardNodeMaterial
   readonly groundMaterial: MeshPhysicalNodeMaterial
@@ -101,12 +124,19 @@ export class FoliageSystem {
   private hasPopulationView = false
   private disposed = false
 
-  constructor(groundTextures: FoliageGroundTextures) {
+  constructor(options: FoliageSystemOptions) {
+    const groundTextures: FoliageGroundTextures = options
+    this.mask = new FoliageMaskField(options.fieldSize ?? FOLIAGE_FIELD_SIZE)
     const instances = createFoliageInstanceBuffer()
     this.bladeMaterial = createFoliageBladeMaterial(
       createFoliageInstanceReader(instances),
     )
-    this.rings = createFoliageRings(this.mask, instances, this.bladeMaterial)
+    this.rings = createFoliageRings(
+      this.mask,
+      instances,
+      this.bladeMaterial,
+      this.ground3d,
+    )
 
     this.groundMaterial = createFoliageGroundMaterial(this.mask, groundTextures)
     this.groundGeometry = new PlaneGeometry(
@@ -122,8 +152,9 @@ export class FoliageSystem {
     this.ground.matrixAutoUpdate = false
     this.ground.updateMatrix()
 
-    this.debris = createFoliageDebris(this.mask)
+    this.debris = createFoliageDebris(this.mask, this.ground3d)
 
+    this.ground.visible = options.drawGround !== false
     this.group.name = 'ground-foliage'
     this.group.add(this.ground)
     for (const ring of this.rings) this.group.add(ring.mesh)
@@ -207,6 +238,17 @@ export class FoliageSystem {
     }
     this.populationDirty = true
     this.pendingSeed = this.pendingSeed.slice(batch)
+  }
+
+  /**
+   * Forces the next update to re-derive every clump.
+   *
+   * Painting and filling do this themselves. The terrain window needs it
+   * separately because it writes the mask through `mask.paintRegion`, which is
+   * the mask's own business and not the system's.
+   */
+  markPopulationDirty(): void {
+    this.populationDirty = true
   }
 
   paint(renderer: Renderer, stroke: FoliagePaintStroke): void {
