@@ -8,9 +8,29 @@ import {
   RenderTarget,
   Vector3,
   type Camera,
+  type Object3D,
   type Renderer,
   type Scene,
 } from 'three/webgpu'
+
+/**
+ * `userData` flag for meshes the sun depth pass must not draw.
+ *
+ * Rendering with the scene's own materials buys the alpha cutouts this map
+ * exists for, and costs one thing nobody asked for: a material carrying a node
+ * that renders a pass of its own gets to run that pass from *this* camera. The
+ * water's planar reflector is exactly such a node. It updates once per frame,
+ * keys its virtual camera and render target on whichever camera reached it
+ * first, and repoints the water's reflection texture at that target — so on
+ * every frame this map refreshed, the lake was showing a reflection rendered
+ * from the sun through an oblique clip plane, which is to say nothing at all.
+ * Measured over a ninety-step move it was a third of the frames, which is what
+ * the flicker was.
+ *
+ * A water surface does not shape a light shaft, so leaving it out costs the
+ * shafts nothing and is what the flag is for.
+ */
+export const EXCLUDE_FROM_SUN_DEPTH = 'excludeFromSunDepth'
 
 /**
  * A depth map from the sun, kept for volumetrics rather than for shading.
@@ -119,10 +139,20 @@ export class SunDepthMap {
     )
 
     const previousTarget = renderer.getRenderTarget()
-    renderer.setRenderTarget(this.target)
-    renderer.clear()
-    renderer.render(scene, this.camera)
-    renderer.setRenderTarget(previousTarget)
+    const hidden: Object3D[] = []
+    scene.traverse((object) => {
+      if (!object.visible || object.userData[EXCLUDE_FROM_SUN_DEPTH] !== true) return
+      object.visible = false
+      hidden.push(object)
+    })
+    try {
+      renderer.setRenderTarget(this.target)
+      renderer.clear()
+      renderer.render(scene, this.camera)
+    } finally {
+      renderer.setRenderTarget(previousTarget)
+      for (const object of hidden) object.visible = true
+    }
   }
 
   dispose(): void {

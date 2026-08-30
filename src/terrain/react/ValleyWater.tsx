@@ -4,6 +4,7 @@ import type { BufferGeometry } from 'three/webgpu'
 import { createPreviewWaterMaterial } from '../rendering/water/createPreviewWaterMaterial'
 import { createWaterMaterial } from '../rendering/water/createWaterMaterial'
 import { createWaterSurface } from '../rendering/water/createWaterSurface'
+import { EXCLUDE_FROM_SUN_DEPTH } from '../rendering/post/sunDepthMap'
 import type { WorldTerrain } from '../WorldTerrain'
 import type { TerrainRenderMode } from '../rendering/renderModes'
 import { useWaterState } from './hooks'
@@ -103,10 +104,20 @@ export function ValleyWater({ terrain, mode }: ValleyWaterProps) {
   return (
     <>
       <primitive object={reflectionTarget} />
-      <mesh geometry={geometry} material={resources.material} renderOrder={-1} />
+      <mesh
+        geometry={geometry}
+        material={resources.material}
+        renderOrder={-1}
+        // Kept out of the godray depth pass. That pass draws with real
+        // materials, and drawing this one from the sun camera hands the
+        // reflector its one update for the frame — see `EXCLUDE_FROM_SUN_DEPTH`.
+        userData={SUN_DEPTH_EXCLUDED}
+      />
     </>
   )
 }
+
+const SUN_DEPTH_EXCLUDED = { [EXCLUDE_FROM_SUN_DEPTH]: true } as const
 
 /**
  * Grid spacing for an extent.
