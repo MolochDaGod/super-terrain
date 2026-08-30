@@ -1,22 +1,30 @@
 import { DataTexture, RGBAFormat, UnsignedByteType, Vector2 } from 'three/webgpu'
 import * as TSL from 'three/tsl'
 import type { FoliageMaskField } from './FoliageMaskField'
+import { SWARD_COLOUR_SCALE } from './foliageSpecies'
 import { FOLIAGE_SURFACE_ROWS } from './foliageSurfaces'
+import { FOLIAGE_INSTANCED_RANGE } from './FoliagePopulation'
+import { foliageCameraPosition } from './foliageRuntime'
+import { fbm2 } from './foliageNoise'
 import {
+  CANOPY_GAIN,
   SURFACE_ROUGHNESS,
   duffColour,
   duffCover,
   litterColour,
   litterCover,
+  litterHeight,
   mossed,
   wetness,
 } from './foliageGroundCanopy'
+import { valueNoise2 } from './foliageNoise'
 
 /** See the note in the foliage materials — these are node builders, not maths. */
 type ShaderValue = any
 
-const { clamp, float, mix, texture, uniform, vec3 } =
-  TSL as unknown as Record<string, ShaderValue>
+const {
+  clamp, float, fwidth, mix, normalize, smoothstep, texture, uniform, vec2, vec3,
+} = TSL as unknown as Record<string, ShaderValue>
 
 /**
  * The forest floor, applied to the terrain's own surface.
@@ -62,6 +70,7 @@ function placeholderTexture(): DataTexture {
 }
 
 const placeholders = Array.from({ length: FOLIAGE_SURFACE_ROWS }, placeholderTexture)
+const swardPlaceholder = placeholderTexture()
 
 /** Window centre in world XZ, matching `FoliageMaskField.origin`. */
 export const forestFloorOrigin = uniform(new Vector2())
@@ -71,12 +80,15 @@ export const forestFloorFieldSize = uniform(1)
 export const forestFloorStrength = uniform(0)
 
 const surfaceNodes = placeholders.map((placeholder) => texture(placeholder))
+/** rgb is the plants' aggregate colour, a their total. See `FoliageMaskField.sward`. */
+const swardNode = texture(swardPlaceholder)
 
 export function bindForestFloorMask(mask: FoliageMaskField): void {
   mask.surfaces.forEach((surface, row) => {
     const node = surfaceNodes[row]
     if (node) node.value = surface
   })
+  swardNode.value = mask.sward
   forestFloorFieldSize.value = mask.fieldSize
   forestFloorStrength.value = 1
 }
@@ -85,6 +97,7 @@ export function unbindForestFloorMask(): void {
   surfaceNodes.forEach((node, row) => {
     node.value = placeholders[row]
   })
+  swardNode.value = swardPlaceholder
   forestFloorStrength.value = 0
 }
 
@@ -98,7 +111,20 @@ export interface ForestFloorBlend {
   colour: ShaderValue
   /** Terrain roughness moved toward the floor's. */
   roughness: ShaderValue
-  /** 0..1, how completely the floor has taken over. Useful for normals. */
+  /**
+   * The shading normal, with the terrain's own rock relief given up to the
+   * floor's.
+   *
+   * The single most important output, and the one the first pass of this
+   * omitted. Blending only colour and roughness leaves every strata band,
+   * block edge and scree facet the terrain shader draws standing in full
+   * relief under the litter — so a forest floor comes out as a rocky field
+   * that happens to be brown, which is exactly what it looked like.
+   */
+  normal: ShaderValue
+  /** Multiplier for ambient occlusion: the shadow between the leaves. */
+  ao: ShaderValue
+  /** 0..1, how completely the floor has taken over. */
   cover: ShaderValue
 }
 
@@ -114,8 +140,14 @@ export interface ForestFloorBlend {
 export function forestFloorBlend(
   colour: ShaderValue,
   roughness: ShaderValue,
-  worldXZ: ShaderValue,
+  /** The terrain's own shading normal, in world space. */
+  shadedNormal: ShaderValue,
+  /** The terrain's geometric normal, in world space. */
+  geometricNormal: ShaderValue,
+  /** The shaded point in world space. */
+  worldPosition: ShaderValue,
 ): ForestFloorBlend {
+  const worldXZ = worldPosition.xz
   const fieldUv = worldXZ
     .sub(forestFloorOrigin)
     .div(forestFloorFieldSize)
@@ -164,15 +196,113 @@ export function forestFloorBlend(
     bareWeight.mul(0.85),
   )
 
+  // Saturating rather than summing to exactly one.
+  //
+  // The layers overlap — litter drifts across moss, moss grows over litter —
+  // so their coverages are not shares of a whole and adding them up
+  // underestimates how much floor there is. A stand's interior should be
+  // entirely floor; the gain is what gets it there while leaving the fringe,
+  // where every weight is small, still mostly hillside.
   const cover = clamp(
-    litterMix.add(duffMix).add(mossCover).add(bareWeight.mul(0.9)),
+    litterMix.add(duffMix).add(mossCover).add(bareWeight.mul(0.9)).mul(1.45),
     0,
     1,
+  ).toVar('forestFloorCover')
+
+  // --- relief ---------------------------------------------------------------
+  //
+  // The floor's own shape, and the terrain's given up to make room for it.
+  // Two tiers, as in the ground canopy: seven centimetres carrying the leaf
+  // plates, two carrying the grain between them, the fine tier faded out the
+  // moment a pixel is wider than the feature so it cannot alias.
+  const footprint = fwidth(worldXZ).length().max(0.0005)
+  const grainFade = smoothstep(0.09, 0.02, footprint)
+  const slopeAt = (offset: number, gain: number): ShaderValue => {
+    const dx = litterHeight(worldXZ.add(vec2(offset, 0)))
+      .sub(litterHeight(worldXZ.sub(vec2(offset, 0))))
+    const dz = litterHeight(worldXZ.add(vec2(0, offset)))
+      .sub(litterHeight(worldXZ.sub(vec2(0, offset))))
+    return vec2(dx.mul(gain), dz.mul(gain))
+  }
+  const litterSlope = slopeAt(0.035, 4.6).add(slopeAt(0.011, 2.4).mul(grainFade))
+  // Moss cushions are rounder and coarser than the litter under them.
+  const mossBump = valueNoise2(worldXZ.mul(3.4).add(vec2(11.1, 4.7)))
+  const mossSlope = vec2(
+    valueNoise2(worldXZ.mul(3.4).add(vec2(11.35, 4.7))).sub(mossBump).mul(6),
+    valueNoise2(worldXZ.mul(3.4).add(vec2(11.1, 4.95))).sub(mossBump).mul(6),
+  )
+  // Bare earth keeps the mineral relief it actually has, so a scuff still
+  // reads as ground rather than as a hole in the leaves.
+  const floorSlope = mix(litterSlope, mossSlope, mossCover.mul(0.6))
+    .mul(bareWeight.mul(0.65).oneMinus())
+
+  // The rock relief has to *go*, not be drawn over. Bedding planes and block
+  // edges are metre-scale features an inch of leaf litter cannot hide, so
+  // under full cover the shading normal falls back to the geometry — the
+  // hillside keeps its shape and loses its strata — and the floor's own
+  // millimetre relief is added to that.
+  const bedrock = mix(shadedNormal, geometricNormal, cover.mul(0.88))
+  const normal = normalize(
+    bedrock.add(vec3(floorSlope.x.negate(), 0, floorSlope.y.negate()).mul(cover)),
   )
 
+  // A leaf lying on the pile sees the whole sky; the gap it lies across sees
+  // almost none. That difference is most of what stops dead leaves reading as
+  // a printed texture.
+  const ao = mix(float(1), litterHeight(worldXZ).mul(0.62).add(0.38), cover)
+
+  // --- the sward the blades stand in -----------------------------------------
+  //
+  // The half of the floor that was missing, and the reason a forest grown on
+  // terrain came out brown where the same recipe in the tree lab comes out
+  // green.
+  //
+  // The lab draws a flat ground plane whose material carries two things: the
+  // painted surface layers — litter, duff, moss, earth — and, over the top of
+  // them, the *aggregate colour of the plants*. That second term is not a
+  // distance fallback for the instanced blades; the blades stand in it at every
+  // range, which is what stops a sward from thinning into bare soil between
+  // clumps as the near ring gives out. On terrain the ground plane is turned
+  // off — the terrain is the ground — and the first version of this blend
+  // ported only the surface layers, so the floor had leaf litter and no sward
+  // at all under it.
+  const swardSample: ShaderValue = swardNode.sample(fieldUv)
+  const swardCover = clamp(swardSample.a.mul(forestFloorStrength), 0, 1)
+  // Nudged toward the green primary, as the canopy is: AgX rolls the sunlit
+  // half of a wide field well up its curve, and a curve that desaturates as it
+  // compresses turns an accurate green into cream long before it clips.
+  const swardBase = swardSample.rgb
+    .div(float(SWARD_COLOUR_SCALE))
+    .mul(vec3(0.88, 1.02, 0.8))
+
+  // How much of the read the sheet carries, against range. Close up the
+  // instanced blades are drawing the real thing and painting the ground under
+  // them full green as well buries the litter, the twigs and the relief in
+  // paint; past the last ring it is the only sward there is. This is the same
+  // ramp and the same constants the ground canopy uses, so the two agree by
+  // construction rather than by two numbers kept in step by hand.
+  const range = worldPosition.sub(foliageCameraPosition).length()
+  const shading = smoothstep(
+    FOLIAGE_INSTANCED_RANGE * 0.06,
+    FOLIAGE_INSTANCED_RANGE * 0.8,
+    range,
+  )
+  // Broad variation, so a hillside of it is not one flat green.
+  const mottle = clamp(float(0.5).add(fbm2(worldXZ.mul(0.085)).sub(0.5).mul(0.7)), 0, 1)
+  const sward = swardBase
+    .mul(CANOPY_GAIN)
+    .mul(mix(float(0.66), float(1.3), mottle))
+    .mul(mix(float(0.72), float(1), shading))
+  const swardStrength = swardCover.mul(mix(float(0.42), float(1), shading)).mul(cover)
+
   return {
-    colour: mix(colour, floorColour, cover),
-    roughness: mix(roughness, layeredRoughness, cover),
+    colour: mix(mix(colour, floorColour, cover), sward, swardStrength),
+    // Grass is glossier than litter and than rock, and its gloss varies with
+    // the tuft structure — which is what gives a distant slope of it the
+    // shifting sheen that says grass rather than paint.
+    roughness: mix(mix(roughness, layeredRoughness, cover), float(0.62), swardStrength),
+    normal,
+    ao,
     cover,
   }
 }

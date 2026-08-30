@@ -528,3 +528,28 @@ export function packFoliageSpecies(
   }
   return rows
 }
+
+/**
+ * What one species looks like when you cannot resolve its blades any more.
+ *
+ * Averaged from the same sheath and tip colours the blade material shades with,
+ * so any surface that falls back to an aggregate — the ground canopy in the
+ * tree lab, the terrain material under a forest — is the same green the near
+ * field is made of. Drift between the two shows up as a visible ring on the
+ * ground at the range where the last instanced blades give out.
+ */
+export const AGGREGATE_COLOURS = FOLIAGE_SPECIES.map((species) => [
+  species.base[0] * 0.4 + species.tip[0] * 0.6,
+  species.base[1] * 0.4 + species.tip[1] * 0.6,
+  species.base[2] * 0.4 + species.tip[2] * 0.6,
+] as const)
+
+/**
+ * Scale the packed sward colour is stored at.
+ *
+ * The aggregate greens are dark — a tenth to a third of full scale — and the
+ * summary texture is eight bits a channel, so storing them raw spends a quarter
+ * of the available codes on the whole range anyone will see. Scaling up before
+ * the store and back down after it buys two bits for one multiply.
+ */
+export const SWARD_COLOUR_SCALE = 3

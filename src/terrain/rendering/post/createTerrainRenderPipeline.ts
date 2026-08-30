@@ -26,7 +26,11 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js'
 import { smaa } from 'three/addons/tsl/display/SMAANode.js'
 import type { TerrainRenderMode } from '../renderModes'
 import { trackGpuCompilation } from '../gpuResourceRetirement'
-import { treeAtmosphericHaze } from '../../../tree/rendering/treeAtmosphericHaze'
+import {
+  FOREST_HAZE,
+  LANDSCAPE_HAZE,
+  treeAtmosphericHaze,
+} from '../../../tree/rendering/treeAtmosphericHaze'
 import { volumetricValleyFog } from './volumetricValleyFog'
 import { SunDepthMap } from './sunDepthMap'
 import {
@@ -36,7 +40,20 @@ import {
   type GodrayControls,
 } from './volumetricGodrays'
 
-export type PostLook = 'terrain' | 'tree'
+/**
+ * Which post chain the frame goes through.
+ *
+ * `terrain` is the original landscape stack — valley fog, pyramid bloom, SMAA.
+ * `tree` is the forest interior's — analytic haze, sun shafts against a depth
+ * map, a tight screen-space glow, and a grade with a lifted toe.
+ * `wooded-landscape` is the forest chain over an open world, and is not the
+ * same thing as either: it keeps the haze, the shafts and the grade, and swaps
+ * the two parts of the tree chain whose constants are interior-scale — the haze
+ * profile, which stops integrating at a hundred and fifty metres, and the glow,
+ * whose eleven-pixel kernel draws a hard halo along a ridge silhouette instead
+ * of a bloom.
+ */
+export type PostLook = 'terrain' | 'tree' | 'wooded-landscape'
 
 export interface TerrainRenderPipeline {
   pipeline: RenderPipeline
@@ -248,14 +265,43 @@ export function createTerrainRenderPipeline(
   // no 48-tap screen kernel and no denoise pass for unchanged geometry.
   const colour = scenePass.getTextureNode('output')
   const depth = scenePass.getTextureNode('depth')
-  if (look === 'tree') {
+  if (look === 'tree' || look === 'wooded-landscape') {
+    const landscape = look === 'wooded-landscape'
     // Shafts are integrated before the bloom so they bloom, which is most of
     // what makes a beam read as light rather than as a grey wedge.
     const sunDepth = new SunDepthMap()
     const godrayControls = createGodrayControls()
-    const hazed = treeAtmosphericHaze(colour, depth, camera)
+    if (landscape) {
+      // The shaft medium's ceiling is a height above *sea level*, and its
+      // default of twenty-six metres is a forest's: shafts belong in the first
+      // few trunk-lengths above the floor. This world's ground starts at about
+      // sixty metres and its ridges reach three hundred, so on terrain that
+      // default put the entire medium underground and the light shafts — the
+      // whole reason this chain was brought over — never appeared at all.
+      godrayControls.ceiling.value = 340
+      // Thinner to match. The same coefficient over a column ten times deeper
+      // integrates to ten times the optical depth, which is a white-out rather
+      // than a shaft.
+      godrayControls.density.value = 0.00022
+    }
+    const hazed = treeAtmosphericHaze(
+      colour,
+      depth,
+      camera,
+      landscape ? LANDSCAPE_HAZE : FOREST_HAZE,
+    )
     const shafted = volumetricGodrays(hazed, depth, camera, sunDepth, godrayControls)
-    const glowing = shafted.rgb.add(cheapTreeBloom(colour))
+    // A pyramid bloom over open country, a screen kernel inside a stand.
+    //
+    // `cheapTreeBloom` reaches eleven pixels. Against a forest's small bright
+    // sky gaps that is a glow; against a landscape's whole bright sky it is a
+    // hard white outline traced along every ridge, which is the opposite of
+    // soft. The pyramid costs more and is the only thing that blooms a large
+    // bright area without drawing its edge.
+    const wide = landscape ? bloom(shafted, 0.13, 0.88, 1.06) : null
+    const glowing = wide
+      ? shafted.rgb.add(wide.rgb)
+      : shafted.rgb.add(cheapTreeBloom(colour))
     const graded = renderOutput(
       vec4(glowing, shafted.a),
       renderer.toneMapping,
@@ -264,7 +310,7 @@ export function createTerrainRenderPipeline(
     const pipeline = new RenderPipeline(renderer, treeGrade(graded))
     pipeline.outputColorTransform = false
     const warmup = memoizeWarmup(
-      () => warmRenderPipeline(renderer, scenePass, pipeline),
+      () => warmRenderPipeline(renderer, scenePass, pipeline, wide ?? undefined),
     )
     const sunWorld = new Vector3()
     const sunTarget = new Vector3()

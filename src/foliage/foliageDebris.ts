@@ -319,9 +319,14 @@ function createDebrisKernel(
     const positionX = cellX.add(jitter.x.sub(0.5).mul(DEBRIS_CELL * 0.92))
     const positionZ = cellZ.add(jitter.y.sub(0.5).mul(DEBRIS_CELL * 0.92))
 
+    // The camera's height above the ground here, not its world Y. See the same
+    // correction in `FoliagePopulation`: measuring from sea level puts every
+    // twig on a hillside past the debris range, so a forest floor eighty metres
+    // up carries no sticks, cones or stones at all.
+    const groundY = ground.sampleHeight(positionX, positionZ).toVar('debrisGroundY')
     const toCamera = vec3(
       positionX.sub(foliageCameraPosition.x),
-      foliageCameraPosition.y.negate(),
+      groundY.sub(foliageCameraPosition.y),
       positionZ.sub(foliageCameraPosition.z),
     )
     const distance = toCamera.length()
@@ -392,12 +397,7 @@ function createDebrisKernel(
             const base = slot.add(uint(offset)).mul(uint(2))
             instances
               .element(base)
-              .assign(vec4(
-                positionX,
-                ground.sampleHeight(positionX, positionZ),
-                positionZ,
-                yaw,
-              ))
+              .assign(vec4(positionX, groundY, positionZ, yaw))
             instances
               .element(base.add(uint(1)))
               .assign(vec4(length.mul(fade), roll, dice.w, bed))

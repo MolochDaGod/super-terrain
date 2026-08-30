@@ -228,29 +228,45 @@ const LIGHT_RIGS: Record<TerrainEnvironmentLook, LightRig> = {
     // sun ten degrees flattens all of it at once. What is taken from the forest
     // rig is its *fill*: a warm, strong, leaf-and-litter bounce that keeps
     // shade readable instead of the blue near-black an open-sky rig gives.
-    sun: { elevation: 14, azimuth: 142, colour: 0xffd9b0, intensity: 4.5 },
+    // Softer than the landscape rig's 4.35, and deliberately.
+    //
+    // What reads as harsh is the ratio between the sunlit face and the shaded
+    // one, not the absolute brightness of either. Taking the key down and the
+    // fill up narrows that ratio from about nine to one to about five, which
+    // is the difference between a face that bleaches out at grazing incidence
+    // and one that keeps its bedding.
+    sun: { elevation: 14, azimuth: 142, colour: 0xffd9b0, intensity: 3.85 },
     shadow: {
       mapSize: 2048,
       maxFar: 2_200,
       lightMargin: 800,
       cascades: 3,
       cascadeStagger: 1,
-      // Not the forest rig's 0.8. That number corrects for a canopy whose gaps
-      // fall below a shadow-map texel; applied to rock it would simply mean
-      // rock that does not cast a proper shadow.
-      intensity: 1,
+      // 0.85 rather than a lid.
+      //
+      // Not for the forest rig's reason — there is no canopy here whose gaps
+      // fall below a texel — but for the plain one: on a clear day the sky is
+      // a hemisphere of light and a shadowed slope is lit by all of it. A
+      // shadow that takes the sun away completely is what makes a landscape
+      // read as harsh, and it is the single biggest difference between this
+      // rig and the forest one the tree workspace is graded against.
+      intensity: 0.85,
     },
-    hemisphere: { sky: 0x8194a4, ground: 0x40382c, intensity: 1.02 },
-    ambient: { colour: 0x3f4c3d, intensity: 0.24 },
-    frontFill: { colour: 0x9aa79b, intensity: 0.82 },
+    // The forest rig's fill, near enough, on a landscape's geometry. It is
+    // where nearly all of the softness comes from: shade that still resolves
+    // its own texture instead of falling into the toe of the curve.
+    hemisphere: { sky: 0x8fa2a2, ground: 0x47402f, intensity: 1.45 },
+    ambient: { colour: 0x3f4c3d, intensity: 0.5 },
+    frontFill: { colour: 0x9aa79b, intensity: 0.62 },
     sky: {
       turbidity: 4.4,
       rayleigh: 1.1,
-      // Four times the old look's 0.18, because the sky model is now the sky.
-      // That number was a dim wash sitting behind an authored photograph; with
-      // the photograph gone it has to carry the horizon on its own, and at 0.18
-      // it read as a flat grey card behind the ridges.
-      intensity: 0.46,
+      // Bright enough to carry the horizon on its own now the authored
+      // photograph is gone, and no brighter. At 0.46 the sky was most of what
+      // the frame clipped: nine per cent of the image and a fifth of the sky
+      // band pinned at white, which the tree workspace — measured at zero per
+      // cent clipped — never does.
+      intensity: 0.22,
       cloudCoverage: 0.42,
       // The authored panorama is what this look exists to remove. The sky model
       // draws its own clouds and horizon gradient in the same physical units as

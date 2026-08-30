@@ -9,7 +9,11 @@ import {
   type Renderer,
 } from 'three/webgpu'
 import type ComputeNode from 'three/src/nodes/gpgpu/ComputeNode.js'
-import { FOLIAGE_MASK_ROWS } from './foliageSpecies'
+import {
+  AGGREGATE_COLOURS,
+  FOLIAGE_MASK_ROWS,
+  SWARD_COLOUR_SCALE,
+} from './foliageSpecies'
 import { FOLIAGE_SURFACE_ROWS } from './foliageSurfaces'
 import { fbm2 } from './foliageNoise'
 import { FoliageWorldRaster } from './foliageWorldRaster'
@@ -29,6 +33,7 @@ import {
   uint,
   uniform,
   vec2,
+  vec3,
   vec4,
 } from 'three/tsl'
 
@@ -141,6 +146,24 @@ export class FoliageMaskField {
   /** `FOLIAGE_SURFACE_ROWS` vec4 rows per cell. */
   readonly surfaceBuffer: FoliageMaskBuffer
 
+  /**
+   * The plants, summarised: rgb is their aggregate colour, a is their total.
+   *
+   * A convenience for the tree lab and a necessity for the terrain, which is
+   * where it came from. The ground canopy resolves the sward by sampling every
+   * weight row and computing a weighted mean per pixel; the terrain material
+   * cannot afford to, because it already samples fourteen textures of its own
+   * and the fragment stage's guaranteed budget is sixteen. Three more took it
+   * to eighteen and the pipeline simply failed to create — no frame, no
+   * warning in the app, only a validation error in the console.
+   *
+   * Doing the average once, in the kernel that already has every weight in
+   * registers, costs one texture write per painted cell and turns three
+   * dependent texture reads per pixel into one. That is the better arrangement
+   * on its own terms; the texture limit is just what forced the question.
+   */
+  readonly sward: StorageTexture
+
   private readonly strokeSegment = uniform(new Vector4())
   private readonly strokeShape = uniform(new Vector4())
   private readonly strokeSpecies = uniform(0)
@@ -182,6 +205,7 @@ export class FoliageMaskField {
       createWeightTexture(`foliage-mask-surfaces-${row}`, resolution),
     )
     this.surfaceBuffer = attributeArray(cells * FOLIAGE_SURFACE_ROWS, 'vec4')
+    this.sward = createWeightTexture('foliage-mask-sward', resolution)
 
     const texel = float(this.fieldSize / resolution)
     const halfField = float(this.fieldSize * 0.5)
@@ -195,6 +219,37 @@ export class FoliageMaskField {
     const weights = this.weights
     const surfaceBuffer = this.surfaceBuffer
     const surfaces = this.surfaces
+    const sward = this.sward
+
+    /**
+     * Packs the weighted mean plant colour and the total into one texel.
+     *
+     * Called at the end of both kernels, because both rewrite the weights and
+     * a summary that only one of them maintained would be stale exactly when
+     * the other had just been used.
+     */
+    const storeSward = (coord: ShaderValue, rows: ShaderValue[]): void => {
+      let total: ShaderValue | null = null
+      let blended: ShaderValue = vec3(0, 0, 0)
+      AGGREGATE_COLOURS.forEach((aggregate, index) => {
+        const row = rows[Math.floor(index / 4)]
+        if (!row) return
+        const weight = row[['x', 'y', 'z', 'w'][index % 4]!]
+        total = total === null ? weight : total.add(weight)
+        blended = blended.add(
+          vec3(aggregate[0], aggregate[1], aggregate[2]).mul(weight),
+        )
+      })
+      const sum = total ?? float(0)
+      const mean: ShaderValue = blended
+        .div(max(sum, float(1e-4)))
+        .mul(SWARD_COLOUR_SCALE)
+      textureStore(
+        sward,
+        coord,
+        vec4(mean.clamp(0, 1), (sum as ShaderValue).clamp(0, 1)),
+      )
+    }
 
     this.paintKernel = Fn(() => {
       const cellX = instanceIndex.mod(uint(resolution)).toVar()
@@ -297,6 +352,7 @@ export class FoliageMaskField {
         surfaceBuffer.element(surfaceBase.add(uint(row))).assign(current)
         textureStore(surfaces[row]!, coord, current)
       })
+      storeSward(coord, rows)
     })().compute(cells)
 
     const region = this.region
@@ -336,8 +392,17 @@ export class FoliageMaskField {
         const surfaceStrokeFlag = regionShape.w
         const plantGain = amount.mul(surfaceStrokeFlag.oneMinus())
         const surfaceGain = amount.mul(surfaceStrokeFlag)
-        const plantCompetition = clamp(plantGain.mul(0.32).oneMinus(), 0, 1)
-        const surfaceCompetition = clamp(surfaceGain.mul(0.9).oneMinus(), 0, 1)
+        // Far gentler than the brush's.
+        //
+        // The stroke kernel's 0.32 and 0.9 are calibrated for a hundred small
+        // overlapping dabs, where the displacement accumulates gradually. A
+        // region lays one decisive pass per channel, so the same numbers apply
+        // a whole recipe's worth of competition in three or four steps: a
+        // moss wash at 0.7 took ninety per cent of the leaf litter under it in
+        // one dispatch, and a floor described as deep litter with moss on it
+        // came out as moss on bare rock.
+        const plantCompetition = clamp(plantGain.mul(0.12).oneMinus(), 0, 1)
+        const surfaceCompetition = clamp(surfaceGain.mul(0.35).oneMinus(), 0, 1)
         const selected = int(regionChannel)
         const one = float(1)
         const zero = float(0)
@@ -372,6 +437,7 @@ export class FoliageMaskField {
         surfaceBuffer.element(surfaceBase.add(uint(row))).assign(current)
         textureStore(surfaces[row]!, coord, current)
       })
+      storeSward(coord, rows)
     })().compute(cells)
   }
 
@@ -460,6 +526,7 @@ export class FoliageMaskField {
     this.disposed = true
     for (const texture of this.weights) texture.dispose()
     for (const texture of this.surfaces) texture.dispose()
+    this.sward.dispose()
   }
 }
 

@@ -637,11 +637,17 @@ export function createFullTerrainMaterial(
     // and it is applied to the terrain's own shaded surface rather than drawn
     // as a second one, which is what lets a stand's litter fade into a
     // hillside over tens of metres instead of ending at a silhouette.
-    const floor = forestFloorBlend(rock, painted.roughness, positionWorld.xz)
+    const floor = forestFloorBlend(
+      rock,
+      painted.roughness,
+      shadedNormal,
+      geometricNormal,
+      positionWorld,
+    )
     material.colorNode = floor.colour
     material.roughnessNode = floor.roughness
-    material.normalNode = shadedNormal.transformDirection(cameraViewMatrix)
-    material.aoNode = cavity
+    material.normalNode = floor.normal.transformDirection(cameraViewMatrix)
+    material.aoNode = cavity.mul(floor.ao)
     material.emissiveNode = emberEmission
   }
 

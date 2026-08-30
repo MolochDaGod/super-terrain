@@ -96,22 +96,47 @@ export interface FoliageRingConfig {
 }
 
 /**
- * Three concentric candidate grids, from a dense near field to a coarse far one.
+ * Four concentric candidate grids, from a dense near field to a coarse far one.
  *
  * The bands overlap slightly and each ring scales its clumps in and out across
  * its overlap, so a blade never appears or vanishes in one frame — it grows.
  * That is cheaper and steadier than dithered cross-fading and it survives
  * temporal antialiasing, which stochastic LOD does not.
+ *
+ * Two invariants hold this table together, and both are easy to break by
+ * editing one number.
+ *
+ * The first is that **each ring's grid must span its own outer radius**. A
+ * ring's candidates live on a `grid × grid` lattice of `cell`-metre spacing
+ * anchored to the camera, so it can only place clumps within `grid × cell / 2`
+ * of the viewer. Raising `outer` past that silently does nothing: the ring
+ * simply has no candidates out there, and the band ends where the lattice does
+ * rather than where the number says.
+ *
+ * The second is that **each ring's inner fade band is the previous ring's outer
+ * fade band** — `inner[i+1] = outer[i] - fadeOut[i]` and `fadeIn[i+1] =
+ * fadeOut[i]` — which is what makes the two shares sum to one across an
+ * overlap. Break it and there is a visible ring of thin or doubled cover at a
+ * fixed distance from the camera, which the eye finds immediately because it
+ * follows the viewer around.
+ *
+ * The reach was roughly 1.4× to 1.5×'d from the first version — 16/50/155/262
+ * metres to 22/78/235/400 — because the transitions were happening well inside
+ * the distance the eye can still resolve individual blades, so a floor visibly
+ * coarsened a few paces ahead of the viewer. Every ring's grid grew with its
+ * range, and the two rings whose cell also grew had their blade counts raised
+ * to keep the blades-per-square-metre calibration each `widthBoost` comment
+ * records. Candidates went from 130k to 196k.
  */
 export const FOLIAGE_RINGS: readonly FoliageRingConfig[] = [
   {
     name: 'near',
     cell: 0.22,
-    grid: 150,
+    grid: 210,
     inner: 0,
-    outer: 16,
+    outer: 22,
     fadeIn: 0,
-    fadeOut: 4,
+    fadeOut: 6,
     blades: 5,
     segments: 4,
     // 5 blades per 0.0484 m² — 103 blades per square metre, the reference every
@@ -122,55 +147,55 @@ export const FOLIAGE_RINGS: readonly FoliageRingConfig[] = [
   },
   {
     name: 'mid',
-    cell: 0.62,
-    grid: 164,
-    inner: 12,
-    outer: 50,
-    fadeIn: 4,
-    fadeOut: 14,
-    blades: 11,
+    cell: 0.72,
+    grid: 218,
+    inner: 16,
+    outer: 78,
+    fadeIn: 6,
+    fadeOut: 20,
+    blades: 14,
     segments: 2,
-    // 28.6 blades per square metre. 103 / 28.6 = 3.6.
-    widthBoost: 3.6,
+    // 27.0 blades per square metre. 103 / 27.0 = 3.83.
+    widthBoost: 3.83,
     heightBoost: 1.06,
-    spread: 0.27,
+    spread: 0.31,
   },
   {
     name: 'far',
-    cell: 1.4,
-    grid: 222,
-    inner: 36,
-    outer: 155,
-    fadeIn: 14,
-    fadeOut: 37,
-    blades: 28,
+    cell: 1.8,
+    grid: 262,
+    inner: 58,
+    outer: 235,
+    fadeIn: 20,
+    fadeOut: 55,
+    blades: 40,
     segments: 1,
-    // 14.3 blades per square metre. 103 / 14.3 = 7.2. Twenty-eight single-quad
+    // 12.35 blades per square metre. 103 / 12.35 = 8.37. Forty single-quad
     // blades in one clump is two triangles each: at this range the per-instance
     // cost dominates, so blades are the cheap half of the coverage budget and
     // width is the expensive one — a wide blade is a visible slab long before a
     // numerous one is a cost.
-    widthBoost: 7.2,
+    widthBoost: 8.37,
     heightBoost: 1.16,
-    spread: 0.6,
+    spread: 0.77,
   },
   {
     name: 'horizon',
-    cell: 3,
-    grid: 178,
-    inner: 118,
-    outer: 262,
-    fadeIn: 37,
-    fadeOut: 62,
-    blades: 40,
+    cell: 4.2,
+    grid: 191,
+    inner: 180,
+    outer: 400,
+    fadeIn: 55,
+    fadeOut: 95,
+    blades: 56,
     segments: 1,
-    // 4.4 blades per square metre. 103 / 4.4 = 23.4. In world units that is a
-    // seventeen-centimetre blade, which sounds absurd until you note that this
-    // ring never draws anything closer than a hundred and eighteen metres,
-    // where it is a single pixel across.
-    widthBoost: 23.4,
+    // 3.17 blades per square metre. 103.3 / 3.17 = 32.54. In world units that is a
+    // twenty-three-centimetre blade, which sounds absurd until you note that
+    // this ring never draws anything closer than a hundred and eighty metres,
+    // where it is a little over one pixel across.
+    widthBoost: 32.54,
     heightBoost: 1.2,
-    spread: 1.25,
+    spread: 1.75,
   },
 ]
 
@@ -362,6 +387,12 @@ function createPopulateKernel(
     const positionX = cellX.add(jitter.x.sub(0.5).mul(cell * 0.94))
     const positionZ = cellZ.add(jitter.y.sub(0.5).mul(cell * 0.94))
 
+    // Where the ground is under this candidate. Zero in the lab, whose floor
+    // is a plane; the terrain's own height everywhere else, sampled from the
+    // same field the stems were planted against so a tuft and the tree beside
+    // it agree.
+    const groundY = ground.sampleHeight(positionX, positionZ).toVar('foliageGroundY')
+
     // Distance in three dimensions, not across the ground.
     //
     // Level of detail is about how large something lands on screen, and a
@@ -369,9 +400,17 @@ function createPopulateKernel(
     // it. Selecting rings by horizontal distance alone put that clump in the
     // finest ring — full near-field density under an aerial view — while
     // everything the viewer was actually looking at fell into the coarsest one.
+    //
+    // The vertical term is the camera's height *above the ground here*, not its
+    // world Y. Those are the same number on the lab's floor and nowhere else:
+    // standing in a forest eighty metres up a hillside, a world-Y term makes
+    // every clump at least eighty metres away, so the near and mid rings — the
+    // two that carry everything within fifty metres of the viewer — can never
+    // fire at all. That is precisely what a forest floor on terrain looked
+    // like: coarse far-ring tufts on bare ground, with nothing near the eye.
     const toCamera = vec3(
       positionX.sub(foliageCameraPosition.x),
-      foliageCameraPosition.y.negate(),
+      groundY.sub(foliageCameraPosition.y),
       positionZ.sub(foliageCameraPosition.z),
     )
     const distance = toCamera.length()
@@ -539,12 +578,6 @@ function createPopulateKernel(
           .add(jitter.x.mul(0.36))
           .mul(ringBoost)
           .mul(fade)
-
-        // Where the ground is under this clump. Zero in the lab, whose floor
-        // is a plane; the terrain's own height everywhere else, sampled from
-        // the same field the stems were planted against so a tuft and the tree
-        // beside it agree.
-        const groundY = ground.sampleHeight(positionX, positionZ).toVar('foliageGroundY')
 
         // Sphere-versus-frustum in world space, with a margin that absorbs the
         // single frame of latency between the CPU publishing the planes and

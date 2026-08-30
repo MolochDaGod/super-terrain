@@ -178,6 +178,38 @@ export function TerrainGroundCover({
           extent: system.mask.region.extent.value.toArray(),
         }
       },
+      /** The painted weights at one world position, for diagnosis. */
+      sampleMask: async (x: number, z: number) => {
+        const resolution = system.mask.resolution
+        const u = (x - system.mask.originX) / system.mask.fieldSize + 0.5
+        const v = (z - system.mask.originZ) / system.mask.fieldSize + 0.5
+        const column = Math.floor(u * resolution)
+        const row = Math.floor(v * resolution)
+        if (column < 0 || row < 0 || column >= resolution || row >= resolution) {
+          return { outside: true, u, v }
+        }
+        const read = async (attribute: unknown, rows: number) => {
+          const buffer = await (
+            renderer as unknown as {
+              getArrayBufferAsync(a: unknown): Promise<ArrayBuffer>
+            }
+          ).getArrayBufferAsync(attribute)
+          const values = new Float32Array(buffer)
+          const base = (row * resolution + column) * rows * 4
+          return [...values.slice(base, base + rows * 4)].map(
+            (value) => Number(value.toFixed(3)),
+          )
+        }
+        return {
+          u,
+          v,
+          plants: await read((system.mask.buffer as { value: unknown }).value, 3),
+          surfaces: await read(
+            (system.mask.surfaceBuffer as { value: unknown }).value,
+            1,
+          ),
+        }
+      },
       mask: async () => {
         const buffer = await (
           renderer as unknown as {
@@ -332,54 +364,77 @@ interface RegionChannel {
   noiseAmount: number
 }
 
+/**
+ * A recipe entry that covers the whole field rather than scattering over it.
+ *
+ * The floor recipes carry both, and they mean different things: `count: 1,
+ * radius: 600` is how the lab writes "this species is everywhere at this
+ * level", while `count: 26, radius: [10, 20]` is a scatter of colonies. Reading
+ * the two as one kind is what made the first pass average a fern's colony
+ * radius with a six-hundred-metre wash and give it a four-hundred-and-ninety
+ * metre patch scale — which is no patches at all, over a field a fifth that
+ * wide.
+ */
+function isFieldWash(count: number, meanRadius: number): boolean {
+  return count <= 2 && meanRadius >= 150
+}
+
 function floorChannels(recipe: FoliageFloorRecipe): RegionChannel[] {
   const channels: RegionChannel[] = []
 
   for (const wash of recipe.surfaces) {
-    // A wash covers the whole floor; patches are a partial second pass. Their
-    // flows are averaged into one weight because the region kernel lays a
-    // single field per channel and the patch structure comes from its noise.
     const patchFlow = wash.flow ? (wash.flow[0] + wash.flow[1]) / 2 : 0
-    const patchShare = wash.count ? Math.min(1, wash.count / 24) : 0
-    const weight = Math.min(1, (wash.fill ?? 0) + patchFlow * patchShare)
+    const fill = wash.fill ?? 0
+    // A layer with a wash under it is continuous and its patches only thicken
+    // it; a layer that is patches alone is a scuff and stays one.
+    const weight = Math.min(1, fill + patchFlow * (fill > 0 ? 0.5 : 0.3))
     if (weight <= 0.01) continue
+    const radius = wash.radius ? (wash.radius[0] + wash.radius[1]) / 2 : 20
     channels.push({
       channel: foliageSurfaceIndex(wash.surface),
       layer: 'surface',
       weight,
-      noiseScale: wash.radius ? (wash.radius[0] + wash.radius[1]) : 40,
+      noiseScale: Math.min(90, Math.max(10, radius * 1.6)),
       // A field-wide wash is the floor itself and should be continuous; a
       // patchy layer over it is what the noise is for.
-      noiseAmount: wash.fill && wash.fill > 0.6 ? 0.18 : 0.5,
+      noiseAmount: fill > 0.6 ? 0.18 : 0.5,
     })
   }
 
-  const byPlant = new Map<string, { flow: number; radius: number; count: number }>()
+  const byPlant = new Map<
+    string,
+    { base: number; patchFlow: number; radius: number }
+  >()
   for (const colony of recipe.colonies) {
     const flow = (colony.flow[0] + colony.flow[1]) / 2
     const radius = (colony.radius[0] + colony.radius[1]) / 2
-    const existing = byPlant.get(colony.species)
-    if (existing) {
-      existing.flow = Math.max(existing.flow, flow)
-      existing.radius = (existing.radius + radius) / 2
-      existing.count += colony.count
+    const entry = byPlant.get(colony.species)
+      ?? { base: 0, patchFlow: 0, radius: 0 }
+    if (isFieldWash(colony.count, radius)) {
+      entry.base = Math.max(entry.base, flow)
     } else {
-      byPlant.set(colony.species, { flow, radius, count: colony.count })
+      entry.patchFlow = Math.max(entry.patchFlow, flow)
+      entry.radius = entry.radius === 0 ? radius : (entry.radius + radius) / 2
     }
+    byPlant.set(colony.species, entry)
   }
   for (const [species, entry] of byPlant) {
-    // How much of the floor the colonies of this plant would have covered.
-    // A single huge dab — the lab's way of writing "this one is everywhere" —
-    // saturates it, which is the intent.
-    const share = Math.min(1, (entry.count * entry.radius * entry.radius) / (150 * 150))
-    const weight = Math.min(0.95, entry.flow * (0.35 + 0.65 * share))
+    // The colony flow is what the weight reaches *inside* a colony, and the
+    // break-up noise is what decides where the colonies are — so it is added
+    // near enough in full rather than diluted by a coverage estimate. Diluting
+    // it is what produced a floor with the right species list on it and a
+    // tenth of the plants.
+    const weight = Math.min(0.95, entry.base + entry.patchFlow * 0.8)
     if (weight <= 0.01) continue
     channels.push({
       channel: foliageSpeciesIndex(species as never),
       layer: 'plants',
       weight,
-      noiseScale: Math.max(8, entry.radius * 1.6),
-      noiseAmount: 0.55,
+      noiseScale: entry.radius > 0 ? Math.max(8, entry.radius * 1.5) : 34,
+      // A species with a wash under it is present everywhere and merely
+      // thicker in places; one that exists only as colonies is absent between
+      // them, and that difference is the whole structure of a forest floor.
+      noiseAmount: entry.base > 0.05 ? 0.45 : 0.7,
     })
   }
 

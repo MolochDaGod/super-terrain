@@ -1,7 +1,7 @@
 import { MeshPhysicalNodeMaterial } from 'three/webgpu'
 import type { Texture } from 'three/webgpu'
 import * as TSL from 'three/tsl'
-import { FOLIAGE_SPECIES } from './foliageSpecies'
+import { AGGREGATE_COLOURS } from './foliageSpecies'
 import { FOLIAGE_SURFACES } from './foliageSurfaces'
 import type { FoliageMaskField } from './FoliageMaskField'
 import { FOLIAGE_INSTANCED_RANGE } from './FoliagePopulation'
@@ -36,20 +36,6 @@ const {
   vec4,
 } = TSL as unknown as Record<string, ShaderValue>
 
-/**
- * What one species looks like when you cannot resolve its blades any more.
- *
- * Averaged from the same sheath and tip colours the blade material shades with,
- * so the canopy the far field falls back to is the same green the near field
- * is made of. Any drift between the two shows up as a visible ring on the
- * ground at the range where the last instanced ring gives out.
- */
-const AGGREGATE_COLOURS = FOLIAGE_SPECIES.map((species) => [
-  species.base[0] * 0.4 + species.tip[0] * 0.6,
-  species.base[1] * 0.4 + species.tip[1] * 0.6,
-  species.base[2] * 0.4 + species.tip[2] * 0.6,
-] as const)
-
 /** Roughness each ground layer reads at when it is dry, in channel order. */
 export const SURFACE_ROUGHNESS = FOLIAGE_SURFACES.map((surface) => surface.roughness)
 
@@ -62,7 +48,7 @@ export const SURFACE_ROUGHNESS = FOLIAGE_SURFACES.map((surface) => surface.rough
  * visibly darker than the grass it is standing in for, and the seam shows as a
  * dark ring at the range where the last blades give out.
  */
-const CANOPY_GAIN = 0.88
+export const CANOPY_GAIN = 0.88
 
 export interface FoliageGroundTextures {
   map: Texture
@@ -162,7 +148,7 @@ export const mossed = /*@__PURE__*/ TSL.Fn((
  * across receives almost none, and that difference is what stops a floor of
  * dead leaves from reading as a printed texture on a flat plane.
  */
-const litterHeight = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
+export const litterHeight = /*@__PURE__*/ TSL.Fn(([ground]: [ShaderValue]) => {
   return valueNoise2(ground.mul(20)).mul(0.4)
     .add(valueNoise2(ground.mul(11).add(vec2(37.1, 11.7))).mul(0.36))
     .add(valueNoise2(ground.mul(6.2).add(vec2(5.3, 91.2))).mul(0.24))

@@ -54,11 +54,29 @@ export interface FoliageWindSettings {
   heading: number
 }
 
+/**
+ * Still air with a breeze in it, rather than the gale this used to open on.
+ *
+ * Three of the four numbers were too high and only one of them was strength.
+ * What reads as "fast" in moving foliage is almost never how far a blade bends
+ * — that is amplitude, and the eye accepts a wide range of it — but how often
+ * it changes direction. Two terms drive that here and both were at or near
+ * their maximum: `gustSpeed`, how quickly a gust front crosses the ground, and
+ * `flutter`, the per-blade jitter riding on top of the gust field.
+ *
+ * A gust front travelling 1.15 in a 16-metre gust field cycles a given blade
+ * about every fourteen seconds, which would be fine on its own; full flutter on
+ * top of it is what turned that into a shimmer. Slowing the front, widening the
+ * field so each gust takes longer to pass, and halving the flutter gives air
+ * that is clearly moving and is not distracting to work in front of — which
+ * matters, because this is an editor and the foliage is on screen the whole
+ * time somebody is doing something else.
+ */
 export const DEFAULT_FOLIAGE_WIND: FoliageWindSettings = {
-  strength: 0.42,
-  gustScale: 16,
-  gustSpeed: 1.15,
-  flutter: 1,
+  strength: 0.3,
+  gustScale: 24,
+  gustSpeed: 0.34,
+  flutter: 0.45,
   heading: 0.62,
 }
 

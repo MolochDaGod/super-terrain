@@ -139,11 +139,10 @@ export function TerrainScene({
       <EditorCamera terrain={terrain} editor={editor} />
       <TerrainRenderPipeline
         mode={renderMode}
-        // The forest workspace's chain: atmospheric haze, sun shafts against a
-        // depth map, a cheap bloom and its grade. It is also the shorter of the
-        // two — no SMAA resolve, no separate valley-fog march — which is most
-        // of why it is the faster one.
-        look="tree"
+        // The forest workspace's chain — atmospheric haze, sun shafts against a
+        // depth map, and its grade — with the two constants that are
+        // interior-scale swapped for open-country ones. See `PostLook`.
+        look="wooded-landscape"
         exposure={LANDSCAPE_EXPOSURE}
         onWarmupReady={publishWarmup}
         onCompilingChange={onCompilingChange}
@@ -162,4 +161,4 @@ export function TerrainScene({
  * A valley under the same sun is not: most of the frame is directly lit rock
  * and sky, and an interior's exposure puts both at the top of the curve.
  */
-const LANDSCAPE_EXPOSURE = 0.94
+const LANDSCAPE_EXPOSURE = 1.02
