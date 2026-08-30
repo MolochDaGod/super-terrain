@@ -13,6 +13,7 @@ import {
   Box3,
   Color,
   Euler,
+  Frustum,
   Group,
   IcosahedronGeometry,
   InstancedBufferAttribute,
@@ -28,6 +29,7 @@ import {
   Sphere,
   SphereGeometry,
   Vector3,
+  type Camera,
   type Object3D,
   type Texture,
 } from 'three/webgpu'
@@ -392,15 +394,12 @@ function ReadyTreeForestAssetView({
       name={`forest-prototype-${asset.parameters.species}`}
       visible={ready}
     >
-      {renderChunks.map((chunk) => (
-        <ForestWoodInstances
-          key={`wood:${chunk.key}`}
-          geometry={woodGeometry}
-          material={materialLease.materials.bark}
-          instances={chunk.instances}
-          castShadow={WOOD_CASTS_SHADOW}
-        />
-      ))}
+      <ForestWoodInstances
+        geometry={woodGeometry}
+        material={materialLease.materials.bark}
+        instances={instances}
+        castShadow={WOOD_CASTS_SHADOW}
+      />
       {selectionProxyInstances !== null && (
         <ForestSelectionInstances
           asset={asset}
@@ -451,8 +450,18 @@ function ReadyTreeForestAssetView({
  * Spatial batches let Three reject whole stands against both the view frustum
  * and each shadow cascade. This changes only submission granularity: every
  * tree keeps the same geometry, material, transform and shadow behaviour.
+ *
+ * A fixed world grid is a poor partition for prototypes. Each species/LOD has
+ * only a sparse subset of the stand, so 36 m cells produced hundreds of one-
+ * tree draws; making the cells larger then admitted large amounts of geometry
+ * outside the frustum. A balanced spatial partition gives every draw useful
+ * occupancy while retaining a tight conservative bound.
  */
-const FOREST_CHUNK_SIZE = 36
+const FOREST_CHUNK_CAPACITY = (() => {
+  if (typeof location === 'undefined') return 8
+  const requested = Number(new URLSearchParams(location.search).get('forestChunkInstances'))
+  return Number.isInteger(requested) && requested > 0 ? requested : 8
+})()
 
 interface ForestRenderChunk {
   key: string
@@ -465,16 +474,31 @@ function forestRenderChunks(
   height: number,
   crownRadius: number,
 ): ForestRenderChunk[] {
-  const chunks = new Map<string, ForestTreeInstance[]>()
-  for (const instance of instances) {
-    const key = `${Math.floor(instance.position[0] / FOREST_CHUNK_SIZE)}:` +
-      `${Math.floor(instance.position[2] / FOREST_CHUNK_SIZE)}`
-    const chunk = chunks.get(key)
-    if (chunk) chunk.push(instance)
-    else chunks.set(key, [instance])
+  const partitions: ForestTreeInstance[][] = []
+  const partition = (candidates: ForestTreeInstance[]): void => {
+    if (candidates.length <= FOREST_CHUNK_CAPACITY) {
+      partitions.push(candidates)
+      return
+    }
+    let minX = Number.POSITIVE_INFINITY
+    let maxX = Number.NEGATIVE_INFINITY
+    let minZ = Number.POSITIVE_INFINITY
+    let maxZ = Number.NEGATIVE_INFINITY
+    for (const instance of candidates) {
+      minX = Math.min(minX, instance.position[0])
+      maxX = Math.max(maxX, instance.position[0])
+      minZ = Math.min(minZ, instance.position[2])
+      maxZ = Math.max(maxZ, instance.position[2])
+    }
+    const axis = maxX - minX >= maxZ - minZ ? 0 : 2
+    candidates.sort((left, right) => left.position[axis] - right.position[axis])
+    const middle = Math.ceil(candidates.length * 0.5)
+    partition(candidates.slice(0, middle))
+    partition(candidates.slice(middle))
   }
+  partition([...instances])
 
-  return [...chunks].map(([key, chunkInstances]) => {
+  return partitions.map((chunkInstances, index) => {
     const box = new Box3().makeEmpty()
     const minimum = new Vector3()
     const maximum = new Vector3()
@@ -496,7 +520,7 @@ function forestRenderChunks(
       box.expandByPoint(maximum)
     }
     return {
-      key,
+      key: String(index),
       instances: chunkInstances,
       bounds: box.getBoundingSphere(new Sphere()),
     }
@@ -522,19 +546,59 @@ function ForestWoodInstances({
   useLayoutEffect(() => {
     const target = mesh.current
     if (!target) return
-    const matrix = new Matrix4()
-    const tint = new Color()
-    for (let index = 0; index < instances.length; index += 1) {
-      const instance = instances[index]!
-      placementMatrix(instance, matrix)
-      target.setMatrixAt(index, matrix)
-      target.setColorAt(index, trunkTint(instance, tint))
+    const matrices = instances.map((instance) => placementMatrix(instance, new Matrix4()))
+    const colours = instances.map((instance) => trunkTint(instance, new Color()))
+    const localBounds = geometry.boundingSphere?.clone() ?? new Sphere()
+    if (!geometry.boundingSphere) geometry.computeBoundingSphere()
+    localBounds.copy(geometry.boundingSphere!)
+    const projection = new Matrix4()
+    const frustum = new Frustum()
+    const worldBounds = new Sphere()
+    const viewCentre = new Vector3()
+    const depths = new Float64Array(matrices.length)
+    let activeIndices: number[] = []
+
+    const compactForCamera = (camera: Camera): void => {
+      projection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+      frustum.setFromProjectionMatrix(
+        projection,
+        camera.coordinateSystem,
+        camera.reversedDepth,
+      )
+      const visibleIndices: number[] = []
+      for (let index = 0; index < matrices.length; index += 1) {
+        worldBounds.copy(localBounds).applyMatrix4(matrices[index]!)
+        if (!frustum.intersectsSphere(worldBounds)) continue
+        viewCentre.copy(worldBounds.center).applyMatrix4(camera.matrixWorldInverse)
+        depths[index] = viewCentre.z
+        visibleIndices.push(index)
+      }
+      // Opaque instances are otherwise submitted in layout order. A forest
+      // has deep layers of overlapping trunks and branches, so random order
+      // defeats early depth rejection and shades the same pixel repeatedly.
+      // Camera-space z is negative in front of the view: descending order is
+      // nearest first for both perspective views and orthographic cascades.
+      visibleIndices.sort((left, right) => depths[right]! - depths[left]!)
+      if (
+        visibleIndices.length === activeIndices.length &&
+        visibleIndices.every((index, slot) => activeIndices[slot] === index)
+      ) return
+      for (let slot = 0; slot < visibleIndices.length; slot += 1) {
+        const source = visibleIndices[slot]!
+        target.setMatrixAt(slot, matrices[source]!)
+        target.setColorAt(slot, colours[source]!)
+      }
+      target.count = visibleIndices.length
+      target.instanceMatrix.needsUpdate = true
+      if (target.instanceColor) target.instanceColor.needsUpdate = true
+      activeIndices = visibleIndices
     }
-    target.count = instances.length
-    target.instanceMatrix.needsUpdate = true
-    if (target.instanceColor) target.instanceColor.needsUpdate = true
-    target.computeBoundingSphere()
-  }, [capacity, instances])
+
+    const previousBeforeRender = target.onBeforeRender
+    target.onBeforeRender = (_renderer, _scene, camera) => compactForCamera(camera)
+    target.count = 0
+    return () => { target.onBeforeRender = previousBeforeRender }
+  }, [capacity, geometry, instances])
   return (
     <instancedMesh
       ref={mesh}
@@ -542,7 +606,7 @@ function ForestWoodInstances({
       args={[geometry, material, capacity]}
       castShadow={castShadow}
       receiveShadow
-      frustumCulled
+      frustumCulled={false}
     />
   )
 }

@@ -172,9 +172,16 @@ for (let attempt = 0; attempt < 2400; attempt += 1) {
 console.log(JSON.stringify({ phase: 'ready', ...buildState }))
 
 const inventory = await evaluate(client, `(async () => {
-  const { gl, scene, camera } = globalThis.__meshtree
+  const { gl, scene, camera, controls } = globalThis.__meshtree
   camera.position.set(18, 5.5, 24)
-  camera.lookAt(0, 7, 0)
+  if (controls) {
+    controls.target.set(0, 7, 0)
+    controls.enableDamping = false
+    controls.update()
+    controls.enabled = false
+  } else {
+    camera.lookAt(0, 7, 0)
+  }
   camera.updateMatrixWorld(true)
   for (let i = 0; i < 90; i += 1) await new Promise(requestAnimationFrame)
   const names = {}
@@ -197,9 +204,24 @@ console.log(JSON.stringify({ phase: 'inventory', ...inventory }))
 
 const scenarioExpression = (scenario, frames) => `(async () => {
   const { gl, scene } = globalThis.__meshtree
-  const profile = globalThis.__cdpForestProfile ??= { visibility: new Map(), shadowEnabled: gl.shadowMap.enabled }
+  const profile = globalThis.__cdpForestProfile ??= {
+    visibility: new Map(),
+    materialLights: new Map(),
+    shadowEnabled: gl.shadowMap.enabled,
+  }
+  profile.materialLights ??= new Map()
   if (profile.visibility.size === 0) scene.traverse((object) => profile.visibility.set(object, object.visible))
+  if (profile.materialLights.size === 0) scene.traverse((object) => {
+    if (object.material && 'lights' in object.material) {
+      profile.materialLights.set(object.material, object.material.lights)
+    }
+  })
   for (const [object, visible] of profile.visibility) object.visible = visible
+  for (const [material, lights] of profile.materialLights) {
+    if (material.lights === lights) continue
+    material.lights = lights
+    material.needsUpdate = true
+  }
   gl.shadowMap.enabled = profile.shadowEnabled
 
   const scenario = ${JSON.stringify(scenario)}
@@ -215,6 +237,24 @@ const scenarioExpression = (scenario, frames) => `(async () => {
     scene.traverse((object) => { if (object.isMesh || object.isPoints || object.isLine) object.visible = false })
   } else if (scenario === 'no-shadows') {
     gl.shadowMap.enabled = false
+  } else if (scenario === 'leaf-only-lit' || scenario === 'leaf-only-unlit') {
+    gl.shadowMap.enabled = false
+    scene.traverse((object) => {
+      if (object.isMesh && !object.name.startsWith('leaf-cards')) object.visible = false
+      if (scenario === 'leaf-only-unlit' && object.name.startsWith('leaf-cards') && object.material) {
+        object.material.lights = false
+        object.material.needsUpdate = true
+      }
+    })
+  } else if (scenario === 'wood-only-lit' || scenario === 'wood-only-unlit') {
+    gl.shadowMap.enabled = false
+    scene.traverse((object) => {
+      if (object.isMesh && object.name !== 'forest-instanced-wood') object.visible = false
+      if (scenario === 'wood-only-unlit' && object.name === 'forest-instanced-wood' && object.material) {
+        object.material.lights = false
+        object.material.needsUpdate = true
+      }
+    })
   }
 
   for (let i = 0; i < 30; i += 1) await new Promise(requestAnimationFrame)
@@ -265,6 +305,12 @@ const results = []
 const scenarios = cpuOnly
   ? []
   : (process.env.MESHTERRAIN_SCENARIOS ?? 'baseline,no-trees,no-ground-foliage,no-shadows,post-only').split(',')
+if (scenarios.length > 0) {
+  // HMR can replace every scene object while the page-global profile state
+  // still points at the retired graph. Capture the authoritative live graph
+  // afresh for each harness run.
+  await evaluate(client, `delete globalThis.__cdpForestProfile`)
+}
 for (const scenario of scenarios) {
   const sample = await evaluate(client, scenarioExpression(scenario, 60))
   results.push({
@@ -283,6 +329,10 @@ if (!cpuOnly) {
     const profile = globalThis.__cdpForestProfile
     if (!profile) return
     for (const [object, visible] of profile.visibility) object.visible = visible
+    for (const [material, lights] of profile.materialLights) {
+      material.lights = lights
+      material.needsUpdate = true
+    }
     gl.shadowMap.enabled = profile.shadowEnabled
   })()`)
 }

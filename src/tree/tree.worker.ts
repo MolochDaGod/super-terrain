@@ -4,6 +4,7 @@ import {
   compileProceduralTree,
   treeAssetTransferables,
 } from './generator/compileTree'
+import { optimizeTreeMeshSubmission } from './generator/optimizeTreeMesh'
 import type {
   ProceduralTreeAsset,
   TreeEnvironment,
@@ -22,7 +23,7 @@ export type TreeWorkerResponse =
 
 const workerScope = self as unknown as DedicatedWorkerGlobalScope
 
-workerScope.onmessage = (event: MessageEvent<TreeWorkerRequest>) => {
+workerScope.onmessage = async (event: MessageEvent<TreeWorkerRequest>) => {
   try {
     const asset = compileProceduralTree(
       event.data.parameters,
@@ -32,6 +33,7 @@ workerScope.onmessage = (event: MessageEvent<TreeWorkerRequest>) => {
         workerScope.postMessage(response)
       },
     )
+    await optimizeTreeMeshSubmission(asset)
     const response: TreeWorkerResponse = { kind: 'complete', asset }
     workerScope.postMessage(response, treeAssetTransferables(asset))
   } catch (error) {
