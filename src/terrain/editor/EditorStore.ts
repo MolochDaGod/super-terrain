@@ -131,6 +131,15 @@ export interface EditorSnapshot {
    * cloud photograph behind the ridges.
    */
   environmentLook: TerrainEnvironmentLook
+  /**
+   * Sun shadows, cascades and all.
+   *
+   * Three 2048² depth passes a frame are the single largest fixed cost in the
+   * full-quality rig, so being able to take them out is what makes it possible
+   * to tell a lighting problem apart from a shadow one — and to keep authoring
+   * responsive on a machine that cannot afford them.
+   */
+  shadows: boolean
   cameraMode: CameraMode
   uiViewMode: UiViewMode
   dprMode: DprMode
@@ -202,6 +211,7 @@ const INITIAL_EDITOR_STATE: EditorSnapshot = {
   openSection: 'modifiers',
   renderMode: 'full',
   environmentLook: 'wooded-landscape',
+  shadows: true,
   cameraMode: 'orbit',
   uiViewMode: 'editor',
   dprMode: 'medium',

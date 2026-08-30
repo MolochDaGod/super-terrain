@@ -375,8 +375,10 @@ function createFullEnvironment(
   // Cascades. One shadow map stretched over kilometres gives metre-wide texels
   // and loses every contact shadow; four cascades keep the near field sharp
   // while still reaching the far ridges.
-  // The node binds itself to the active camera on first setup and refits its
-  // frustums every frame, so it must not be driven manually from here.
+  // The node refits its frustums every frame from whichever camera it is
+  // pointed at, so the only thing driven manually from here is which camera
+  // that is and how deep each cascade's shadow camera reaches. See
+  // `fitCascadeDepth` and the rebind in `update`.
   let cascades: CSMShadowNode | undefined
   if (sun.castShadow && (options.cascadedShadows ?? true)) {
     cascades = new CSMShadowNode(sun, {
@@ -394,6 +396,38 @@ function createFullEnvironment(
     shadowCamera.right = 1_200
     shadowCamera.top = 1_200
     shadowCamera.bottom = -1_200
+  }
+
+  /**
+   * Gives every cascade's shadow camera a depth range that reaches its casters.
+   *
+   * CSM builds its cascade lights by cloning the source light's shadow, and a
+   * `DirectionalLightShadow` reaches 500 units out of the box. It then parks
+   * each cascade light `lightMargin` beyond the top of that cascade's box along
+   * the light direction, so the shortest distance from the light to anything it
+   * could shadow is the margin itself. On this rig the margin alone is 800
+   * metres and the far box is kilometres across: every caster in the world sat
+   * behind the far plane, all three maps came back empty, and the landscape
+   * rendered fully lit with `castShadow` set on all 138 sections. The forest
+   * workspace never hit it — 120 metres of margin over boxes a few hundred
+   * metres wide fits inside 500 with room to spare, which is exactly why the
+   * tree editor's cascades looked right and the same code here cast nothing.
+   *
+   * Sized per cascade rather than once for the widest, because the near
+   * cascade's bias is a fraction of its own depth range: giving it the far
+   * cascade's kilometres would trade the missing shadows for peter-panning.
+   * A cascade's light-space depth cannot exceed its frustum's own diagonal,
+   * which is the box width `_updateShadowBounds` already derived from it.
+   */
+  const fitCascadeDepth = (): void => {
+    for (const light of cascades?.lights ?? []) {
+      const shadowCamera = light.shadow?.camera
+      if (!shadowCamera) continue
+      const boxWidth = shadowCamera.right - shadowCamera.left
+      shadowCamera.near = 1
+      shadowCamera.far = rig.shadow.lightMargin + boxWidth
+      shadowCamera.updateProjectionMatrix()
+    }
   }
 
   const anchor = new Vector3()
@@ -472,9 +506,33 @@ function createFullEnvironment(
       if (cascadesCreated) shadowDebug.cascadeChanges += 1
 
       shadowFrame += 1
-      if (projectionChanged && cascades?.camera) cascades.updateFrustums()
-      if (cameraChanged || terrainChanged || cascadesCreated) {
-        invalidateShadowMaps(terrainChanged || cascadesCreated || projectionChanged)
+      // Whose frustum the cascades are fitted to.
+      //
+      // CSM binds itself, once, to whichever camera first compiles a lit
+      // material — and in this workspace that is not the viewer's. The water's
+      // planar reflector renders the scene from a camera mirrored through the
+      // water plane before the main pass ever runs, so the node latched onto
+      // that one and spent every frame afterwards fitting its boxes to a
+      // frustum pointing into the reflected world. The tree workspace has no
+      // water, which is the other half of why its cascades were fine.
+      //
+      // Only after the node has built its lights: `setup()` initialises them
+      // exactly once, and only while `camera` is still null, so pinning this
+      // any earlier would leave it with no cascades at all.
+      const cascadesRebound =
+        cascades !== undefined &&
+        cascades.lights.length > 0 &&
+        cascades.camera !== camera
+      if (cascadesRebound) cascades!.camera = camera
+
+      if (projectionChanged || cascadesRebound) cascades?.updateFrustums()
+      // `updateFrustums` resizes every cascade box, and the depth range has to
+      // follow it.
+      if (projectionChanged || cascadesRebound || cascadesCreated) fitCascadeDepth()
+      if (cameraChanged || terrainChanged || cascadesCreated || cascadesRebound) {
+        invalidateShadowMaps(
+          terrainChanged || cascadesCreated || cascadesRebound || projectionChanged,
+        )
       }
 
       previousCameraWorld.copy(camera.matrixWorld)

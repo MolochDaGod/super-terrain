@@ -48,7 +48,7 @@ export function TerrainScene({
   trees,
   foliage,
 }: TerrainSceneProps) {
-  const { environmentLook, renderMode, uiViewMode } = useEditorSnapshot(editor)
+  const { environmentLook, renderMode, shadows, uiViewMode } = useEditorSnapshot(editor)
   useGraniteRockRevision(terrain)
   const hasGraniteRocks = terrain.rocks.count > 0
   const showEditorOverlays = uiViewMode === 'editor'
@@ -91,6 +91,7 @@ export function TerrainScene({
         mode={renderMode}
         config={terrain.config}
         look={environmentLook}
+        shadows={shadows}
       />
       <HorizonProxy
         terrain={terrain}

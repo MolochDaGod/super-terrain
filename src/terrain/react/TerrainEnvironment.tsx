@@ -28,12 +28,20 @@ export function TerrainEnvironment({
   mode,
   config,
   look = 'terrain',
+  shadows = true,
   updatePriority = 0.5,
 }: {
   mode: TerrainRenderMode
   config: TerrainConfig
   /** Which light rig to build. See `TerrainEnvironmentLook`. */
   look?: TerrainEnvironmentLook
+  /**
+   * Sun shadows. Turning them off rebuilds the rig without a shadow-casting
+   * light, which is the only way the cascade passes actually stop costing
+   * anything — leaving the maps enabled and the meshes flagged still renders
+   * them.
+   */
+  shadows?: boolean
   /**
    * The terrain post stack owns rendering at priority 1, so its environment
    * update runs just ahead of it. Standalone workspaces use priority 0 to keep
@@ -55,8 +63,8 @@ export function TerrainEnvironment({
     skyTexture.needsUpdate = true
   }, [skyTexture])
   const environment = useMemo(
-    () => createTerrainEnvironment(mode, config, { skyTexture, look }),
-    [config, look, mode, skyTexture],
+    () => createTerrainEnvironment(mode, config, { skyTexture, look, shadows }),
+    [config, look, mode, shadows, skyTexture],
   )
 
   useEffect(() => {

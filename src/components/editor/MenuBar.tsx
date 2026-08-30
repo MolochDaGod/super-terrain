@@ -340,6 +340,18 @@ export function EditorMenuBar({
               })
             }
           />
+          <MenuItem
+            label="Sun shadows"
+            checked={snapshot.shadows}
+            onSelect={() =>
+              editor.patch({
+                shadows: !snapshot.shadows,
+                status: snapshot.shadows
+                  ? 'Sun shadows off · cascade passes skipped'
+                  : 'Sun shadows on · three cascades',
+              })
+            }
+          />
           <MenuSeparator />
           <MenuGroupLabel>Rendering</MenuGroupLabel>
           {QUALITY_OPTIONS.map(({ value, label }) => (
