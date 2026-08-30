@@ -1,4 +1,4 @@
-import { Group, Mesh, PlaneGeometry } from 'three/webgpu'
+import { Group, Matrix4, Mesh, PlaneGeometry } from 'three/webgpu'
 import type {
   Camera,
   MeshPhysicalNodeMaterial,
@@ -94,6 +94,11 @@ export class FoliageSystem {
   private readonly groundGeometry: PlaneGeometry
   private pendingSeed: FoliagePaintStroke[] = []
   private seededRecipe: string | null = null
+  private populationDirty = true
+  private density = Number.NaN
+  private readonly populationCameraWorld = new Matrix4()
+  private readonly populationProjection = new Matrix4()
+  private hasPopulationView = false
   private disposed = false
 
   constructor(groundTextures: FoliageGroundTextures) {
@@ -126,7 +131,12 @@ export class FoliageSystem {
   }
 
   setDensity(value: number): void {
-    foliageDensity.value = Math.min(Math.max(value, 0), 1)
+    const next = Math.min(Math.max(value, 0), 1)
+    if (next !== this.density) {
+      this.density = next
+      this.populationDirty = true
+    }
+    foliageDensity.value = next
   }
 
   setWind(settings: FoliageWindSettings): void {
@@ -175,6 +185,7 @@ export class FoliageSystem {
   clear(renderer: Renderer): void {
     if (this.disposed) return
     this.pendingSeed = []
+    this.populationDirty = true
     // Erasing thins both fields at once, so one dispatch does it.
     this.mask.fill(renderer, 0, 'erase')
   }
@@ -194,11 +205,13 @@ export class FoliageSystem {
     for (let index = 0; index < batch; index += 1) {
       this.mask.paint(renderer, this.pendingSeed[index]!)
     }
+    this.populationDirty = true
     this.pendingSeed = this.pendingSeed.slice(batch)
   }
 
   paint(renderer: Renderer, stroke: FoliagePaintStroke): void {
     this.mask.paint(renderer, stroke)
+    this.populationDirty = true
   }
 
   fill(
@@ -208,6 +221,7 @@ export class FoliageSystem {
     layer: FoliagePaintLayer = 'plants',
   ): void {
     this.mask.fill(renderer, species, mode, layer)
+    this.populationDirty = true
   }
 
   /** Call once per frame, before the scene is submitted. */
@@ -219,8 +233,17 @@ export class FoliageSystem {
   ): void {
     if (this.disposed) return
     updateFoliageRuntime(camera, elapsedSeconds, viewportHeight)
+    const viewChanged = !this.hasPopulationView ||
+      !this.populationCameraWorld.equals(camera.matrixWorld) ||
+      !this.populationProjection.equals(camera.projectionMatrix)
+    if (!this.populationDirty && !viewChanged) return
+
     runFoliagePopulation(renderer, this.rings)
     runFoliageDebris(renderer, this.debris)
+    this.populationCameraWorld.copy(camera.matrixWorld)
+    this.populationProjection.copy(camera.projectionMatrix)
+    this.hasPopulationView = true
+    this.populationDirty = false
   }
 
   setVisible(visible: boolean): void {

@@ -25,12 +25,13 @@ import type { SunDepthMap } from './sunDepthMap'
 /** Marching steps. Enough that the jitter dissolves the banding; few enough to be cheap. */
 const STEPS = 32
 
-/** A small rotated cross. Four taps is enough to turn a binary test into a ramp. */
+/**
+ * Two balanced hardware-PCF samples. Each comparison bilinearly filters a 2x2
+ * depth footprint, giving the march eight softened taps for two instructions.
+ */
 const PCF_TAPS = [
   [-0.94, 0.34],
-  [0.34, 0.94],
   [0.94, -0.34],
-  [-0.34, -0.94],
 ] as const
 
 /**
@@ -151,7 +152,7 @@ export function volumetricGodrays(
       pow(gg.add(1).sub(g.mul(cosTheta).mul(2)).max(1e-4), float(1.5)).mul(12.5663706),
     ).toVar('godrayPhase')
 
-    // A per-pixel offset, so the twenty-four slices land at different depths in
+    // A per-pixel offset, so the slices land at different depths in
     // neighbouring pixels and read as noise rather than as concentric shells.
     const jitter = interleavedGradientNoise(screenCoordinate).toVar('godrayJitter')
     const scattered = float(0).toVar('godrayScattered')
@@ -173,23 +174,19 @@ export function volumetricGodrays(
         .mul(bounds(shadowUv.x, 1))
         .mul(bounds(0, shadowUv.y))
         .mul(bounds(shadowUv.y, 1))
-      // Four taps on a small rotated cross rather than one.
+      // Two hardware-PCF taps on a rotated axis rather than scalar reads.
       //
-      // A single tap makes the occlusion test binary, so the per-pixel step
-      // jitter that is supposed to dissolve the slicing instead turns every
-      // shadow boundary into dither: neighbouring pixels sample at different
-      // depths and get different all-or-nothing answers. Averaging four
-      // neighbours turns that into a gradient, which is what the jitter can
-      // actually hide.
+      // Each lookup is already a bilinear 2x2 depth comparison, so the pair
+      // covers eight texels. That is a smoother footprint than four unfiltered
+      // scalar reads while issuing half as many texture instructions.
       //
-      // Explicit level throughout: an implicit-LOD sample inside a loop is a
-      // WGSL uniformity violation and the pipeline silently fails to build.
+      // Comparison sampling does not use implicit texture derivatives, so it
+      // remains valid inside the fixed-count march.
       const texel = float(1.4).div(float(sun.resolution))
       const lit = float(0).toVar('godrayLit')
       for (const [ox, oy] of PCF_TAPS) {
         const at = shadowUv.add(vec2(ox, oy).mul(texel)).clamp(0.001, 0.999)
-        const occluder = sunDepth.sample(at).level(0).r
-        lit.addAssign((step as Node)(ndc.z.sub(0.0016), occluder))
+        lit.addAssign(sunDepth.sample(at).compare(ndc.z.sub(0.0016)))
       }
       const visible = lit
         .mul(float(1 / PCF_TAPS.length))

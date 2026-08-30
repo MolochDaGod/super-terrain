@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   CENTER,
   ObjectBVH,
@@ -10,6 +10,7 @@ import type { BVHOptions } from 'three-mesh-bvh'
 import {
   BufferAttribute,
   BufferGeometry,
+  Box3,
   Color,
   Euler,
   Group,
@@ -24,6 +25,7 @@ import {
   Mesh,
   MeshStandardNodeMaterial,
   Quaternion,
+  Sphere,
   SphereGeometry,
   Vector3,
   type Object3D,
@@ -239,9 +241,8 @@ export function TreeAssetView({
 
 /**
  * A complete shared tree prototype rendered across many forest placements.
- * Wood is one native instanced draw; foliage and fruit multiply their authored
- * local instance buffers by the placement transforms and remain one draw per
- * geometry/material batch regardless of how many copies are planted.
+ * Wood, foliage and fruit remain instanced, split only into conservative
+ * spatial chunks so the view and shadow frustums can reject unseen work.
  */
 interface TreeForestAssetViewProps {
   asset: ProceduralTreeAsset
@@ -345,6 +346,10 @@ function ReadyTreeForestAssetView({
   // that moved rather than every card in the level. See `syncPersistentBatch`.
   const forestFoliage = useBulkInstanceSource(lod.foliage)
   const forestFruits = useBulkInstanceSource(lod.fruits)
+  const renderChunks = useMemo(
+    () => forestRenderChunks(instances, asset.parameters.height, asset.parameters.crownRadius),
+    [asset.parameters.crownRadius, asset.parameters.height, instances],
+  )
   useEffect(
     () => () => disposeAfterGpuSubmission(() => materialLease.release()),
     [materialLease],
@@ -387,12 +392,15 @@ function ReadyTreeForestAssetView({
       name={`forest-prototype-${asset.parameters.species}`}
       visible={ready}
     >
-      <ForestWoodInstances
-        geometry={woodGeometry}
-        material={materialLease.materials.bark}
-        instances={instances}
-        castShadow={WOOD_CASTS_SHADOW}
-      />
+      {renderChunks.map((chunk) => (
+        <ForestWoodInstances
+          key={`wood:${chunk.key}`}
+          geometry={woodGeometry}
+          material={materialLease.materials.bark}
+          instances={chunk.instances}
+          castShadow={WOOD_CASTS_SHADOW}
+        />
+      ))}
       {selectionProxyInstances !== null && (
         <ForestSelectionInstances
           asset={asset}
@@ -401,19 +409,27 @@ function ReadyTreeForestAssetView({
       )}
       {showFoliage && (
         <>
-          <FoliageInstances
-            source={forestFoliage}
-            instances={instances}
-            lodLevel={lodLevel}
-            textures={textures}
-            materials={materialLease.materials}
-          />
-          <FruitInstances
-            source={forestFruits}
-            instances={instances}
-            lodLevel={lodLevel}
-            material={materialLease.materials.fruit}
-          />
+          {renderChunks.map((chunk) => (
+            <FoliageInstances
+              key={`foliage:${chunk.key}`}
+              source={forestFoliage}
+              instances={chunk.instances}
+              bounds={chunk.bounds}
+              lodLevel={lodLevel}
+              textures={textures}
+              materials={materialLease.materials}
+            />
+          ))}
+          {renderChunks.map((chunk) => (
+            <FruitInstances
+              key={`fruit:${chunk.key}`}
+              source={forestFruits}
+              instances={chunk.instances}
+              bounds={chunk.bounds}
+              lodLevel={lodLevel}
+              material={materialLease.materials.fruit}
+            />
+          ))}
         </>
       )}
       {instances.map((instance) => instance.id === selectedId ? (
@@ -429,6 +445,62 @@ function ReadyTreeForestAssetView({
       ) : null)}
     </group>
   )
+}
+
+/**
+ * Spatial batches let Three reject whole stands against both the view frustum
+ * and each shadow cascade. This changes only submission granularity: every
+ * tree keeps the same geometry, material, transform and shadow behaviour.
+ */
+const FOREST_CHUNK_SIZE = 36
+
+interface ForestRenderChunk {
+  key: string
+  instances: readonly ForestTreeInstance[]
+  bounds: Sphere
+}
+
+function forestRenderChunks(
+  instances: readonly ForestTreeInstance[],
+  height: number,
+  crownRadius: number,
+): ForestRenderChunk[] {
+  const chunks = new Map<string, ForestTreeInstance[]>()
+  for (const instance of instances) {
+    const key = `${Math.floor(instance.position[0] / FOREST_CHUNK_SIZE)}:` +
+      `${Math.floor(instance.position[2] / FOREST_CHUNK_SIZE)}`
+    const chunk = chunks.get(key)
+    if (chunk) chunk.push(instance)
+    else chunks.set(key, [instance])
+  }
+
+  return [...chunks].map(([key, chunkInstances]) => {
+    const box = new Box3().makeEmpty()
+    const minimum = new Vector3()
+    const maximum = new Vector3()
+    for (const instance of chunkInstances) {
+      const [x, y, z] = instance.position
+      const scaledHeight = height * instance.scale
+      const scaledCrown = crownRadius * instance.scale
+      if (instance.tilt) {
+        const reach = scaledHeight + scaledCrown
+        minimum.set(x - reach, y - scaledCrown, z - reach)
+        maximum.set(x + reach, y + scaledCrown, z + reach)
+      } else {
+        // Crown radius plus a generous allowance for authored trunk lean.
+        const reach = scaledCrown + scaledHeight * 0.25
+        minimum.set(x - reach, y - scaledCrown, z - reach)
+        maximum.set(x + reach, y + scaledHeight + scaledCrown, z + reach)
+      }
+      box.expandByPoint(minimum)
+      box.expandByPoint(maximum)
+    }
+    return {
+      key,
+      instances: chunkInstances,
+      bounds: box.getBoundingSphere(new Sphere()),
+    }
+  })
 }
 
 function ForestWoodInstances({
@@ -447,7 +519,7 @@ function ForestWoodInstances({
   // is reconstruction, so sizing the mesh to the exact instance count rebuilt
   // the InstancedMesh and its GPU buffers on every reclassification.
   const capacity = useTieredCapacity(instances.length)
-  useEffect(() => {
+  useLayoutEffect(() => {
     const target = mesh.current
     if (!target) return
     const matrix = new Matrix4()
@@ -470,7 +542,7 @@ function ForestWoodInstances({
       args={[geometry, material, capacity]}
       castShadow={castShadow}
       receiveShadow
-      frustumCulled={false}
+      frustumCulled
     />
   )
 }
@@ -815,11 +887,13 @@ function ReadyTreeAssetView({
 function FruitInstances({
   source,
   instances,
+  bounds,
   lodLevel,
   material,
 }: {
   source: BulkInstanceSource<TreeFruitData>
   instances: readonly ForestTreeInstance[]
+  bounds?: Sphere
   lodLevel: TreeLodLevel
   material: MeshStandardNodeMaterial
 }) {
@@ -846,9 +920,10 @@ function FruitInstances({
     () => () => disposeAfterGpuSubmission(() => geometry.dispose()),
     [geometry],
   )
-  useEffect(() => {
+  useLayoutEffect(() => {
     syncPersistentBatch(batch, instances)
-  }, [batch, instances])
+    batch.geometry.boundingSphere = bounds ?? null
+  }, [batch, bounds, instances])
 
   if (data.count === 0) return null
   return (
@@ -859,7 +934,7 @@ function FruitInstances({
       material={material}
       castShadow={foliageCastsShadow(lodLevel)}
       receiveShadow
-      frustumCulled={false}
+      frustumCulled={Boolean(bounds)}
     />
   )
 }
@@ -1037,12 +1112,14 @@ function placementSignature(instance: ForestTreeInstance): string {
 function FoliageInstances({
   source,
   instances,
+  bounds,
   lodLevel,
   textures,
   materials,
 }: {
   source: BulkInstanceSource<TreeFoliageData>
   instances: readonly ForestTreeInstance[]
+  bounds?: Sphere
   lodLevel: TreeLodLevel
   textures: ProceduralTreeTextures
   materials: TreeMaterialSet
@@ -1062,9 +1139,12 @@ function FoliageInstances({
     }),
     [batches],
   )
-  useEffect(() => {
-    for (const batch of batches) syncPersistentBatch(batch, instances)
-  }, [batches, instances])
+  useLayoutEffect(() => {
+    for (const batch of batches) {
+      syncPersistentBatch(batch, instances)
+      batch.geometry.boundingSphere = bounds ?? null
+    }
+  }, [batches, bounds, instances])
   if (batches.length === 0) return null
   return (
     <group name="leaf-cards">
@@ -1076,7 +1156,7 @@ function FoliageInstances({
           material={batch.source.material}
           castShadow={foliageCastsShadow(lodLevel)}
           receiveShadow
-          frustumCulled={false}
+          frustumCulled={Boolean(bounds)}
         />
       ))}
     </group>

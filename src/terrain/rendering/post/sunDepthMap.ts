@@ -1,6 +1,8 @@
 import {
   DepthTexture,
   FloatType,
+  LessEqualCompare,
+  LinearFilter,
   Matrix4,
   OrthographicCamera,
   RenderTarget,
@@ -55,6 +57,11 @@ export class SunDepthMap {
     })
     this.target.depthTexture = new DepthTexture(resolution, resolution)
     this.target.depthTexture.type = FloatType
+    // Comparison sampling turns each godray lookup into hardware bilinear PCF:
+    // four depth comparisons are filtered by one texture instruction.
+    this.target.depthTexture.compareFunction = LessEqualCompare
+    this.target.depthTexture.minFilter = LinearFilter
+    this.target.depthTexture.magFilter = LinearFilter
     this.target.texture.name = 'godray-sun-depth-colour'
     this.target.depthTexture.name = 'godray-sun-depth'
 

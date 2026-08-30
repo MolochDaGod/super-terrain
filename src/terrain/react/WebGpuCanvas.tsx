@@ -63,6 +63,9 @@ async function createWebGpuRenderer(canvas: HTMLCanvasElement, dpr: number) {
     samples: 4,
     alpha: false,
     powerPreference: 'high-performance',
+    // Timestamp queries carry a small synchronization cost, so keep them out
+    // of normal runs and opt in only for the CDP performance harness.
+    trackTimestamp: new URLSearchParams(location.search).has('gpuTiming'),
   }
   const renderer = new WebGPURenderer(parameters)
   renderer.toneMapping = ACESFilmicToneMapping

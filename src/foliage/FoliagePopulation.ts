@@ -245,13 +245,14 @@ export interface FoliageRing {
 /**
  * GPU-resident placement.
  *
- * Every frame each ring re-derives its whole clump list from the camera
- * position and the painted mask, appends the survivors into a compacted
- * buffer with an atomic, and draws exactly that many instances through an
- * indirect draw. Nothing is read back, nothing is streamed, and no placement
- * state persists between frames — a clump's position, lean, hue and phase are
- * all functions of the world cell it stands in, so the grid can slide under a
- * moving camera without anything shifting.
+ * Whenever the view or painted mask changes, each ring re-derives its whole
+ * clump list, appends the survivors into a compacted buffer with an atomic,
+ * and draws exactly that many instances through an indirect draw. The result
+ * stays resident between changes; wind remains a material animation and does
+ * not require rebuilding placement. Nothing is read back or streamed — a
+ * clump's position, lean, hue and phase are all functions of the world cell it
+ * stands in, so the grid can slide under a moving camera without anything
+ * shifting.
  */
 export function createFoliageRings(
   mask: FoliageMaskField,
