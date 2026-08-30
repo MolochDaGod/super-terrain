@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@workspace/clustered-webgpu-lighting": "workspace:*",
+    "@workspace/idtech-gi": "workspace:*",
     "@react-three/drei": "^10.7.8",
     "@react-three/fiber": "^9.7.0",
     "lucide-react": "^1.31.0",
