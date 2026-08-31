@@ -47,6 +47,56 @@ import { forestFloorBlend } from '../../../foliage/forestFloorBlend'
  * face, costs nothing beyond the sampling that any texture would need.
  */
 
+/**
+ * How far the coarse octave of a bake is stretched past its authored width.
+ *
+ * Not a free knob. `cliffSideRecipe` is a 1.8 m capture, so 6.11 puts its
+ * eleven beds at 1.0 m each and its joint blocks at 1 to 2 m — the band a
+ * cliff is actually read at from fifty to three hundred metres, and the band
+ * the old 35x stretch skipped straight over. Past about eight the beds start
+ * to read as terracing and the pitting disappears below a pixel before the
+ * fine octave has faded in to replace it; below about four the repeat becomes
+ * visible faster than the detail improves.
+ */
+const COARSE_TILE_FACTOR = 6.11
+/**
+ * The same factor for the top-down ground capture. `rockGroundRecipe` is a 2 m
+ * tile of clasts, so this keeps a cobble at roughly 7 cm rather than the 25 cm
+ * boulders a 14.5 m tile made of them.
+ */
+const GROUND_TILE_FACTOR = 3.6
+/**
+ * Where the fine octave is worth sampling, in metres of view distance.
+ *
+ * A 1.8 m tile at 1K is 1.8 mm per texel. Past roughly eighty metres that is
+ * far below a screen pixel, so the octave contributes nothing but the mip
+ * chain's average — a flat grey that dilutes the coarse octave it is added to.
+ * Fading it out is not a saving, it is what keeps the distant massif from
+ * going soft.
+ */
+const DETAIL_OCTAVE_NEAR = 34
+const DETAIL_OCTAVE_FAR = 190
+/**
+ * Strength of the fine octave's normal, relative to the coarse one's.
+ *
+ * A normal map stores slope, and slope is dimensionless, so both octaves hand
+ * back perturbations of the same magnitude however they are scaled. That makes
+ * the honest ratio `1 / COARSE_TILE_FACTOR`: only the fine octave is being
+ * sampled at the width its slopes were baked for, and the coarse one is
+ * overstating its relief by exactly the factor it was stretched by.
+ *
+ * It is not the ratio used, and the reason is worth stating. A 1.8 m bake has
+ * no metre-scale structure in it to give; the coarse octave is a stand-in for
+ * the large form, and honouring its true amplitude would leave a face beyond
+ * thirty metres — where the fine octave has faded — with almost no relief at
+ * all. So the coarse octave keeps its exaggeration and the fine one comes in
+ * just below parity: enough to carry the grain and the pitting at close range,
+ * not enough to bury the joint network under a uniform fizz.
+ */
+const DETAIL_OCTAVE_WEIGHT = 0.62
+/** The same, for the shallower top-down ground capture. */
+const GROUND_DETAIL_OCTAVE_WEIGHT = 0.48
+
 /** Unlit inspection views used by the browser review harness. */
 export type FullMaterialDebug =
   | 'none'
@@ -184,26 +234,74 @@ export function createFullTerrainMaterial(
   // each physical orientation and cross-fade the complete tuples over a broad
   // slope range. The transition is continuous in albedo, normal, ARM, height
   // and grading, so an exact-CSG intersection can never reveal a material seam.
-  const cliffScale = float(1 / 64)
-  const cliffUvX = scanPosition.yz
-    .mul(cliffScale)
-    .mul(vec2(scanAxisSign.x, 1))
-  const cliffUvY = scanPosition.zx
-    .mul(cliffScale)
-    .mul(vec2(scanAxisSign.y, 1))
-  const cliffUvZ = scanPosition.xy
-    .mul(cliffScale)
-    .mul(vec2(scanAxisSign.z, 1))
+  // --- how large one tile of a bake is, in metres ---------------------------
+  //
+  // The bake is authored at a physical size and says so: `cliffSideRecipe` lays
+  // down eleven beds, three joint sets and five scales of pitting across
+  // `physicalWidth` metres, and `heightToNormal` encodes the slopes that
+  // `reliefDepth` metres of relief across that width actually produce. Choosing
+  // a UV scale is therefore not a free parameter — it is a claim about how big
+  // the photographed rock was, and every quantity in the bake is calibrated
+  // against it.
+  //
+  // This used to be a hard-coded 1/64, picked to keep the repeat off the screen.
+  // It stretched a 1.8 m tile across 64 m, which is the whole of what made a
+  // cliff read as bland: every millimetre grain socket became a 4 cm pit, every
+  // 16 cm bed became a 5.7 m band, and the normal map — unchanged, because a
+  // normal map stores slope and slope is dimensionless — went on describing
+  // 0.17 m of relief as though it were six metres. What survived to the screen
+  // was the joint network alone, magnified thirty-five times into soft dark
+  // gouges with nothing at all between them.
+  //
+  // Two octaves of the same bake replace it. The coarse one is stretched, but
+  // by a stated and modest factor that puts the recipe's own structure at the
+  // size the eye reads as cliff: 1.3 m beds and 2 m joint slabs. The fine one
+  // runs at the authored width, where the grain and the pitting are the size
+  // they were baked to be. Neither is a substitute for the other — the coarse
+  // octave carries the face at a hundred metres, the fine one is what makes it
+  // hold up at five.
+  const cliffTile = cliffSurface.physicalWidth * COARSE_TILE_FACTOR
+  const cliffDetailTile = cliffSurface.physicalWidth
+  const cliffScale = float(1 / cliffTile)
+  // Deliberately not a whole-number ratio of the coarse scale. Two octaves of
+  // one texture at commensurate scales put their repeats on top of each other
+  // and the lattice survives both; at 6.11 and 1 the two grids only re-align
+  // every 11 m of coarse tile, which is 67 m of world and past where the fine
+  // octave has faded out anyway.
+  const cliffDetailScale = float(1 / cliffDetailTile)
+  const cliffFrameX = scanPosition.yz.mul(vec2(scanAxisSign.x, 1))
+  const cliffFrameY = scanPosition.zx.mul(vec2(scanAxisSign.y, 1))
+  const cliffFrameZ = scanPosition.xy.mul(vec2(scanAxisSign.z, 1))
+  const cliffUvX = cliffFrameX.mul(cliffScale)
+  const cliffUvY = cliffFrameY.mul(cliffScale)
+  const cliffUvZ = cliffFrameZ.mul(cliffScale)
+  // The fine octave is rotated out of the coarse octave's frame as well as
+  // scaled out of it. Sharing a frame leaves both octaves' joint sets running
+  // in the same two directions, which reads as one texture sharpened rather
+  // than as two scales of rock.
+  const detailRotation = (uv: any) => vec2(
+    uv.x.mul(0.788).sub(uv.y.mul(0.616)),
+    uv.x.mul(0.616).add(uv.y.mul(0.788)),
+  )
+  const cliffDetailUvX = detailRotation(cliffFrameX).mul(cliffDetailScale)
+  const cliffDetailUvY = detailRotation(cliffFrameY).mul(cliffDetailScale)
+  const cliffDetailUvZ = detailRotation(cliffFrameZ).mul(cliffDetailScale)
   // The ground scan is a top-down capture. Rotate its planar frame away from
   // the section grid and let mirrored wrapping double the apparent repeat.
-  // One tile spans 14.5 m: about 14 mm/texel at 1K, comfortably finer than a
-  // screen pixel in the shipped camera while keeping individual clasts at a
-  // believable world size.
-  const groundScale = float(1 / 14.5)
-  const groundUv = vec2(
+  // Same rule as the cliff: the tile is the width the recipe was authored at,
+  // multiplied by one stated factor. `rockGroundRecipe` is a 2 m capture, so
+  // the coarse octave puts its clasts at a believable size instead of the
+  // 7.3x-magnified boulders a 14.5 m tile made of them.
+  const groundTile = groundSurface.physicalWidth * GROUND_TILE_FACTOR
+  const groundDetailTile = groundSurface.physicalWidth
+  const groundFrame = vec2(
     position.x.mul(0.829).add(position.z.mul(0.559)),
     position.z.mul(0.829).sub(position.x.mul(0.559)),
-  ).mul(groundScale)
+  )
+  const groundUv = groundFrame.mul(float(1 / groundTile))
+  const groundDetailUv = detailRotation(groundFrame).mul(
+    float(1 / groundDetailTile),
+  )
   const sampleScan = (
     source: Texture,
     uvX: any,
@@ -258,6 +356,38 @@ export function createFullTerrainMaterial(
     .toVar('terrainSelectedScanDiffuse')
   const scanArm = mix(groundArm, cliffArm, scanDomain)
     .toVar('terrainSelectedScanArm')
+  // The fine octave's own height, from the ARM alpha of the same fetch that
+  // supplies its occlusion and roughness.
+  //
+  // Only the height is taken from the fine octave, and only the cliff's. Its
+  // albedo would be a second copy of the same photograph at a second scale,
+  // which is how a surface starts to look like a texture multiplied by itself
+  // rather than like rock; its roughness and AO are already carried well
+  // enough by the coarse octave, which is sampled at every pixel this one is.
+  // Height is the exception because height is what the eye reads as *depth*,
+  // and depth at the scale of a hand is precisely what was missing.
+  const cliffDetailArm = sampleScan(
+    rockScanArm,
+    cliffDetailUvX,
+    cliffDetailUvY,
+    cliffDetailUvZ,
+    -0.04,
+  )
+  const groundDetailArm = texture(groundScanArm, groundDetailUv)
+    .bias(float(-0.04))
+  const detailDisplacement = mix(
+    groundDetailArm.a,
+    cliffDetailArm.a,
+    scanDomain,
+  ).toVar('terrainDetailScanDisplacement')
+  // Both scan octaves darken where they are recessed. Multiplying the coarse
+  // occlusion by the fine one is what puts contact shadow into the grain
+  // sockets and the pit floors instead of leaving them as flat colour.
+  const detailOcclusion = mix(
+    groundDetailArm.r,
+    cliffDetailArm.r,
+    scanDomain,
+  ).toVar('terrainDetailScanOcclusion')
   // The bake writes the surface height into the ARM alpha, so the height comes
   // out of a fetch that had to happen anyway. It used to be two more textures
   // — one per surface — each carrying eight bits of height replicated across
@@ -266,60 +396,144 @@ export function createFullTerrainMaterial(
   // this material was already using, so the two redundant maps were the whole
   // of the headroom budget. See `packArm`.
   const scanDisplacement = scanArm.a.toVar('terrainSelectedScanDisplacement')
-  const scanNormalX = texture(rockScanNormal, cliffUvX)
-    .bias(float(-0.12)).rgb.mul(2).sub(1)
-    .toVar('terrainSelectedScanNormalX')
-  const scanNormalY = texture(rockScanNormal, cliffUvY)
-    .bias(float(-0.12)).rgb.mul(2).sub(1)
-    .toVar('terrainSelectedScanNormalY')
-  const scanNormalZ = texture(rockScanNormal, cliffUvZ)
-    .bias(float(-0.12)).rgb.mul(2).sub(1)
-    .toVar('terrainSelectedScanNormalZ')
-  // Convert each OpenGL tangent-space normal into the rotated scan volume,
-  // then blend there before returning to world space. Merely treating this map
-  // as height would reproduce the fake embossed look this material replaces.
-  const mappedScanNormalX = normalize(vec3(
-    scanNormalX.z.mul(scanAxisSign.x),
-    scanNormalX.x.mul(scanAxisSign.x),
-    scanNormalX.y,
-  ))
-  const mappedScanNormalY = normalize(vec3(
-    scanNormalY.y,
-    scanNormalY.z.mul(scanAxisSign.y),
-    scanNormalY.x.mul(scanAxisSign.y),
-  ))
-  const mappedScanNormalZ = normalize(vec3(
-    scanNormalZ.x.mul(scanAxisSign.z),
-    scanNormalZ.y,
-    scanNormalZ.z.mul(scanAxisSign.z),
-  ))
-  const mappedScanNormal = normalize(
-    mappedScanNormalX.mul(scanWeights.x)
-      .add(mappedScanNormalY.mul(scanWeights.y))
-      .add(mappedScanNormalZ.mul(scanWeights.z)),
-  ).toVar('terrainRockScanNormal')
   const flatScanNormal = normalize(vec3(
     scanAxisSign.x.mul(scanWeights.x),
     scanAxisSign.y.mul(scanWeights.y),
     scanAxisSign.z.mul(scanWeights.z),
   ))
-  const scanPerturbation = mappedScanNormal.sub(flatScanNormal)
-  const cliffWorldPerturbation = vec3(
-    scanPerturbation.x.mul(0.84).sub(scanPerturbation.y.mul(0.54)),
-    scanPerturbation.x.mul(0.54).add(scanPerturbation.y.mul(0.84)),
-    scanPerturbation.z,
+  /**
+   * One octave of the cliff normal map, as a world-space perturbation.
+   *
+   * Convert each OpenGL tangent-space normal into the rotated scan volume,
+   * then blend there before returning to world space. Merely treating this map
+   * as height would reproduce the fake embossed look this material replaces.
+   *
+   * A *perturbation* rather than a normal is what makes two octaves
+   * composable: perturbations add, whereas two normalised normals averaged
+   * together give a third direction that is shallower than either and loses
+   * the fine octave entirely wherever the coarse one is steep.
+   */
+  const cliffOctavePerturbation = (
+    uvX: any,
+    uvY: any,
+    uvZ: any,
+    label: string,
+  ) => {
+    const normalX = texture(rockScanNormal, uvX)
+      .bias(float(-0.12)).rgb.mul(2).sub(1)
+      .toVar(`${label}X`)
+    const normalY = texture(rockScanNormal, uvY)
+      .bias(float(-0.12)).rgb.mul(2).sub(1)
+      .toVar(`${label}Y`)
+    const normalZ = texture(rockScanNormal, uvZ)
+      .bias(float(-0.12)).rgb.mul(2).sub(1)
+      .toVar(`${label}Z`)
+    const mapped = normalize(
+      normalize(vec3(
+        normalX.z.mul(scanAxisSign.x),
+        normalX.x.mul(scanAxisSign.x),
+        normalX.y,
+      )).mul(scanWeights.x)
+        .add(normalize(vec3(
+          normalY.y,
+          normalY.z.mul(scanAxisSign.y),
+          normalY.x.mul(scanAxisSign.y),
+        )).mul(scanWeights.y))
+        .add(normalize(vec3(
+          normalZ.x.mul(scanAxisSign.z),
+          normalZ.y,
+          normalZ.z.mul(scanAxisSign.z),
+        )).mul(scanWeights.z)),
+    )
+    const perturbation = mapped.sub(flatScanNormal)
+    // Back out of the thrust attitude the scan volume was rotated into.
+    return vec3(
+      perturbation.x.mul(0.84).sub(perturbation.y.mul(0.54)),
+      perturbation.x.mul(0.54).add(perturbation.y.mul(0.84)),
+      perturbation.z,
+    )
+  }
+  // How much of the fine octave survives to this pixel. See
+  // `DETAIL_OCTAVE_NEAR`: past the far end a 1.8 m tile is well below a screen
+  // pixel and the octave is contributing its own mip average, which is flat.
+  const scanViewDistance = cameraPosition.sub(position).length()
+    .toVar('terrainScanViewDistance')
+  const detailOctave = smoothstep(
+    DETAIL_OCTAVE_FAR,
+    DETAIL_OCTAVE_NEAR,
+    scanViewDistance,
+  ).toVar('terrainDetailOctave')
+
+  // --- how much of the face is broken, and how much is one slab -------------
+  //
+  // A bake tiles at one density forever. That is the second half of what makes
+  // a procedural cliff read as a texture rather than as rock, and fixing the
+  // *scale* of the tile does not touch it: eleven metres of correctly-sized
+  // joint blocks, repeated identically over a three-hundred-metre massif, is
+  // still one pattern. What a real face has instead is *zones* — a buttress of
+  // massive unjointed rock beside a shattered gully, a clean slab where a
+  // block came away last winter — varying over tens of metres, which is
+  // exactly the band no tiling texture can reach.
+  //
+  // Every input here was already being fetched or interpolated. `slow.jointing`
+  // is the compiler's own fracture-density field and until now decided only
+  // whether bedding was exposed; `broad` is the 28 m geology tap, of which one
+  // channel was driving a six-per-cent colour wobble; `slow.curvature` says
+  // which parts of the landform are ribs and which are hollows. Ribs stand in
+  // the weather and shatter, hollows collect what falls off them and stay
+  // buried, and that correlation is what stops this reading as a second noise
+  // field laid over the first.
+  const fracture = clamp(
+    slow.jointing.mul(0.52)
+      .add(broad.g.mul(0.46))
+      .add(slow.curvature.mul(0.5).add(0.5).mul(0.34))
+      .sub(0.16),
+    0,
+    1,
+  ).toVar('terrainFractureDensity')
+  // Massive rock keeps about a third of the bake's relief, shattered rock half
+  // again more than it. The range is deliberately wide: a modest one reads as
+  // the same surface unevenly lit rather than as two kinds of rock.
+  const fractureRelief = mix(float(0.34), float(1.42), fracture)
+    .toVar('terrainFractureRelief')
+  const cliffWorldPerturbation = cliffOctavePerturbation(
+    cliffUvX,
+    cliffUvY,
+    cliffUvZ,
+    'terrainScanNormal',
+  ).add(
+    // The fine octave is added at its physical weight rather than at parity.
+    // Both octaves come from one bake, so both encode the slopes of
+    // `reliefDepth` metres of relief; over a tile `COARSE_TILE_FACTOR` times
+    // smaller those same slopes describe that much less world relief, and
+    // adding them as equals is what would turn a rock face into a uniform
+    // fizz of high-frequency bump with no large form left in it.
+    cliffOctavePerturbation(
+      cliffDetailUvX,
+      cliffDetailUvY,
+      cliffDetailUvZ,
+      'terrainScanDetailNormal',
+    ).mul(detailOctave.mul(DETAIL_OCTAVE_WEIGHT)),
   )
-  const groundNormal = texture(groundScanNormal, groundUv)
-    .bias(float(-0.12)).rgb.mul(2).sub(1)
-    .toVar('terrainSelectedGroundNormal')
   const groundNormalSign = sign(geometricNormal.y)
-  const mappedGroundNormal = normalize(vec3(
-    groundNormal.x.mul(0.829).sub(groundNormal.y.mul(0.559)),
-    groundNormal.z.mul(groundNormalSign),
-    groundNormal.x.mul(0.559).add(groundNormal.y.mul(0.829)),
-  ))
-  const groundPerturbation = mappedGroundNormal.sub(
-    vec3(0, groundNormalSign, 0),
+  const groundOctavePerturbation = (uv: any, label: string) => {
+    const sampled = texture(groundScanNormal, uv)
+      .bias(float(-0.12)).rgb.mul(2).sub(1)
+      .toVar(label)
+    return normalize(vec3(
+      sampled.x.mul(0.829).sub(sampled.y.mul(0.559)),
+      sampled.z.mul(groundNormalSign),
+      sampled.x.mul(0.559).add(sampled.y.mul(0.829)),
+    )).sub(vec3(0, groundNormalSign, 0))
+  }
+  const groundPerturbation = groundOctavePerturbation(
+    groundUv,
+    'terrainSelectedGroundNormal',
+  ).add(
+    groundOctavePerturbation(
+      groundDetailUv,
+      'terrainSelectedGroundDetailNormal',
+    ).mul(detailOctave.mul(GROUND_DETAIL_OCTAVE_WEIGHT)),
   )
   const worldScanPerturbation = mix(
     groundPerturbation,
@@ -595,11 +809,15 @@ export function createFullTerrainMaterial(
     .add(rock.mul(weights.rock))
     .add(snow.mul(weights.snow))
 
-  const rockVariation = mix(
-    float(0.94),
-    float(1.06),
-    broad.r,
-  )
+  // Rock value varies over tens of metres by far more than the six per cent
+  // this used to allow, and it varies for the same reason the relief does.
+  // Freshly broken rock in a shattered zone exposes unweathered mineral and is
+  // pale; a massive panel that has stood for centuries carries lichen, dust
+  // and case-hardening and goes dark. Keying the value to the same `fracture`
+  // field that decides the relief is what makes a panel read as one piece of
+  // rock rather than as a bright patch that happens to sit near a rough one.
+  const rockVariation = mix(float(0.82), float(1.12), broad.r)
+    .mul(mix(float(0.88), float(1.14), fracture))
   // --- how a hillside of one plant stops being one colour ------------------
   //
   // Coverage says "grass" over square kilometres at a time, and it is right to.
@@ -670,13 +888,24 @@ export function createFullTerrainMaterial(
     .mul(0.16)
     .add(swardClump.b.mul(0.03))
     .add(broad.g.mul(0.06))
+  // Each octave contributes the relief it physically has: `reliefDepth` metres
+  // across `physicalWidth` metres of tile, scaled by however much that tile was
+  // stretched to reach its world size. This used to be a flat 0.72 m against a
+  // 64 m tile whose normal map was simultaneously claiming six metres, so the
+  // two lobes built from one bake disagreed about the same rock by a factor of
+  // eight — the displacement said "gentle swell", the normal said "canyon", and
+  // the lighting split the difference into the soft grey smear this replaces.
+  const coarseRelief = cliffSurface.reliefDepth * COARSE_TILE_FACTOR
+  const fineRelief = cliffSurface.reliefDepth
   const rockHeight = scanDisplacement
-    .mul(0.72)
+    .mul(coarseRelief)
+    .add(detailDisplacement.mul(fineRelief).mul(detailOctave))
+    .mul(fractureRelief)
     .add(bandRiser.mul(bedExposure).mul(0.46))
   const reliefHeight = mix(turfHeight, rockHeight, rocky)
     .mul(detailScale)
     .toVar('terrainReliefHeight')
-  const viewDistance = cameraPosition.sub(position).length()
+  const viewDistance = scanViewDistance
   const bumpStrength = mix(
     float(0.84),
     float(0.34),
@@ -692,7 +921,7 @@ export function createFullTerrainMaterial(
     float(0.76),
     float(0.32),
     smoothstep(160, 1_200, viewDistance),
-  ).mul(rocky).mul(detailScale)
+  ).mul(rocky).mul(fractureRelief).mul(detailScale)
   const shadedNormal = vec3(normalize(
     vec3(displacementNormal).add(
       vec3(worldScanPerturbation).mul(scanNormalStrength),
@@ -702,6 +931,11 @@ export function createFullTerrainMaterial(
   const cavity = clamp(
     slow.occlusion
       .mul(mix(float(1), scanArm.r, rocky.mul(0.68)))
+      // The fine octave's own occlusion, faded in with it. Grain sockets and
+      // solution pits are holes a centimetre across; what identifies them as
+      // holes rather than as dark speckle is that they are darker than the
+      // face around them for a reason the normal agrees with.
+      .mul(mix(float(1), detailOcclusion, rocky.mul(detailOctave).mul(0.55)))
       .mul(mix(float(1), fine.a.mul(-0.2).add(1), rocky.mul(0.16))),
     0.54,
     1,
