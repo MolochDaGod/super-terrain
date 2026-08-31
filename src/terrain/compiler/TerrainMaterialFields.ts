@@ -439,8 +439,37 @@ export function evaluateTerrainLayerWeights(
   // budget already describes. Reading coverage off `deposition` gets all of
   // those for free and at the right scale — its 46 m wavelength is exactly the
   // size of a bare patch on a hillside — instead of from a mask invented here.
-  const rootable = smoothstep(0.28, 0.66, fields.deposition + raw * 0.34)
+  // Rooting depth matters far less where the water table is at the surface: a
+  // marsh or a streamside flat carries continuous sedge over almost no soil,
+  // while the same regolith depth on a dry hillside grows very little. Without
+  // the moisture term the gate turned wet valley floors — the greenest ground
+  // in the world — into bare mud wherever the deposition noise dipped.
+  const rootable = smoothstep(
+    0.34,
+    0.78,
+    fields.deposition + raw * 0.34 + fields.moisture * 0.15,
+  )
+  // Pasture is never a closed lawn.
+  //
+  // Even the best of it runs seventy to eighty-five per cent cover: the rest is
+  // the scuffs, stock paths, gravel, ant hills and thin ground over shallow
+  // rock that every real hillside carries. Left uncapped the classifier hands
+  // back ground that is a hundred per cent vegetated over square kilometres,
+  // and a hundred per cent of one thing is what makes terrain read as painted
+  // no matter how good the material shading it is. This is also what leaves
+  // room for the forest to be the thing that clothes a slope, with grass in the
+  // clearings and along the water rather than everywhere at once.
+  //
+  // Kept close to one, though, and the first attempt at 0.78 shows why: every
+  // point of cover taken off `plantable` is handed straight to `soil`, so a
+  // fifth off the top turned the valley floor into forty per cent bare earth —
+  // a mud world, which is no more real than a lawn. The gaps *within* a sward
+  // are not a separate material and must not be classified as one; they are
+  // what `swardThinning` draws in the shader, at the scale of the tussocks they
+  // sit between. This slot only carries ground that is genuinely unvegetated.
+  const CLOSED_COVER = 0.92
   const plantable =
+    CLOSED_COVER *
     smoothstep(0.2, 0.52, fields.moisture + raw * 0.28) *
     rootable *
     alpineFade *
@@ -459,8 +488,8 @@ export function evaluateTerrainLayerWeights(
     1 - smoothstep(WATER_LEVEL, WATER_LEVEL + WATER_TABLE_REACH, y)
   const lush =
     smoothstep(
-      0.3,
-      0.66,
+      0.42,
+      0.86,
       fields.moisture * 0.6 + fields.flow * 0.55 + waterTable * 0.4 + raw * 0.3,
     ) *
     // Alpine turf above the treeline is tussock and cushion, never lush

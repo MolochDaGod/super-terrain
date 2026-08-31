@@ -13,6 +13,14 @@ import type { GeneratedForestRock } from '../../tree/forestPresets'
 import type { TreePlacement, TreeEditorStore } from '../../tree/TreeEditorStore'
 import type { TreeSpecies } from '../../tree/generator/types'
 import { useTreeEditorSnapshot } from '../../tree/useTreeEditorSnapshot'
+import { TreeImpostorBand } from '../../tree/impostor/TreeImpostorBand'
+import {
+  IMPOSTOR_FADE_END,
+  IMPOSTOR_FADE_START,
+  useImpostorSplit,
+} from '../../tree/impostor/useImpostorSplit'
+import type { ProceduralTreeAsset } from '../../tree/generator/types'
+import type { TreeLodLevel } from '../../tree/generator/types'
 import { createGroundSampler, type ForestFieldStore } from '../ForestFieldStore'
 import { useForestFieldSnapshot } from './useForestFieldSnapshot'
 
@@ -151,14 +159,21 @@ export function TerrainForestLayer({
         return (
           <Fragment key={`${prototypeId}:${prototype.compiledRevision ?? 0}`}>
             {standing.length > 0 && (
-              <DistanceLodForest
+              <PrototypeStand
                 asset={asset}
                 instances={standing}
                 lodBias={catalogue.lod}
                 showFoliage={catalogue.showFoliage}
+                impostors={catalogue.impostors}
                 warmup={warmup}
               />
             )}
+            {/*
+              Deadfall stays geometry at every range. It lies on the ground, so
+              it is only ever seen close up, and a card is a picture taken from
+              a standing tree's bearings — a fallen trunk sampled from them is
+              a tree lying on its side seen edge-on.
+            */}
             {fallen.length > 0 && (
               <DistanceLodForest
                 asset={asset}
@@ -171,6 +186,58 @@ export function TerrainForestLayer({
           </Fragment>
         )
       })}
+    </>
+  )
+}
+
+/**
+ * One prototype's standing stems, across the whole distance range.
+ *
+ * The near band is the existing three-level geometry chain; everything beyond
+ * it is cards. A field can hold thousands of stems and only the nearest hundred
+ * or so can be geometry on this hardware, so without the card band a forest
+ * either has to be small or has to end abruptly — which is what the impostors
+ * exist to fix. See `TreeImpostorBand`.
+ */
+function PrototypeStand({
+  asset,
+  instances,
+  lodBias,
+  showFoliage,
+  impostors,
+  warmup,
+}: {
+  asset: ProceduralTreeAsset
+  instances: readonly TreePlacement[]
+  lodBias: TreeLodLevel
+  showFoliage: boolean
+  impostors: boolean
+  warmup?: (object: Object3D) => Promise<void>
+}) {
+  const split = useImpostorSplit(instances)
+  // With the card band off, the geometry chain carries the whole stand as it
+  // always did — which is the honest fallback, not a degraded one, for a copse
+  // small enough that every stem can be geometry.
+  const near = impostors ? split.near : instances
+  return (
+    <>
+      {near.length > 0 && (
+        <DistanceLodForest
+          asset={asset}
+          instances={near}
+          lodBias={lodBias}
+          showFoliage={showFoliage}
+          warmup={warmup}
+        />
+      )}
+      {impostors && split.far.length > 0 && (
+        <TreeImpostorBand
+          asset={asset}
+          instances={split.far}
+          nearFadeStart={IMPOSTOR_FADE_START}
+          nearFadeEnd={IMPOSTOR_FADE_END}
+        />
+      )}
     </>
   )
 }

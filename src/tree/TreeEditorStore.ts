@@ -84,6 +84,15 @@ export interface TreeEditorSnapshot {
   lod: TreeLodLevel
   debugMode: TreeDebugMode
   showFoliage: boolean
+  /**
+   * Draw distant stems as baked cards instead of geometry.
+   *
+   * On by default, because it is what lets a field be a forest rather than a
+   * copse: this machine tops out near a hundred and sixty full trees, and a
+   * closed stand covering any real area is thousands. Turning it off is for
+   * judging the geometry itself — the near band is unaffected either way.
+   */
+  impostors: boolean
   showHud: boolean
   /**
    * Ray-traced global illumination over the stand.
@@ -312,6 +321,7 @@ export class TreeEditorStore extends ExternalStore<TreeEditorSnapshot> {
       lastArmedPrototypeId: initial.id,
       openSection: 'forest',
       lod: 0,
+      impostors: true,
       debugMode: 'surface',
       showFoliage: true,
       showHud: false,
