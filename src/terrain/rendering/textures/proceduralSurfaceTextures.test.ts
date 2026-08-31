@@ -15,7 +15,6 @@ describe('procedural surface texture resources', () => {
       surface.albedo,
       surface.normal,
       surface.arm,
-      surface.displacement,
     ]) {
       expect(texture.image.width).toBe(1024)
       expect(texture.image.height).toBe(1024)
@@ -32,11 +31,9 @@ describe('procedural surface texture resources', () => {
       cliff.albedo,
       cliff.normal,
       cliff.arm,
-      cliff.displacement,
       ground.albedo,
       ground.normal,
       ground.arm,
-      ground.displacement,
     ]
     let disposeEvents = 0
     for (const texture of textures) {

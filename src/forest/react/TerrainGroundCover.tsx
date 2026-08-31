@@ -21,11 +21,27 @@ import {
   unbindForestFloorMask,
 } from '../../foliage/forestFloorBlend'
 import { useFoliageSnapshot } from '../../foliage/react/useFoliageSnapshot'
+import {
+  GRASSLAND_BANDS,
+  TerrainGrasslandField,
+} from '../../foliage/terrainGrassland'
 import { forestFloorRecipe } from '../../tree/forestFloors'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
 import type { ForestFieldStore } from '../ForestFieldStore'
 import type { ForestRegion } from '../forestField'
 import { useForestFieldSnapshot } from './useForestFieldSnapshot'
+
+/**
+ * The species list `TerrainGrasslandField` paints, resolved once per rebuild.
+ *
+ * Module scope because the paint jobs are closures queued across many frames
+ * and the list is only known once the classification bands have run. A single
+ * ground-cover layer is mounted per document, so there is exactly one window
+ * being rebuilt at a time.
+ */
+const grasslandChannels: ReturnType<TerrainGrasslandField['channels']> = []
+/** Upper bound on the species the grassland can paint. */
+const GRASSLAND_SPECIES_SLOTS = 8
 
 /** Metres of soil texture per tile. */
 const SOIL_TILE_SIZE = 5
@@ -111,6 +127,10 @@ export function TerrainGroundCover({
     [armMap, map, normalMap],
   )
   useEffect(() => () => system.dispose(), [system])
+
+  // Open-ground grass. Rebuilt with the window, from the same classifier the
+  // terrain material shades from — see `terrainGrassland`.
+  const grassland = useMemo(() => new TerrainGrasslandField(), [])
 
   // The terrain material shades the floor itself, from this same mask. Binding
   // is what switches that on; until a ground-cover layer exists, the blend is a
@@ -271,7 +291,14 @@ export function TerrainGroundCover({
       system.mask.setOrigin(x, z)
       setForestFloorOrigin(x, z)
       system.ground3d.update(x, z, WINDOW_SIZE, (sx, sz) => terrain.sampleHeight(sx, sz))
-      jobs.current = buildRegionJobs(system, fields, x, z)
+      jobs.current = buildRegionJobs(
+        system,
+        fields,
+        x,
+        z,
+        settings.grassland ? grassland : undefined,
+        terrain,
+      )
     }
 
     // Clearing is the first job in the queue, so the old cover survives until
@@ -289,7 +316,13 @@ export function TerrainGroundCover({
     // dispatches plus the debris pass every time the camera moves, and running
     // them over an empty mask to place nothing is the kind of cost that is
     // invisible in a profile and permanent in a frame budget.
-    const active = jobs.current.length > 0 || Object.keys(fields.bakes).length > 0
+    // Open grassland means there is always something to draw, so the "world
+    // with no forests pays nothing" shortcut can no longer key off the forest
+    // bakes alone.
+    const active =
+      jobs.current.length > 0 ||
+      Object.keys(fields.bakes).length > 0 ||
+      settings.grassland
     system.group.visible = warmed.current && settings.visible && active
     if (!system.group.visible) return
     system.update(renderer, camera, elapsed.current, Math.max(1, size.height * dpr))
@@ -313,11 +346,57 @@ function buildRegionJobs(
   fields: ReturnType<typeof useForestFieldSnapshot>,
   centreX: number,
   centreZ: number,
+  grassland: TerrainGrasslandField | undefined,
+  terrain: WorldTerrain,
 ): ((renderer: Renderer) => void)[] {
   const jobs: ((renderer: Renderer) => void)[] = [
     (renderer) => system.clear(renderer),
   ]
   const half = WINDOW_SIZE * 0.5
+
+  // Grassland first, so a forest floor painted over it wins the competition in
+  // the mask kernel rather than losing to it. The classification bands are
+  // spread across the queue for the same reason the region jobs are: a whole
+  // window is tens of milliseconds and this runs in the frame loop.
+  if (grassland) {
+    const seed = terrain.config.seed
+    jobs.push(() => grassland.begin(centreX, centreZ, WINDOW_SIZE))
+    for (let band = 0; band < GRASSLAND_BANDS; band += 1) {
+      jobs.push(() =>
+        grassland.fillBand(
+          band,
+          (x, z) => terrain.sampleHeight(x, z),
+          seed,
+        ),
+      )
+    }
+    jobs.push(() => {
+      grasslandChannels.length = 0
+      grasslandChannels.push(...grassland.channels())
+    })
+    // One upload-and-paint pair per species. They cannot share an upload: the
+    // region raster holds one scalar field and each species has its own.
+    for (let index = 0; index < GRASSLAND_SPECIES_SLOTS; index += 1) {
+      jobs.push((renderer) => {
+        const channel = grasslandChannels[index]
+        if (!channel) return
+        system.mask.setRegion(
+          centreX,
+          centreZ,
+          WINDOW_SIZE,
+          WINDOW_SIZE,
+          channel.coverage,
+        )
+        system.mask.paintRegion(renderer, {
+          channel: channel.channel,
+          layer: 'plants',
+          weight: channel.weight,
+          noiseScale: channel.noiseScale,
+          noiseAmount: channel.noiseAmount,
+        })
+      })
+    }
+  }
 
   for (const field of fields.fields) {
     if (!field.visible) continue

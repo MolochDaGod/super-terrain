@@ -33,8 +33,8 @@ export interface ProceduralSurfaceTextures {
   id: ProceduralSurfaceId
   albedo: DataTexture
   normal: DataTexture
+  /** Occlusion, roughness, metalness, and the surface height in alpha. */
   arm: DataTexture
-  displacement: DataTexture
   /** Metres spanned by one tile of the bake. */
   physicalWidth: number
   /** Peak-to-trough relief in metres. */
@@ -61,26 +61,28 @@ const PLACEHOLDER: Record<ProceduralSurfaceId, readonly [number, number, number]
 const cache = new Map<ProceduralSurfaceId, ProceduralSurfaceTextures>()
 
 function createSolidPixels(
-  rgb: readonly [number, number, number],
+  rgba: readonly [number, number, number, number?],
   size: number,
 ): Uint8Array {
   const pixels = new Uint8Array(size * size * 4)
   for (let offset = 0; offset < pixels.length; offset += 4) {
-    pixels[offset] = rgb[0]
-    pixels[offset + 1] = rgb[1]
-    pixels[offset + 2] = rgb[2]
-    pixels[offset + 3] = 255
+    pixels[offset] = rgba[0]
+    pixels[offset + 1] = rgba[1]
+    pixels[offset + 2] = rgba[2]
+    // The ARM placeholder carries a mid height in alpha; every other map wants
+    // an opaque one. See `packArm`.
+    pixels[offset + 3] = rgba[3] ?? 255
   }
   return pixels
 }
 
 function createPlaceholder(
-  rgb: readonly [number, number, number],
+  rgba: readonly [number, number, number, number?],
   name: string,
   colorSpace: ColorSpace,
 ): DataTexture {
   const texture = new DataTexture(
-    createSolidPixels(rgb, FULL_SIZE),
+    createSolidPixels(rgba, FULL_SIZE),
     FULL_SIZE,
     FULL_SIZE,
     RGBAFormat,
@@ -201,7 +203,6 @@ function applyReply(target: ProceduralSurfaceTextures, reply: ProceduralBakeRepl
   upload(target.albedo, new Uint8Array(reply.albedo), reply.size)
   upload(target.normal, new Uint8Array(reply.normal), reply.size)
   upload(target.arm, new Uint8Array(reply.arm), reply.size)
-  upload(target.displacement, new Uint8Array(reply.displacement), reply.size)
   target.physicalWidth = reply.physicalWidth
   target.reliefDepth = reply.reliefDepth
 }
@@ -223,8 +224,7 @@ export function getProceduralSurfaceTextures(
     id,
     albedo: createPlaceholder(placeholder, `${id} procedural albedo`, SRGBColorSpace),
     normal: createPlaceholder([128, 128, 255], `${id} procedural normal`, NoColorSpace),
-    arm: createPlaceholder([255, 230, 0], `${id} procedural ARM`, NoColorSpace),
-    displacement: createPlaceholder([128, 128, 128], `${id} procedural height`, NoColorSpace),
+    arm: createPlaceholder([255, 230, 0, 128], `${id} procedural ARM`, NoColorSpace),
     physicalWidth: recipe.physicalWidth,
     reliefDepth: recipe.reliefDepth,
     previewReady: Promise.resolve(),
@@ -256,7 +256,6 @@ export function resetProceduralSurfaceTextures(): void {
     entry.albedo.dispose()
     entry.normal.dispose()
     entry.arm.dispose()
-    entry.displacement.dispose()
   }
   cache.clear()
   if (worker) {

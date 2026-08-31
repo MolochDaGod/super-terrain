@@ -209,6 +209,11 @@ export function forestFloorBlend(
     1,
   ).toVar('forestFloorCover')
 
+  // Read before the relief block, which now consults it: grass sheds the
+  // terrain's rock relief the same way litter does.
+  const swardSample: ShaderValue = swardNode.sample(fieldUv)
+  const swardCover = clamp(swardSample.a.mul(forestFloorStrength), 0, 1)
+
   // --- relief ---------------------------------------------------------------
   //
   // The floor's own shape, and the terrain's given up to make room for it.
@@ -241,7 +246,10 @@ export function forestFloorBlend(
   // under full cover the shading normal falls back to the geometry — the
   // hillside keeps its shape and loses its strata — and the floor's own
   // millimetre relief is added to that.
-  const bedrock = mix(shadedNormal, geometricNormal, cover.mul(0.88))
+  // Grass hides bedding planes and block edges just as litter does, so the
+  // rock relief has to recede under either of them, not only under litter.
+  const shed = clamp(cover.max(swardCover.mul(0.82)), 0, 1).toVar('forestFloorShed')
+  const bedrock = mix(shadedNormal, geometricNormal, shed.mul(0.88))
   const normal = normalize(
     bedrock.add(vec3(floorSlope.x.negate(), 0, floorSlope.y.negate()).mul(cover)),
   )
@@ -266,8 +274,6 @@ export function forestFloorBlend(
   // off — the terrain is the ground — and the first version of this blend
   // ported only the surface layers, so the floor had leaf litter and no sward
   // at all under it.
-  const swardSample: ShaderValue = swardNode.sample(fieldUv)
-  const swardCover = clamp(swardSample.a.mul(forestFloorStrength), 0, 1)
   // Nudged toward the green primary, as the canopy is: AgX rolls the sunlit
   // half of a wide field well up its curve, and a curve that desaturates as it
   // compresses turns an accurate green into cream long before it clips.
@@ -293,7 +299,34 @@ export function forestFloorBlend(
     .mul(CANOPY_GAIN)
     .mul(mix(float(0.66), float(1.3), mottle))
     .mul(mix(float(0.72), float(1), shading))
-  const swardStrength = swardCover.mul(mix(float(0.42), float(1), shading)).mul(cover)
+  // Not multiplied by `cover`, and that is the whole of the far-distance fix.
+  //
+  // The sward and the floor layers are independent things: `cover` is how much
+  // leaf litter, duff and moss lie on the ground, and `swardCover` is how many
+  // plants stand in it. Gating one on the other meant the aggregate colour of
+  // the plants could only appear where a *forest floor* had been painted — so
+  // on open hillside, where there is grass and no litter, the sward term was
+  // multiplied by zero. Inside the last instanced ring that is invisible,
+  // because the blades themselves are drawing the grass. Past it there are no
+  // blades and nothing replaced them, so a green slope walked away from the
+  // camera and turned into bare terrain material at a fixed distance — which
+  // is exactly the "underlying texture dominates when you zoom out" symptom.
+  //
+  // Capped well below one at both ends, which is the other half of the fix.
+  // `sward.a` is the *sum* of every species weight clamped to one, so any
+  // ground carrying three or four plants at once saturates it — and with open
+  // grassland painting seven species that is nearly everywhere there is grass
+  // at all. Left uncapped, the far-distance term then replaces the terrain
+  // colour outright and a whole world of pasture, gravel, scars and thin
+  // ground resolves to one flat plant green with no soil anywhere in it.
+  //
+  // A real grassland seen from a kilometre is not an opaque canopy. It is
+  // plants with ground between them, and the ground is most of what gives a
+  // hillside its variation at that range — which is exactly the variation the
+  // terrain material underneath has just spent its whole budget computing.
+  // Three quarters is enough for the sward to carry the colour and not enough
+  // for it to erase what it is standing on.
+  const swardStrength = swardCover.mul(mix(float(0.26), float(0.74), shading))
 
   return {
     colour: mix(mix(colour, floorColour, cover), sward, swardStrength),

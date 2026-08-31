@@ -216,7 +216,7 @@ describe('Godot export', () => {
       maps: bakeSurface(PROCEDURAL_SURFACES[id], 32, 1),
     }))
     const materialFiles = surfaces.flatMap(({ id, maps }) =>
-      (['albedo', 'normal', 'arm', 'displacement'] as const).map((channel) => ({
+      (['albedo', 'normal', 'arm'] as const).map((channel) => ({
         path: `assets/materials/${id}-${channel}.tga`,
         data: encodeTga(maps[channel], maps.size, maps.size),
       })),
@@ -241,9 +241,11 @@ describe('Godot export', () => {
     expect(scene).toContain('[sub_resource type="ShaderMaterial" id="Material_terrain"]')
     expect(scene).toContain('res://materials/terrain.gdshader')
     expect(scene).toContain('res://assets/materials/cliff-side-normal.tga')
-    expect(text(files.get('materials/terrain.gdshader'))).toContain(
-      'uniform sampler2D cliff_height',
-    )
+    // Height rides in the ARM alpha rather than in a sampler of its own, so
+    // the exported shader must read it from there — see packArm.
+    const gdshader = text(files.get('materials/terrain.gdshader'))
+    expect(gdshader).not.toContain('uniform sampler2D cliff_height')
+    expect(gdshader).toContain('float cliff_relief = cliff_pbr.a;')
     const shader = text(files.get('materials/terrain.gdshader'))
     expect(shader).toContain('scan_luminance')
     expect(shader).toContain('compiled_base_color')

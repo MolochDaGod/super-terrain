@@ -42,6 +42,15 @@ export interface FoliageEditorSnapshot {
   hardness: number
   /** Global clump abundance. */
   density: number
+  /**
+   * Whether open ground outside the forest fields grows grass of its own.
+   *
+   * On by default: a world whose hillsides are bare unless somebody paints a
+   * forest onto them is the state this replaced. Off is for authoring, where
+   * seeing only what has been placed by hand is the point — and for measuring,
+   * since the grassland is the largest single population the layer draws.
+   */
+  grassland: boolean
   wind: FoliageWindSettings
   painting: boolean
   status: string
@@ -61,6 +70,7 @@ export class FoliageEditorStore extends ExternalStore<FoliageEditorSnapshot> {
       flow: 0.5,
       hardness: 0.25,
       density: 1,
+      grassland: true,
       wind: { ...DEFAULT_FOLIAGE_WIND },
       painting: false,
       status: 'Ground cover ready',

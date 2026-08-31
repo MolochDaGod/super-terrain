@@ -1,22 +1,62 @@
 import {
+  ALPINE_TURF_ALTITUDE,
+  FELLFIELD_ALTITUDE,
+  MONTANE_ALTITUDE,
   SNOW_LINE,
   SNOW_LINE_BAND,
+  SUMMIT_ALTITUDE,
+  TREE_LINE_ALTITUDE,
   WATER_LEVEL,
   WATER_TABLE_REACH,
 } from './climate'
 import { clamp, smoothstep } from '../core/bounds'
 import { sampleHeightFieldCached } from './heightField'
 
-export interface TerrainMaterialFields {
+/**
+ * The half of the material fields that decides *whether something grows*.
+ *
+ * Split out from the full set because two very different callers need it. The
+ * section compiler wants everything, once per vertex, in a worker. The foliage
+ * system wants only this, sixty-five thousand times, on the main thread,
+ * whenever the ground-cover window moves — and the geology half it does not
+ * want (three domain warps, the bedding solve, four more noise octaves for
+ * jointing, mottle and regional tint) is about four fifths of the cost.
+ *
+ * Sharing the implementation rather than approximating it in the foliage layer
+ * is the whole point. A plant that grows where the shader paints rock, or bare
+ * ground the shader paints as pasture, is the single most visible failure this
+ * system can have, and it is guaranteed the moment two pieces of code hold
+ * their own opinion about where grass belongs.
+ */
+export interface TerrainVegetationFields {
   regional: number
   /** Up component of the undeformed height-field normal at this X/Z. */
   baseNormalY: number
-  /** Barren showcase basin where exposed bedrock replaces pasture/regolith. */
-  bedrockExposure: number
+  /**
+   * 0..1 how strongly this point sits on a talus fan: below a face, on ground
+   * gentle enough for the debris off that face to come to rest.
+   */
+  talus: number
+  /**
+   * 0..1 frost shattering. Above the fellfield limit the rock is not weathered
+   * so much as taken apart, and what covers it is its own angular debris.
+   */
+  frostShatter: number
   /** Regolith depth proxy in 0..1: where loose material can come to rest. */
   deposition: number
   /** Ground water availability in 0..1, from drainage and altitude. */
   moisture: number
+  /** 0..1 proximity to a drainage line: the path water actually takes. */
+  flow: number
+  /** 0..1 regional climate, 0 temperate alpine to 1 true desert. */
+  aridity: number
+  /** 0..1 how completely a wind-blown sand sea has taken over the surface. */
+  erg: number
+  lichen: number
+}
+
+/** Everything a compiled vertex carries: the above, plus the geology. */
+export interface TerrainMaterialFields extends TerrainVegetationFields {
   macro: number
   /** Unit normal of the local bedding planes, shared with the mesh terracing. */
   beddingX: number
@@ -26,19 +66,12 @@ export interface TerrainMaterialFields {
   /** 0..1 strength of bedding expression, shared with the mesh terracing. */
   bedExposure: number
   jointing: number
-  lichen: number
   mottle: number
   beddedOffsetX: number
   beddedOffsetY: number
   beddedOffsetZ: number
   regionalTint: number
   buttress: number
-  /** 0..1 proximity to a drainage line: the path water actually takes. */
-  flow: number
-  /** 0..1 regional climate, 0 temperate alpine to 1 true desert. */
-  aridity: number
-  /** 0..1 how completely a wind-blown sand sea has taken over the surface. */
-  erg: number
 }
 
 /** Final broad material coverage baked into each compiled terrain vertex. */
@@ -52,6 +85,16 @@ export interface TerrainLayerWeights {
   slope: number
   lichen: number
 }
+
+/**
+ * How far uphill the talus probe looks for a supplying face, in metres.
+ *
+ * A fan is roughly as long as the face above it is high, and the faces in this
+ * world's cliff bands run twenty to fifty metres. Probing much further finds
+ * the ridge behind the cliff and puts fans on ground the cliff cannot reach;
+ * much closer and the probe never clears the fan's own head.
+ */
+const TALUS_REACH = 46
 
 /** Metres of bed thickness the packed unit value spans. */
 export const BED_THICKNESS_MIN = 9
@@ -76,35 +119,72 @@ export const BED_THICKNESS_MAX = 26
  * The Perlin implementation mirrors MaterialX's, including its Jenkins hash and
  * gradient scale, so these agree exactly with the fragment shader's own taps.
  */
-export function evaluateTerrainMaterialFields(
+export function evaluateTerrainVegetationFields(
   x: number,
   y: number,
   z: number,
   seed: number,
-): TerrainMaterialFields {
-  warp(x, y, z, 9.5, 0.021)
-  warp(warped.x, warped.y, warped.z, 1.6, 0.1373)
-  const beddedX = warped.x
-  const beddedY = warped.y
-  const beddedZ = warped.z
-  warp(x, y, z, 11, 0.02)
-  const buttressX = warped.x
-  const buttressY = warped.y
-  const buttressZ = warped.z
-
+  /**
+   * Unit XZ bearing pointing uphill, from the mesh normal. Zero where the
+   * caller has none, which disables the talus probe rather than guessing a
+   * direction — an arbitrary bearing would put fans on the wrong side of every
+   * ridge, which is worse than having none.
+   */
+  upslopeX = 0,
+  upslopeZ = 0,
+): TerrainVegetationFields {
   const terrain = sampleHeightFieldCached(x, z, seed)
-  const { bedding } = terrain
 
   // Slope from the height stack rather than the mesh normal, so it survives LOD
   // changes and skirt vertices unchanged.
   const slope = clamp(terrain.steepness, 0, 3)
   const baseNormalY = 1 / Math.sqrt(1 + slope * slope)
-  const showcaseDistance = Math.hypot((x - 300) / 680, (z - 100) / 400)
-  const bedrockExposure = 1 - smoothstep(0.48, 0.98, showcaseDistance)
+
+  // --- talus -------------------------------------------------------------
+  //
+  // Scree does not appear wherever the gradient happens to be right; it appears
+  // *below a face*, because that is where the material comes from. Slope and
+  // curvature alone cannot tell a cliff foot from any other concave hollow, so
+  // the classifier used to dust debris evenly over every moderate slope in the
+  // range — which is the difference between a mountain that sheds rock and a
+  // mountain with grey patches on it.
+  //
+  // One probe answers it. The mesh normal gives the upslope bearing for free,
+  // so a single height-field sample a fan-length uphill says whether there is
+  // anything up there steep enough to supply this ground. It is skipped
+  // entirely on the two thirds of the world that cannot carry a fan at any
+  // supply — ground too flat to receive one, and faces too steep to hold it —
+  // so the average cost is a fraction of the one sample it looks like.
+  let talus = 0
+  const receptive =
+    smoothstep(0.16, 0.42, slope) * (1 - smoothstep(0.95, 1.55, slope))
+  if (receptive > 0.02 && (upslopeX !== 0 || upslopeZ !== 0)) {
+    const source = sampleHeightFieldCached(
+      x + upslopeX * TALUS_REACH,
+      z + upslopeZ * TALUS_REACH,
+      seed,
+    )
+    // The face has to be both steep enough to shed and high enough above this
+    // ground for the debris to have travelled. A steep patch level with the
+    // sample point is a rib, not a supply.
+    const relief = smoothstep(6, 34, source.height - y)
+    talus = smoothstep(1.0, 2.2, source.steepness) * relief * receptive
+  }
+
+  // Above the fellfield limit the freeze-thaw cycle crosses zero often enough
+  // to take the bedrock apart faster than anything can weather or colonise it.
+  const frostShatter = smoothstep(
+    FELLFIELD_ALTITUDE,
+    SUMMIT_ALTITUDE,
+    y + (fbm(x, y, z, 90, 2) - 0.5) * 40,
+  )
 
   // Water collects in the carved drainage lines and thins out with altitude,
   // where there is less catchment above and more of the year is frozen.
-  const altitudeDrying = smoothstep(210, 540, y)
+  // Water thins out with altitude: less catchment above, more of the year
+  // frozen. Tied to the zone boundaries so it tracks the world's own relief
+  // rather than a pair of metres borrowed from a range ten times this size.
+  const altitudeDrying = smoothstep(MONTANE_ALTITUDE, FELLFIELD_ALTITUDE, y)
   // Standing water in the basin. A closed valley floor carries no drainage, so
   // `flow` cannot see it at all, and without this the ground a few metres from
   // the river's edge is classified exactly like a dry hillside — which is what
@@ -147,6 +227,10 @@ export function evaluateTerrainMaterialFields(
       // basins carry a *larger* budget of mobile regolith than the alpine
       // valleys do, not a smaller one.
       aridity * 0.22 +
+      // A fan *is* a supply of loose material — that is what makes it a fan.
+      talus * 0.55 +
+      // Frost-shattered ground makes its own debris in place.
+      frostShatter * 0.3 +
       (fbm(x, y, z, 46, 2) - 0.5) * 0.34,
     0,
     1,
@@ -155,9 +239,52 @@ export function evaluateTerrainMaterialFields(
   return {
     regional: perlin3(x * 0.011, y * 0.011, z * 0.011),
     baseNormalY,
-    bedrockExposure,
+    talus,
+    frostShatter,
     deposition,
     moisture,
+    flow,
+    aridity,
+    erg,
+    lichen: fbm(x, y, z, 9, 3),
+  }
+}
+
+/**
+ * Everything a compiled vertex carries. The vegetation half above, plus the
+ * geology the shader needs and nothing else does.
+ */
+export function evaluateTerrainMaterialFields(
+  x: number,
+  y: number,
+  z: number,
+  seed: number,
+  upslopeX = 0,
+  upslopeZ = 0,
+): TerrainMaterialFields {
+  const vegetation = evaluateTerrainVegetationFields(
+    x,
+    y,
+    z,
+    seed,
+    upslopeX,
+    upslopeZ,
+  )
+
+  warp(x, y, z, 9.5, 0.021)
+  warp(warped.x, warped.y, warped.z, 1.6, 0.1373)
+  const beddedX = warped.x
+  const beddedY = warped.y
+  const beddedZ = warped.z
+  warp(x, y, z, 11, 0.02)
+  const buttressX = warped.x
+  const buttressY = warped.y
+  const buttressZ = warped.z
+
+  const { bedding } = sampleHeightFieldCached(x, z, seed)
+
+  return {
+    ...vegetation,
     macro: fbm(x, y, z, 34, 3),
     beddingX: bedding.normalX,
     beddingY: bedding.normalY,
@@ -170,16 +297,12 @@ export function evaluateTerrainMaterialFields(
     ),
     bedExposure: bedding.expression,
     jointing: fbm(x, y, z, 24, 2),
-    lichen: fbm(x, y, z, 9, 3),
     mottle: fbm(x, y, z, 14, 2),
     beddedOffsetX: beddedX - x,
     beddedOffsetY: beddedY - y,
     beddedOffsetZ: beddedZ - z,
     regionalTint: fbm(x, y, z, 220, 2),
-    aridity,
-    erg,
     buttress: ridged(buttressX, buttressY * 0.6, buttressZ, 9, 3),
-    flow,
   }
 }
 
@@ -195,7 +318,12 @@ export function evaluateTerrainLayerWeights(
   z: number,
   normalY: number,
   curvature: number,
-  fields: TerrainMaterialFields,
+  fields: TerrainVegetationFields,
+  /**
+   * 1 where this surface was cut by CSG rather than weathered out of the height
+   * field. Freshly exposed rock carries neither soil nor plants.
+   */
+  freshRock = 0,
 ): TerrainLayerWeights {
   const slope = clamp(1 - normalY, 0, 1)
   const regional = fields.regional * 0.5
@@ -214,16 +342,32 @@ export function evaluateTerrainLayerWeights(
     falloff(0.44, 0.1, slope + fray * 0.6) *
       falloff(0.85, 0.12, curvature) *
       (fields.deposition * 0.6 + 0.45) *
-      // The showcase is a stripped glacial rock basin. Retaining the generic
-      // meadow/regolith budget here made the fused mesh operands switch to a
-      // completely different dark material at their exact join and recreated
-      // the appearance of props even though the topology was continuous.
-      (1 - fields.bedrockExposure * 0.84),
+      // Nothing has come to rest on a face that was cut this morning.
+      (1 - freshRock * 0.88),
     0,
     1,
   )
-  const rock = 1 - regolith
   const { aridity } = fields
+  // Total loose cover over the bedrock, and what is left showing through it.
+  //
+  // `regolith` alone answers "can loose material rest on this gradient", which
+  // is the right question for a hillside weathering in place and the wrong one
+  // for the two cases that matter most on a mountain. A talus fan is loose
+  // ground on a slope that could never have produced it, and a frost-shattered
+  // crest is loose ground on a summit with no catchment above it at all. Both
+  // are supplied rather than retained, so they raise the mantle rather than
+  // being scaled by it — and taking the maximum, not the sum, keeps the cover
+  // a coverage: three ways of arriving at buried bedrock do not bury it twice.
+  const mantle = clamp(
+    Math.max(
+      regolith,
+      fields.talus * 0.86,
+      fields.frostShatter * 0.78,
+    ),
+    0,
+    1,
+  )
+  const rock = 1 - mantle
   // Desert pavement. On temperate ground the coarse fraction only shows where
   // the gradient is steep enough to keep washing the fines out from between the
   // clasts, which is what the lower edge of `repose` encodes. An arid surface
@@ -236,16 +380,48 @@ export function evaluateTerrainLayerWeights(
   const repose =
     smoothstep(0.075 - aridity * 0.07, 0.17 - aridity * 0.09, slope + fray * 0.5) *
     falloff(0.46, 0.24, slope)
-  const scree =
-    regolith *
-    repose *
-    (falloff(0.5, -0.3, curvature) * 0.7 + 0.3)
-  const remaining = regolith * (1 - scree)
-  const alpineFade = falloff(
-    412,
-    268,
-    y + regional * 44 + fray * 26,
+  // A fan overrides the general repose rule rather than being scaled by it: the
+  // material is arriving from above regardless of whether this particular
+  // gradient would have washed its own fines out, which is exactly why a fan
+  // stands out as a pale tongue against the slope it is lying on.
+  const fan = fields.talus * (falloff(0.62, -0.4, curvature) * 0.55 + 0.45)
+  // How much of the mantle is coarse rather than fine. A fan is nothing but
+  // coarse — sorting during transport is what a fan does — and frost debris is
+  // angular by definition, so both push this hard toward one without having to
+  // argue with the gradient the way the general repose rule does.
+  const coarse = clamp(
+    repose * (falloff(0.5, -0.3, curvature) * 0.7 + 0.3) +
+      fan * 0.95 +
+      // Frost debris has no fine fraction to speak of: the rock is being split
+      // along joints, not weathered to soil. Leaving this low put a fifth of
+      // every summit into the soil channel, which shaded as brown earth on
+      // ground that should be nothing but angular blocks.
+      fields.frostShatter * 1.15,
+    0,
+    1,
   )
+  const scree = mantle * coarse
+  const remaining = mantle * (1 - coarse)
+  // --- altitude zonation ---------------------------------------------------
+  //
+  // The band the eye actually reads a mountain by. This used to be a single
+  // fade from 268 m to 412 m, which in a world whose ground is at 1 m and whose
+  // summits reach 391 m meant the entire massif — floor to crest — sat inside
+  // one band and the fade never fired. A hillside and a summit were classified
+  // identically, so they shaded identically, and no amount of detail on top of
+  // that can make relief legible.
+  //
+  // Three overlapping steps instead of one. Below the treeline vegetation is
+  // limited only by moisture and slope; between the treeline and the turf limit
+  // the ground is still continuously covered but by turf alone; above that it
+  // breaks into fellfield cushions and then fails altogether. The jitter is
+  // large on purpose — a zone boundary that follows a contour exactly is the
+  // loudest tell there is, and real treelines run hundreds of metres up a
+  // sheltered gully and down an exposed spur.
+  const zoneAltitude = y + regional * 44 + fray * 26
+  const belowTreeLine = falloff(ALPINE_TURF_ALTITUDE, TREE_LINE_ALTITUDE, zoneAltitude)
+  const belowFellfield = falloff(FELLFIELD_ALTITUDE, ALPINE_TURF_ALTITUDE, zoneAltitude)
+  const alpineFade = belowTreeLine * 0.62 + belowFellfield * 0.38
   // Drying the moisture field already thins the vegetation; this closes it out.
   // The two are not redundant: moisture is a continuum that a wet gully can
   // push back up locally, and that is exactly right — a desert wash really is
@@ -253,15 +429,27 @@ export function evaluateTerrainLayerWeights(
   // back to pasture, so the ceiling on how much of the ground can be vegetated
   // at all comes down with the climate independently of any local wetness.
   const aridCeiling = 1 - smoothstep(0.25, 0.72, aridity) * 0.94
+  // Plants need something to root in, not just water.
+  //
+  // Without this the classifier put vegetation on every gentle, damp square
+  // metre it could find, and since the valley floor is both, the floor came out
+  // as an unbroken lawn with three per cent bare ground in it. Real pasture is
+  // seventy to eighty-five per cent covered: the rest is the scars, gravel
+  // bars, worn ground and thin patches over shallow bedrock that the regolith
+  // budget already describes. Reading coverage off `deposition` gets all of
+  // those for free and at the right scale — its 46 m wavelength is exactly the
+  // size of a bare patch on a hillside — instead of from a mask invented here.
+  const rootable = smoothstep(0.28, 0.66, fields.deposition + raw * 0.34)
   const plantable =
     smoothstep(0.2, 0.52, fields.moisture + raw * 0.28) *
+    rootable *
     alpineFade *
     aridCeiling *
     falloff(0.38, 0.1, slope + fray) *
-    // This basin is the exposed mesh-patch showcase, not a pasture. Suppress
-    // the generic alpine vegetation budget here so the continuous mineral
-    // material remains visible on both the source terrain and inserted faces.
-    (1 - fields.bedrockExposure * 0.995)
+    // Nothing colonises ground that is being taken apart by frost faster than
+    // it can be rooted in, and nothing has had time to colonise a fresh cut.
+    (1 - fields.frostShatter * 0.92) *
+    (1 - freshRock * 0.985)
   const soil = remaining * (1 - plantable)
   const vegetated = remaining * plantable
   // Wet meadow follows the water table as much as it follows the climate: the
@@ -269,11 +457,18 @@ export function evaluateTerrainLayerWeights(
   // an alpine valley, and above it the same moisture reads as dry pasture.
   const waterTable =
     1 - smoothstep(WATER_LEVEL, WATER_LEVEL + WATER_TABLE_REACH, y)
-  const lush = smoothstep(
-    0.3,
-    0.66,
-    fields.moisture * 0.6 + fields.flow * 0.55 + waterTable * 0.4 + raw * 0.3,
-  )
+  const lush =
+    smoothstep(
+      0.3,
+      0.66,
+      fields.moisture * 0.6 + fields.flow * 0.55 + waterTable * 0.4 + raw * 0.3,
+    ) *
+    // Alpine turf above the treeline is tussock and cushion, never lush
+    // pasture, however wet it is — the growing season is too short. Without
+    // this the wet gullies that run down off a summit stay bright green all the
+    // way to the crest, which is the one thing that most reliably flattens a
+    // high ridge back into a hill.
+    belowTreeLine
   const grass = vegetated * lush
   const meadow = vegetated * (1 - lush)
 

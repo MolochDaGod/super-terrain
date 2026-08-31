@@ -1332,6 +1332,32 @@ function calculateSurfaceFields(
     triangleSurfaceKinds,
   )
 
+  // Faces that came from a CSG cut rather than from the height field.
+  //
+  // A freshly cut face has no soil on it, because soil is what has accumulated
+  // on a surface over time and this surface has no time. That is not a
+  // stylistic preference about the hero formation — it is why a road cutting,
+  // a quarry wall and a fresh landslide scar are all bare, and why they stay
+  // bare for years while the ground a metre away is pasture.
+  //
+  // Without it the authored thrust slab classified from its own gentle upper
+  // faces and grew turf on them, so orbiting the camera swung the formation
+  // between rock and meadow as different faces came into view. The old
+  // hardcoded showcase ellipse had been hiding this by suppressing vegetation
+  // over the whole basin; removing the ellipse is what exposed it.
+  const patchSurfaceVertices = new Uint8Array(vertexCount)
+  if (
+    triangleSurfaceKinds &&
+    triangleSurfaceKinds.length === indices.length / 3
+  ) {
+    for (let offset = 0; offset < indices.length; offset += 3) {
+      if (triangleSurfaceKinds[offset / 3] !== PATCH_SURFACE_TRIANGLE) continue
+      patchSurfaceVertices[indices[offset]!] = 1
+      patchSurfaceVertices[indices[offset + 1]!] = 1
+      patchSurfaceVertices[indices[offset + 2]!] = 1
+    }
+  }
+
   for (let vertex = 0; vertex < vertexCount; vertex += 1) {
     const source = vertex * 3
     const target = vertex * 4
@@ -1341,7 +1367,24 @@ function calculateSurfaceFields(
     // No memo here. Every vertex of a section is at a distinct position, so the
     // map this used to consult could not hit even once; it only ever built a
     // key string per vertex and grew.
-    const fields = evaluateTerrainMaterialFields(x, y, z, seed)
+    // Upslope bearing, for the talus probe. For a height field the surface
+    // normal is proportional to (-dh/dx, 1, -dh/dz), so its horizontal part
+    // points straight downhill and negating it costs nothing — the alternative
+    // is four more height-field samples per vertex to rebuild a gradient the
+    // mesh is already carrying.
+    const normalX = normals[source]
+    const normalZ = normals[source + 2]
+    const horizontal = Math.hypot(normalX, normalZ)
+    const upslopeX = horizontal > 1e-4 ? -normalX / horizontal : 0
+    const upslopeZ = horizontal > 1e-4 ? -normalZ / horizontal : 0
+    const fields = evaluateTerrainMaterialFields(
+      x,
+      y,
+      z,
+      seed,
+      upslopeX,
+      upslopeZ,
+    )
 
     const weights = evaluateTerrainLayerWeights(
       x,
@@ -1350,16 +1393,31 @@ function calculateSurfaceFields(
       normals[source + 1],
       curvature[vertex],
       fields,
+      patchSurfaceVertices[vertex] === 1 ? 1 : 0,
     )
     const foundationBlend = patchFoundationBlend[vertex]!
     if (foundationBlend > 0) {
+      // The foundation exists to stop a material step at the join between a
+      // CSG patch and the terrain it was cut into, by blending the patch's
+      // classification toward what the ground underneath would have been. It
+      // must not, however, hand the patch the ground's *slope*: a vertical
+      // wall cut into a valley floor is still a vertical wall, and classifying
+      // it with the floor's gentle height-field normal is what put pasture on
+      // the hero formation's faces and made it turn green as the camera
+      // orbited past the blend band.
+      //
+      // Taking the steeper of the two normals keeps the seam smoothing — a
+      // patch face gentler than the ground below still blends to the ground's
+      // material — while making a face steeper than its surroundings shed
+      // vegetation exactly as any other face that steep would.
       const foundation = evaluateTerrainLayerWeights(
         x,
         y,
         z,
-        fields.baseNormalY,
+        Math.min(fields.baseNormalY, normals[source + 1]!),
         0,
         fields,
+        patchSurfaceVertices[vertex] === 1 ? 1 : 0,
       )
       blendTerrainLayerWeights(weights, foundation, foundationBlend)
     }

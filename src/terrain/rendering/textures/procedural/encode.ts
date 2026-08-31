@@ -52,27 +52,33 @@ export function encodeLinear(value: number): number {
 }
 
 /** Packs AO / roughness / metalness into one RGB texture, ARM convention. */
-export function packArm(ao: Field, roughness: Field, metalness: Field): Uint8Array {
+/**
+ * Occlusion, roughness, metalness — and height in the alpha.
+ *
+ * Height used to be its own RGBA map with the same value written into all four
+ * channels, which cost a whole texture and, far more expensively, a whole
+ * *sampler* to carry eight bits. WebGPU guarantees only sixteen samplers per
+ * shader stage and this adapter offers exactly sixteen, so the terrain material
+ * sat on the limit and the next surface detail anyone wanted was unaffordable.
+ * Two surfaces each dropping a redundant map is two samplers back.
+ *
+ * Alpha is the right home for it: the ARM map is already sampled everywhere the
+ * height is wanted, at the same UV, from the same bake, so the fetch is free and
+ * the two can never fall out of correlation.
+ */
+export function packArm(
+  ao: Field,
+  roughness: Field,
+  metalness: Field,
+  height: Field,
+): Uint8Array {
   const size = ao.size
   const out = new Uint8Array(size * size * 4)
   for (let i = 0; i < size * size; i += 1) {
     out[i * 4] = encodeLinear(ao.data[i]!)
     out[i * 4 + 1] = encodeLinear(roughness.data[i]!)
     out[i * 4 + 2] = encodeLinear(metalness.data[i]!)
-    out[i * 4 + 3] = 255
-  }
-  return out
-}
-
-export function packHeight(height: Field): Uint8Array {
-  const size = height.size
-  const out = new Uint8Array(size * size * 4)
-  for (let i = 0; i < size * size; i += 1) {
-    const v = encodeLinear(height.data[i]!)
-    out[i * 4] = v
-    out[i * 4 + 1] = v
-    out[i * 4 + 2] = v
-    out[i * 4 + 3] = 255
+    out[i * 4 + 3] = encodeLinear(height.data[i]!)
   }
   return out
 }

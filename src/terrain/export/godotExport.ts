@@ -429,7 +429,9 @@ function surfaceTextureFiles(
   id: 'rock-ground' | 'cliff-side',
   textures: ReturnType<typeof getProceduralSurfaceTextures>,
 ): ZipFile[] {
-  return (['albedo', 'normal', 'arm', 'displacement'] as const).map((channel) => ({
+  // Height rides in the ARM alpha rather than in a map of its own; see
+  // `packArm`. The Godot shader reads it from there too.
+  return (['albedo', 'normal', 'arm'] as const).map((channel) => ({
     path: `assets/materials/${id}-${channel}.tga`,
     data: textureToTga(textures[channel]),
   }))
@@ -1035,7 +1037,7 @@ Open this folder with Godot 4. The main scene is \`world.tscn\`.
 - ${summary.patchCount.toLocaleString()} adaptive terrain mesh patches
 - ${summary.triangleCount.toLocaleString()} triangles across terrain, rocks, and water
 - ${summary.worldSize.toLocaleString()} × ${summary.worldSize.toLocaleString()} metre world
-- Exact 1K procedural TSL albedo, normal, ARM, and displacement bakes for ground and cliffs
+- Exact 1K procedural TSL albedo, normal and ARM bakes for ground and cliffs (height rides in the ARM alpha)
 - Godot world-space terrain shader using those correlated PBR maps
 - Vertex streams preserve the compiled TSL layer, climate, strata, cavity, and paint terms
 - Authored granite rocks, standing water, default sun, and editor lights
@@ -1093,11 +1095,9 @@ surface_material_override/0 = SubResource("Material_${kind}")
 [ext_resource type="Texture2D" path="res://assets/materials/rock-ground-albedo.tga" id="4_ground_albedo"]
 [ext_resource type="Texture2D" path="res://assets/materials/rock-ground-normal.tga" id="5_ground_normal"]
 [ext_resource type="Texture2D" path="res://assets/materials/rock-ground-arm.tga" id="6_ground_arm"]
-[ext_resource type="Texture2D" path="res://assets/materials/rock-ground-displacement.tga" id="7_ground_height"]
 [ext_resource type="Texture2D" path="res://assets/materials/cliff-side-albedo.tga" id="8_cliff_albedo"]
 [ext_resource type="Texture2D" path="res://assets/materials/cliff-side-normal.tga" id="9_cliff_normal"]
 [ext_resource type="Texture2D" path="res://assets/materials/cliff-side-arm.tga" id="10_cliff_arm"]
-[ext_resource type="Texture2D" path="res://assets/materials/cliff-side-displacement.tga" id="11_cliff_height"]
 [ext_resource type="Texture2D" path="res://assets/materials/geology-detail.tga" id="12_geology_detail"]
 ` : ''
   const terrainMaterial = proceduralMaterials ? `
@@ -1107,11 +1107,9 @@ shader = ExtResource("3_terrain_shader")
 shader_parameter/ground_albedo = ExtResource("4_ground_albedo")
 shader_parameter/ground_normal = ExtResource("5_ground_normal")
 shader_parameter/ground_arm = ExtResource("6_ground_arm")
-shader_parameter/ground_height = ExtResource("7_ground_height")
 shader_parameter/cliff_albedo = ExtResource("8_cliff_albedo")
 shader_parameter/cliff_normal = ExtResource("9_cliff_normal")
 shader_parameter/cliff_arm = ExtResource("10_cliff_arm")
-shader_parameter/cliff_height = ExtResource("11_cliff_height")
 shader_parameter/geology_detail = ExtResource("12_geology_detail")
 ` : `
 [sub_resource type="StandardMaterial3D" id="Material_terrain"]
@@ -1175,11 +1173,9 @@ render_mode cull_disabled, depth_draw_opaque;
 uniform sampler2D ground_albedo : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
 uniform sampler2D ground_normal : hint_normal, repeat_enable, filter_linear_mipmap_anisotropic;
 uniform sampler2D ground_arm : repeat_enable, filter_linear_mipmap_anisotropic;
-uniform sampler2D ground_height : repeat_enable, filter_linear_mipmap_anisotropic;
 uniform sampler2D cliff_albedo : source_color, repeat_enable, filter_linear_mipmap_anisotropic;
 uniform sampler2D cliff_normal : hint_normal, repeat_enable, filter_linear_mipmap_anisotropic;
 uniform sampler2D cliff_arm : repeat_enable, filter_linear_mipmap_anisotropic;
-uniform sampler2D cliff_height : repeat_enable, filter_linear_mipmap_anisotropic;
 uniform sampler2D geology_detail : repeat_enable, filter_linear_mipmap_anisotropic;
 
 varying vec3 world_position;
@@ -1268,8 +1264,10 @@ void fragment() {
     vec4 cliff_color = sample_cliff(cliff_albedo, scan_position, scan_normal);
     vec4 ground_pbr = texture(ground_arm, ground_uv);
     vec4 cliff_pbr = sample_cliff(cliff_arm, scan_position, scan_normal);
-    float ground_relief = texture(ground_height, ground_uv).r;
-    float cliff_relief = sample_cliff(cliff_height, scan_position, scan_normal).r;
+    // Height is the ARM alpha, not a map of its own, and the ARM tuple has
+    // already been fetched just above. See packArm in the exporter source.
+    float ground_relief = ground_pbr.a;
+    float cliff_relief = cliff_pbr.a;
     vec4 selected_color = mix(ground_color, cliff_color, cliff_domain);
     vec4 selected_pbr = mix(ground_pbr, cliff_pbr, cliff_domain);
     float selected_relief = mix(ground_relief, cliff_relief, cliff_domain);

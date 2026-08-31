@@ -12,7 +12,6 @@ import {
   encodeSrgb,
   heightToNormal,
   packArm,
-  packHeight,
   type Rgb,
 } from './encode'
 import { clamp01 } from './noise'
@@ -25,10 +24,8 @@ export interface ProceduralMaterialMaps {
   albedo: Uint8Array
   /** OpenGL-convention tangent-space normal, RGBA. */
   normal: Uint8Array
-  /** Ambient occlusion / roughness / metalness, linear RGBA. */
+  /** Occlusion, roughness, metalness, and the surface height in alpha. */
   arm: Uint8Array
-  /** Height, replicated across RGB, linear RGBA. */
-  displacement: Uint8Array
   /** Metres spanned by one tile; lets callers pick a real-world UV scale. */
   physicalWidth: number
   /** Peak-to-trough relief in metres, for parallax and displacement scaling. */
@@ -205,8 +202,7 @@ export function bakeSurface(
     size,
     albedo,
     normal: heightToNormal(height, normalStrength),
-    arm: packArm(occlusion, roughness, metalness),
-    displacement: packHeight(height),
+    arm: packArm(occlusion, roughness, metalness, height),
     physicalWidth: recipe.physicalWidth,
     reliefDepth: recipe.reliefDepth,
   }

@@ -26,7 +26,10 @@ import {
   type TerrainMaterialSettings,
 } from '../materialSettings'
 import { applyTerrainPaint } from '../terrainPaintMaterial'
-import { createGeologyDetailTexture } from '../textures/createSurfaceDetailTextures'
+import {
+  createGeologyDetailTexture,
+  createGroundCoverDetailTexture,
+} from '../textures/createSurfaceDetailTextures'
 import { getProceduralSurfaceTextures } from '../textures/proceduralSurfaceTextures'
 import { THRUST_FACE_NORMAL } from '../../demo/createThrustFormation'
 import { layerWeights, reliefNormal, terrainSlowFields } from './surface'
@@ -82,6 +85,7 @@ export function createFullTerrainMaterial(
   const materialSettings =
     options.materialSettings ?? DEFAULT_TERRAIN_MATERIAL_SETTINGS
   const detailTexture = createGeologyDetailTexture()
+  const groundCoverTexture = createGroundCoverDetailTexture()
   const cliffSurface = getProceduralSurfaceTextures('cliff-side')
   const groundSurface = getProceduralSurfaceTextures('rock-ground')
   const previewReady = Promise.all([
@@ -97,11 +101,9 @@ export function createFullTerrainMaterial(
   const rockScanDiffuse = cliffSurface.albedo
   const rockScanNormal = cliffSurface.normal
   const rockScanArm = cliffSurface.arm
-  const rockScanDisplacement = cliffSurface.displacement
   const groundScanDiffuse = groundSurface.albedo
   const groundScanNormal = groundSurface.normal
   const groundScanArm = groundSurface.arm
-  const groundScanDisplacement = groundSurface.displacement
   const material = new MeshStandardNodeMaterial({
     metalness: 0,
     side: DoubleSide,
@@ -115,14 +117,21 @@ export function createFullTerrainMaterial(
   const position = positionWorld
   const slow = terrainSlowFields(position)
   const weights = layerWeights(geometricNormal, slow)
+  // What actually takes the rock scan's micro-normal, grading and roughness.
+  //
+  // This used to read `soil * 0.95 + meadow * 0.88 + grass * 0.8`, on the
+  // grounds that the showcase's flat channels were wet shale and compact
+  // moraine rather than vegetation. The consequence was that *every* channel
+  // was between 80 and 100 per cent mineral, so the cliff scan's joints and
+  // clast structure were stamped across pasture, and the six-layer
+  // classification the compiler works so hard to produce could not express
+  // itself in the frame: grass, meadow, soil, scree and rock were five tints of
+  // one stone. Bare soil genuinely is mineral, so it keeps a little over half;
+  // turf and dry meadow get none, and take their structure from the sward bake
+  // below instead.
   const rocky = weights.rock
     .add(weights.scree)
-    // The showcase's flat channels are wet shale, compact moraine and gravel,
-    // not vegetation. They need the same mineral micro-normal response as the
-    // cliffs or they become smooth brown heightfield dunes beside crisp CSG.
-    .add(weights.soil.mul(0.95))
-    .add(weights.meadow.mul(0.88))
-    .add(weights.grass.mul(0.8))
+    .add(weights.soil.mul(0.55))
     .clamp(0, 1)
     .toVar('terrainRockyCoverage')
   const vegetation = weights.grass
@@ -241,28 +250,22 @@ export function createFullTerrainMaterial(
     cliffUvZ,
     -0.04,
   )
-  const cliffDisplacement = sampleScan(
-    rockScanDisplacement,
-    cliffUvX,
-    cliffUvY,
-    cliffUvZ,
-    -0.08,
-  )
   const groundDiffuse = texture(groundScanDiffuse, groundUv)
     .bias(float(-0.08))
   const groundArm = texture(groundScanArm, groundUv)
     .bias(float(-0.04))
-  const groundDisplacement = texture(groundScanDisplacement, groundUv)
-    .bias(float(-0.08))
   const scanDiffuse = mix(groundDiffuse, cliffDiffuse, scanDomain)
     .toVar('terrainSelectedScanDiffuse')
   const scanArm = mix(groundArm, cliffArm, scanDomain)
     .toVar('terrainSelectedScanArm')
-  const scanDisplacement = mix(
-    groundDisplacement,
-    cliffDisplacement,
-    scanDomain,
-  ).toVar('terrainSelectedScanDisplacement')
+  // The bake writes the surface height into the ARM alpha, so the height comes
+  // out of a fetch that had to happen anyway. It used to be two more textures
+  // — one per surface — each carrying eight bits of height replicated across
+  // all four channels, and each costing a *sampler*. WebGPU guarantees sixteen
+  // samplers per fragment stage and this adapter offers exactly sixteen, which
+  // this material was already using, so the two redundant maps were the whole
+  // of the headroom budget. See `packArm`.
+  const scanDisplacement = scanArm.a.toVar('terrainSelectedScanDisplacement')
   const scanNormalX = texture(rockScanNormal, cliffUvX)
     .bias(float(-0.12)).rgb.mul(2).sub(1)
     .toVar('terrainSelectedScanNormalX')
@@ -410,21 +413,150 @@ export function createFullTerrainMaterial(
     cliffRockDiffuse,
     scanDomain,
   ).toVar('terrainRockScanGradedDiffuse')
-  const grass = mix(mix(
-    vec3(0.022, 0.028, 0.024),
-    vec3(0.052, 0.064, 0.049),
-    slow.moisture,
-  ), scanRockDiffuse.mul(0.82), float(0.56))
-  const meadow = mix(mix(
-    vec3(0.04, 0.048, 0.042),
-    vec3(0.088, 0.09, 0.068),
-    slow.moisture,
-  ), scanRockDiffuse.mul(0.86), float(0.62))
-  const soil = mix(mix(
-    vec3(0.042, 0.048, 0.052),
-    vec3(0.092, 0.078, 0.062),
-    slow.aridity,
-  ), scanRockDiffuse.mul(0.9), float(0.68))
+  // --- ground cover ---------------------------------------------------------
+  //
+  // Sward is not one colour with a brightness ramp over it. At walking distance
+  // it resolves into three things at once: the living crown of each tussock,
+  // the bleached dead litter packed between the crowns, and the bare earth
+  // showing through wherever the mat is thin. Ramping a single hue by a noise
+  // field can reproduce none of that — and mixing the rock scan in at 56 per
+  // cent, which is what this did, reproduces the opposite of it.
+  //
+  // A desert floor has exactly the same three components and differs only in
+  // what each one is made of: the bare fraction is sand rather than humus, the
+  // litter is bleached almost white, and the living fraction is the grey-green
+  // of woody scrub instead of turf. So the climate is folded into the three
+  // colours and the structure above them is shared. The reason a desert reads
+  // as sparse is that the *coverage* is low, not that a different kind of
+  // surface is being drawn.
+  //
+  // The structure comes from `groundCoverTexture` at two world scales, on a
+  // planar frame rotated away from both the section grid and the ground scan's
+  // own frame so the two bakes cannot beat against each other.
+  const swardUv = vec2(
+    position.x.mul(0.947).sub(position.z.mul(0.321)),
+    position.z.mul(0.947).add(position.x.mul(0.321)),
+  )
+  // One tile per 0.9 m puts a tussock crown at about 4 cm, and one per 7.4 m
+  // gives the patch-scale variation that stops a hillside reading as one mat.
+  const swardClump = texture(groundCoverTexture, swardUv.mul(float(1 / 0.9)))
+    .toVar('terrainSwardClump')
+  const swardPatch = texture(groundCoverTexture, swardUv.mul(float(1 / 7.4)))
+    .toVar('terrainSwardPatch')
+  const crown = clamp(
+    swardClump.r.mul(0.72).add(swardPatch.r.mul(0.46)),
+    0,
+    1,
+  ).toVar('terrainSwardCrown')
+  // How much of the ground is living crown rather than the dead litter packed
+  // between the crowns.
+  //
+  // Calibrated against what `cellularCrown` actually produces, which is the
+  // step the first pass got wrong: the old 0.34-0.74 window was carried over
+  // from a Perlin clump field whose mean sits near 0.5, while a normalised
+  // Voronoi crown averages about 0.47 with a much tighter spread. The result
+  // was a tussock fraction near 0.23 — a hillside that is three quarters dead
+  // straw, which is what a late-autumn pasture looks like and not what this
+  // one is meant to be. Wet ground pushes it further toward living turf, which
+  // is the whole visual difference between a valley floor and a dry spur.
+  const tussock = clamp(
+    smoothstep(0.2, 0.62, crown).mul(mix(float(0.82), float(1.12), slow.moisture)),
+    0,
+    1,
+  ).toVar('terrainTussock')
+  // Written as a rising smoothstep and inverted, never as a descending one:
+  // WGSL leaves `smoothstep(high, low, x)` undefined, and the backends differ
+  // on what they do with it.
+  const swardThinning = smoothstep(0.08, 0.42, crown).oneMinus()
+    .mul(mix(float(0.7), float(1.25), swardPatch.a))
+    .clamp(0, 1)
+    .toVar('terrainSwardThinning')
+  const bladeShade = mix(float(0.86), float(1.1), swardClump.b)
+  const swardHeight = swardClump.g
+    .mul(0.62)
+    .add(swardPatch.g.mul(0.38))
+    .toVar('terrainSwardHeight')
+
+  // The same climate blend the relief and roughness use, so every quantity
+  // crosses over at one place. Splitting the thresholds puts sandstone colour
+  // on ground that still carries alpine structure for a kilometre of margin.
+  const arid = smoothstep(0.25, 0.75, slow.aridity).toVar('terrainAridBlend')
+  const ironBudget = smoothstep(0.25, 0.78, slow.regionalTint)
+  const macroTone = slow.macro
+
+  // Measured diffuse reflectance, not a mood. Alpine turf sits near 0.13,
+  // bleached litter near 0.25 and humic soil near 0.12. Sand is the same rock
+  // as the cliff with its iron coatings abraded off by transport, so it is far
+  // paler and less saturated while staying unmistakably related to it.
+  const sandBase = mix(
+    vec3(0.318, 0.252, 0.158),
+    vec3(0.408, 0.345, 0.238),
+    macroTone,
+  ).mul(mix(float(0.95), float(1.06), ironBudget.oneMinus()))
+  const bareEarth = mix(
+    mix(vec3(0.118, 0.092, 0.066), vec3(0.176, 0.142, 0.104), macroTone),
+    sandBase,
+    arid,
+  ).toVar('terrainBareEarth')
+  const litterTone = mix(
+    mix(vec3(0.152, 0.136, 0.088), vec3(0.208, 0.186, 0.122), macroTone),
+    sandBase.mul(0.88),
+    arid,
+  ).toVar('terrainLitterTone')
+  // Wet ground grows a deeper, bluer green than dry ground does, and that
+  // difference along a drainage line is the strongest vegetation cue a
+  // mountainside has.
+  const liveTurf = mix(
+    mix(
+      mix(vec3(0.068, 0.104, 0.044), vec3(0.088, 0.138, 0.056), slow.moisture),
+      vec3(0.128, 0.176, 0.076),
+      macroTone,
+    ),
+    mix(vec3(0.082, 0.078, 0.038), vec3(0.152, 0.142, 0.078), macroTone),
+    arid,
+  ).toVar('terrainLiveTurf')
+
+  // Stones sit *in* the sward, so they appear where the mat is thin and are
+  // never brighter than the rock they broke from.
+  const stoneColour = scanRockDiffuse
+    .mul(0.48)
+    .mul(mix(float(0.72), float(1.15), broad.b))
+  const stoneMask = smoothstep(0.66, 0.88, fine.b)
+    .mul(swardThinning)
+    .toVar('terrainSwardStone')
+
+  const grass = mix(
+    mix(
+      mix(litterTone, liveTurf, tussock).mul(bladeShade),
+      bareEarth,
+      swardThinning.mul(0.55),
+    ),
+    stoneColour,
+    stoneMask,
+  )
+  // Dry ground: the same structure with the living fraction bleached out. The
+  // contrast between this and green turf along a drainage line is what makes a
+  // slope read as pasture rather than as a painted gradient.
+  const meadow = mix(
+    mix(
+      mix(
+        litterTone.mul(1.04),
+        mix(litterTone, liveTurf, float(0.3)),
+        tussock,
+      ).mul(bladeShade),
+      bareEarth.mul(1.1),
+      swardThinning.mul(0.6),
+    ),
+    stoneColour.mul(1.06),
+    stoneMask,
+  )
+  // Bare ground is genuinely mineral, so it keeps a share of the scan's clast
+  // structure — but a share, not the 68 per cent that made it stone.
+  const soil = mix(
+    mix(bareEarth, mix(bareEarth, litterTone, float(0.45)), macroTone),
+    scanRockDiffuse.mul(0.9),
+    float(0.3),
+  )
   const scree = mix(mix(
     vec3(0.072, 0.082, 0.092),
     vec3(0.138, 0.128, 0.112),
@@ -468,10 +600,50 @@ export function createFullTerrainMaterial(
     float(1.06),
     broad.r,
   )
-  const turfVariation = mix(float(0.92), float(1.08), broad.b)
+  // --- how a hillside of one plant stops being one colour ------------------
+  //
+  // Coverage says "grass" over square kilometres at a time, and it is right to.
+  // What stops that reading as paint is that real pasture varies by a great
+  // deal more than the eight per cent this used to allow, and varies for
+  // reasons the eye knows how to read.
+  //
+  // Aspect is the strongest of them and was missing entirely. A slope facing
+  // the sun dries out, is grazed harder and goes to straw weeks earlier than
+  // the shaded slope on the other side of the same spur; a north face stays
+  // deep green into the autumn. That single difference is most of what gives a
+  // real range its patchwork, and it costs one dot product against a fixed
+  // world bearing — fixed, rather than the true sun vector, because the ground
+  // does not re-dry when the sun moves and a hillside whose colour swings
+  // through the day is far more wrong than one lit from a constant bearing.
+  const sunward = clamp(
+    geometricNormal.xz.dot(vec2(0.42, -0.91)).mul(0.5).add(0.5),
+    0,
+    1,
+  ).toVar('terrainAspect')
+  // Convexity dries ground out too: a rib sheds its water to the hollows
+  // either side, so the ribs go straw first and the hollows stay green. This
+  // is what draws the drainage pattern onto a green hillside.
+  const parched = clamp(
+    sunward.mul(0.62)
+      .add(slow.curvature.mul(0.5).add(0.5).mul(0.3))
+      .add(slow.macro.sub(0.5).mul(0.5)),
+    0,
+    1,
+  ).toVar('terrainParched')
+  const turfVariation = mix(float(0.78), float(1.24), broad.b)
+    .mul(mix(float(0.9), float(1.14), parched))
   albedo = albedo
     .mul(mix(float(1), rockVariation, rocky))
-    .mul(mix(float(1), turfVariation, vegetation.mul(0.62)))
+    .mul(mix(float(1), turfVariation, vegetation.mul(0.85)))
+  // Drying moves grass along a hue path, not a brightness ramp: chlorophyll
+  // goes first and the carotenoid straw underneath it is what is left, so dry
+  // pasture is yellower *and* warmer, never simply paler green. Ramping value
+  // alone is what makes a procedural hillside read as one colour under a
+  // lighting gradient however much variation is put into it.
+  const strawShift = vec3(0.24, 0.1, -0.34)
+  albedo = albedo.mul(
+    strawShift.mul(parched.mul(vegetation).mul(0.5)).add(1),
+  )
   const sparseLichen = smoothstep(0.6, 0.84, broad.b)
     .mul(slow.moisture.add(slow.flow.mul(0.35)).clamp(0, 1))
     .mul(vegetation)
@@ -486,11 +658,19 @@ export function createFullTerrainMaterial(
   // The displacement map, normal map and albedo came from the same scan. Their
   // cracks therefore agree pixel-for-pixel instead of turning colour contrast
   // into unrelated embossed height.
-  const turfHeight = scanDisplacement.r
-    .mul(0.05)
-    .add(broad.g.mul(0.1))
-    .add(fine.g.mul(0.035))
-  const rockHeight = scanDisplacement.r
+  // Turf relief is the sward's own surface, not the rock's. Reading it from
+  // `scanDisplacement` — a gravel capture — is what gave a hillside of pasture
+  // the shading normal of a scree slope, and no amount of green on top of that
+  // reads as grass: the eye identifies vegetation from how light breaks across
+  // clumped, soft, sub-decimetre structure, and a clast field has none of it.
+  // Crowns carry most of it, blade grain rides on top, and the broad geology
+  // band stays in at a low weight because turf really does drape whatever the
+  // ground beneath it is doing.
+  const turfHeight = swardHeight
+    .mul(0.16)
+    .add(swardClump.b.mul(0.03))
+    .add(broad.g.mul(0.06))
+  const rockHeight = scanDisplacement
     .mul(0.72)
     .add(bandRiser.mul(bedExposure).mul(0.46))
   const reliefHeight = mix(turfHeight, rockHeight, rocky)
@@ -526,8 +706,16 @@ export function createFullTerrainMaterial(
     0.54,
     1,
   )
-  const baseRoughness = weights.grass.mul(0.94)
-    .add(weights.meadow.mul(0.93))
+  // Grass is glossier than litter or than rock, and its gloss varies with the
+  // tussock structure — a crown catches a sheen its shaded flanks do not. That
+  // varying sheen is what gives a distant slope of pasture the shifting light
+  // that says grass rather than paint, and a single flat 0.94 across the whole
+  // vegetated channel cannot produce it.
+  const turfRoughness = mix(float(0.93), float(0.68), tussock)
+    .mul(mix(float(1), float(1.06), swardThinning))
+    .clamp(0.6, 0.97)
+  const baseRoughness = weights.grass.mul(turfRoughness)
+    .add(weights.meadow.mul(turfRoughness.add(0.05)))
     .add(weights.soil.mul(0.91))
     .add(weights.scree.mul(0.86))
     .add(weights.rock.mul(0.74))
@@ -564,7 +752,7 @@ export function createFullTerrainMaterial(
   ).toVar('terrainEmberCap')
   const emberHeat = broad.r.mul(0.2)
     .add(fine.g.mul(0.48))
-    .add(scanDisplacement.r.mul(0.32))
+    .add(scanDisplacement.mul(0.32))
     .toVar('terrainEmberHeat')
   // Keep the hottest colour to small mineral pockets. A low threshold turned
   // the complete rear cap into a flat yellow polygon even though that cap is
@@ -658,6 +846,7 @@ export function createFullTerrainMaterial(
     dispose() {
       material.dispose()
       detailTexture.dispose()
+      groundCoverTexture.dispose()
     },
   }
 }

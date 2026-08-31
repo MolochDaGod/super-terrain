@@ -195,3 +195,115 @@ function mix(a: number, b: number, amount: number): number {
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
+
+/**
+ * Tileable sward structure: the texture the terrain material never had.
+ *
+ * Every layer in `createFullTerrainMaterial` used to take its detail from the
+ * rock scan's displacement and diffuse, which is why grass, meadow, soil and
+ * scree all came out as differently-tinted stone. Vegetation is not stone with
+ * a green multiplier on it — at walking distance a sward resolves into three
+ * distinct things and their *relative coverage* is what the eye reads:
+ *
+ *   R  crown     the living top of each tussock, round and proud
+ *   G  height    the sward's own surface, for relief; crowns stand above the mat
+ *   B  blade     the grain within a crown, faintly combed by prevailing lean
+ *   A  thinning  where the mat gives out and mineral ground shows through
+ *
+ * Anti-correlating A against R is the load-bearing part. Independent noise for
+ * "grass" and "bare" puts bare patches in the middle of healthy crowns, which
+ * reads as mange; ground shows through where the tussocks are *not*, and that
+ * single constraint is most of what makes a sward look grown rather than
+ * printed.
+ */
+export function createGroundCoverDetailTexture(size = 256): DataTexture {
+  const pixels = new Uint8Array(size * size * 4)
+
+  for (let y = 0; y < size; y += 1) {
+    const v = y / size
+    for (let x = 0; x < size; x += 1) {
+      const u = x / size
+
+      // Crowns at two densities. One cellular field alone gives a regular
+      // packing the eye picks out as a lattice within a couple of metres;
+      // laying a sparser field of larger tussocks over a dense mat of small
+      // ones is what real pasture does and it destroys the regularity for the
+      // cost of one more lookup at bake time.
+      const mat = cellularCrown(u, v, 23, 4_211)
+      const tufts = cellularCrown(u, v, 9, 8_527)
+      const crown = clamp01(mat * 0.62 + tufts * 0.66)
+
+      // Blades are combed: a sward leans, and the lean is coherent across a
+      // clump rather than random per blade. Stretching the lookup across v
+      // gives the streak direction without a second noise field.
+      const blade =
+        tileableValueNoise(u * 0.35 + v * 0.14, v, 96, 61_223) * 0.7 +
+        tileableValueNoise(u, v, 151, 77_951) * 0.3
+
+      // Litter packs into the gaps between crowns and drifts with a scale of
+      // its own, so the mat is never uniformly thin between tussocks.
+      const drift = tileableValueNoise(u, v, 5, 33_247)
+      const thinning = clamp01(
+        (1 - crown) * (0.55 + drift * 0.75) - 0.12,
+      )
+
+      // Crowns stand a centimetre or two above the mat between them; the blade
+      // grain rides on top of that. The constant floor keeps the mat itself
+      // from reading as a hole when a crown happens to be absent.
+      const height = clamp01(
+        0.3 + crown * 0.52 + blade * 0.14 - thinning * 0.26,
+      )
+
+      const offset = (y * size + x) * 4
+      pixels[offset] = Math.round(crown * 255)
+      pixels[offset + 1] = Math.round(height * 255)
+      pixels[offset + 2] = Math.round(clamp01(blade) * 255)
+      pixels[offset + 3] = Math.round(thinning * 255)
+    }
+  }
+
+  return finishTexture(new DataTexture(
+    pixels,
+    size,
+    size,
+    RGBAFormat,
+    UnsignedByteType,
+  ), 'tileable ground cover detail')
+}
+
+/**
+ * 1 at a Voronoi cell centre, falling to 0 at its boundary.
+ *
+ * `cellularEdge` above draws the cracks *between* blocks; this draws the blocks
+ * themselves, which is what a tussock is. Normalising by the distance to the
+ * second-nearest feature rather than by a constant keeps the falloff even when
+ * the jitter leaves two centres close together, so no crown is ever clipped
+ * into a wedge by its neighbour.
+ */
+function cellularCrown(u: number, v: number, cells: number, seed: number): number {
+  const px = u * cells
+  const py = v * cells
+  const baseX = Math.floor(px)
+  const baseY = Math.floor(py)
+  let nearest = Infinity
+  let second = Infinity
+  for (let oy = -1; oy <= 1; oy += 1) {
+    for (let ox = -1; ox <= 1; ox += 1) {
+      const cellX = baseX + ox
+      const cellY = baseY + oy
+      const wrappedX = mod(cellX, cells)
+      const wrappedY = mod(cellY, cells)
+      const fx = cellX + 0.14 + hash(wrappedX, wrappedY, seed) * 0.72
+      const fy = cellY + 0.14 + hash(wrappedX, wrappedY, seed + 5_449) * 0.72
+      const distance = Math.hypot(px - fx, py - fy)
+      if (distance < nearest) {
+        second = nearest
+        nearest = distance
+      } else if (distance < second) {
+        second = distance
+      }
+    }
+  }
+  if (!Number.isFinite(second) || second <= 0) return 0
+  return 1 - smoothstep(0.1, 0.92, nearest / second)
+}
