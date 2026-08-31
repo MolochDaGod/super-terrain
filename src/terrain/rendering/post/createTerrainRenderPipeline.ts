@@ -12,6 +12,8 @@ import {
   Fn,
   float,
   luminance,
+  max,
+  min,
   mix,
   pass,
   renderOutput,
@@ -234,6 +236,68 @@ const cheapTreeBloom = /*@__PURE__*/ Fn(([source]: [any]) => {
   return glow.mul(float(0.0115))
 })
 
+/**
+ * How much brighter than its brightest neighbour a pixel may be before it is
+ * treated as an outlier rather than as an image.
+ */
+const FIREFLY_TOLERANCE = 2.5
+/** Luminance below which nothing is ever suppressed. */
+const FIREFLY_FLOOR = 0.4
+
+/**
+ * Rejects single-pixel HDR outliers before anything downstream amplifies them.
+ *
+ * The symptom is small extremely bright specks blinking across distant ground,
+ * worst where grass is moving in wind. The cause is specular aliasing: once a
+ * blade is smaller than a pixel, the highlight lobe is point-sampled, the pixel
+ * takes whichever half-vector its one sample happened to land on, and the wind
+ * rewrites that answer every frame. One sample can land two orders of magnitude
+ * above its neighbours.
+ *
+ * Three's `BloomNode` is a threshold high-pass followed by a blur pyramid with
+ * no outlier rejection of its own, so it takes that one pixel and spreads it
+ * into a visible blob — and the blob blinks. Volumetric godrays smear the same
+ * pixel into a streak. Both are faithfully amplifying a value that was never
+ * an image feature.
+ *
+ * Narrowing the specular lobe at range, which is the correct fix at the source,
+ * reduces this and does not remove it: any sufficiently peaked highlight on any
+ * material can still spike a single sample, and the grass is not the only thing
+ * in the scene with one. So the outlier is also rejected here, once, where
+ * every source passes through.
+ *
+ * Comparison is against the *neighbourhood*, not against an absolute ceiling,
+ * and that distinction is the whole design. A hard luminance clamp cannot tell
+ * a firefly from the sun, and dims the sky and the snow to catch a speck. A
+ * pixel far brighter than everything touching it is an outlier whatever its
+ * absolute value; a pixel in a large bright region has bright neighbours and is
+ * left exactly as it is.
+ */
+const rejectFireflies = /*@__PURE__*/ Fn(([source]: [any]) => {
+  const centre = uv().toVar('fireflyUv')
+  const pixel = vec2(1).div(vec2(textureSize(source) as any)).toVar('fireflyPixel')
+  const here = source.sample(centre).toVar('fireflyHere')
+  const brightest = float(0).toVar('fireflyNeighbourhood')
+  for (const [x, y] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+    brightest.assign(
+      max(
+        brightest,
+        luminance(
+          source.sample(
+            centre.add(pixel.mul(vec2(x, y))).clamp(0.001, 0.999),
+          ).rgb,
+        ),
+      ),
+    )
+  }
+  const level = luminance(here.rgb)
+  const limit = brightest.mul(float(FIREFLY_TOLERANCE)).add(float(FIREFLY_FLOOR))
+  // Scaled rather than clipped, so the hue of a suppressed pixel survives and
+  // it settles into its surroundings instead of turning grey.
+  const scale = min(float(1), limit.div(max(level, float(1e-4))))
+  return vec4(here.rgb.mul(scale), here.a)
+})
+
 export function createTerrainRenderPipeline(
   renderer: Renderer,
   scene: Scene,
@@ -263,7 +327,14 @@ export function createTerrainRenderPipeline(
   // Terrain-scale occlusion is stored in each compiled section. The scene pass
   // therefore needs only its HDR colour attachment: no per-frame normal MRT,
   // no 48-tap screen kernel and no denoise pass for unchanged geometry.
-  const colour = scenePass.getTextureNode('output')
+  // Outliers are rejected once, here, before the haze, the godrays and either
+  // bloom get a chance to amplify them. See `rejectFireflies`.
+  //
+  // `sceneColour` stays available because `cheapTreeBloom` gathers its own taps
+  // and needs something it can `.sample()`; the haze, the fog and the godrays
+  // all read their input as a value, so they get the cleaned one.
+  const sceneColour = scenePass.getTextureNode('output')
+  const colour = rejectFireflies(sceneColour)
   const depth = scenePass.getTextureNode('depth')
   if (look === 'tree' || look === 'wooded-landscape') {
     const landscape = look === 'wooded-landscape'
@@ -301,7 +372,7 @@ export function createTerrainRenderPipeline(
     const wide = landscape ? bloom(shafted, 0.13, 0.88, 1.06) : null
     const glowing = wide
       ? shafted.rgb.add(wide.rgb)
-      : shafted.rgb.add(cheapTreeBloom(colour))
+      : shafted.rgb.add(cheapTreeBloom(sceneColour))
     const graded = renderOutput(
       vec4(glowing, shafted.a),
       renderer.toneMapping,
