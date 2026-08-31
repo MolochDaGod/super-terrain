@@ -582,10 +582,32 @@ export function createFoliageBladeMaterial(
   // blades, a dry one does not. Restrained even at the wet end — the
   // Kajiya-Kay lobe covers a whole hemisphere of half-vectors, so every blade
   // facing anywhere near the sun contributes at once.
+  //
+  // Faded and widened with range, which is specular anti-aliasing and not a
+  // style choice. An exponent of 46 is a very tight lobe: it is the width of
+  // the highlight on one blade, and it is correct while a blade covers several
+  // pixels. Once a blade is smaller than a pixel the lobe is being point-
+  // sampled — the pixel takes whichever half-vector its one sample happened to
+  // land on — and the wind then rewrites that sample every frame. The result is
+  // isolated pixels flashing to many times the surrounding brightness, which
+  // the bloom pass faithfully turns into blinking specks scattered across every
+  // distant slope.
+  //
+  // The fix is the one the micro-detail above already uses: as the blade is
+  // widened for distance, converge the highlight on its own mean. Widening the
+  // lobe and taking the strength down leaves a broad, stable sheen that no
+  // longer resolves individual blades — which is what a field of grass a
+  // kilometre away actually looks like.
+  const sheenFade = microFade
   const sheenStrength = mix(float(0.042), float(0.014), underside)
     .mul(smoothstep(0.95, 0.35, fragmentRoughness).add(0.25))
     .mul(shapeVarying.z.mul(1.35).add(0.72))
-  const sheenExponent = mix(float(46), float(12), fragmentRoughness)
+    .mul(mix(float(0.14), float(1), sheenFade))
+  const sheenExponent = mix(
+    mix(float(6), float(46), sheenFade),
+    float(12),
+    fragmentRoughness,
+  )
 
   const material = new GrassNodeMaterial(
     surfaceVarying.y,

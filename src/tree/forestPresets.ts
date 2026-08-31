@@ -301,19 +301,39 @@ export const FOREST_PRESETS: readonly ForestPreset[] = [
 ] as const
 
 /**
- * Stems the editor will plant at the reference area, before spread is applied.
+ * Hard ceiling on planted stems, whatever area and density ask for.
  *
- * A stand's own stems-per-hectare is a property of the *forest*, not of how
- * much ground the editor is filling, so it cannot also decide the budget: at a
- * hundred metres a closed beech stand is seventeen thousand trees. The budget
- * therefore grows as the geometric mean of the requested area and this
- * reference one — enough that a larger world reads as more forest, slow enough
- * that it stays inside what the machine can bake and draw.
+ * The budget used to grow as the geometric mean of the requested area and a
+ * thirty-metre reference stand, with a ceiling of four hundred and eighty. That
+ * made `treesPerHectare` a number the layout did not actually honour: doubling
+ * a field's radius quadrupled its area and only doubled its stems, so a large
+ * forest was *thinner per hectare* than a small one and every field converged
+ * on roughly the same few hundred trees however big it was drawn. The stated
+ * reason was the right one at the time — it had to stay inside what the machine
+ * could draw, and every stem was geometry.
+ *
+ * `TreeImpostorBand` is what retires that constraint. Past the handover
+ * distance a stem is two triangles sampling a baked atlas, so a closed stand at
+ * its real density is affordable and `treesPerHectare` can mean what it says.
+ * The ceiling that remains is about the *bake*: the layout rejection-samples
+ * and queries terrain height per accepted stem, and one field is grown per
+ * frame, so this bounds how long a single field's regrow can take.
+ */
+const MAX_STEMS = 20_000
+
+/**
+ * The tree lab's own stand keeps the old budget, and should.
+ *
+ * The lab draws every stem as geometry — it is where the trees themselves are
+ * judged, so cards would defeat the point — and it is therefore still bound by
+ * the hardware ceiling the terrain fields have escaped. Growing as the
+ * geometric mean of the requested area and a thirty-metre reference stand is
+ * what keeps a wide lab stand inside that, at the cost of not honouring
+ * `treesPerHectare` literally. On terrain, where the far stems are cards, the
+ * literal reading is both affordable and correct.
  */
 const REFERENCE_HECTARES = Math.PI * 30 * 30 / 10_000
-
-/** Hard ceiling on planted stems, whatever area and density ask for. */
-const MAX_STEMS = 480
+const MAX_LAB_STEMS = 480
 
 export function generateForestLayout(
   presetId: ForestPresetId,
@@ -329,7 +349,7 @@ export function generateForestLayout(
   const budget = Math.max(
     8,
     Math.min(
-      MAX_STEMS,
+      MAX_LAB_STEMS,
       Math.round(
         preset.treesPerHectare
           * Math.sqrt(hectares * REFERENCE_HECTARES)
@@ -443,15 +463,11 @@ export function generateForestLayoutInRegion(
     ?? FOREST_PRESETS[0]
   const random = mulberry32(seed ^ hashString(preset.id))
 
+  // Linear in area, which is what "stems per hectare" means. See `MAX_STEMS`.
   const hectares = Math.max(1e-4, region.area / 10_000)
   const budget = Math.max(
     4,
-    Math.min(
-      MAX_STEMS,
-      Math.round(
-        preset.treesPerHectare * Math.sqrt(hectares * REFERENCE_HECTARES) * density,
-      ),
-    ),
+    Math.min(MAX_STEMS, Math.round(preset.treesPerHectare * hectares * density)),
   )
 
   const thinnest = 0.42
@@ -460,8 +476,11 @@ export function generateForestLayoutInRegion(
   const spanX = region.bounds.maxX - region.bounds.minX
   const spanZ = region.bounds.maxZ - region.bounds.minZ
 
-  const maxAttempts = Math.min(600_000, budget * 120)
-  const saturatedAfter = 6_000
+  // Both scale with the budget now that the budget can be large. Fixed limits
+  // sized for a few hundred stems stop a ten-thousand-stem field less than
+  // halfway in, which looks exactly like the density cap it replaced.
+  const maxAttempts = Math.min(4_000_000, Math.max(60_000, budget * 120))
+  const saturatedAfter = Math.max(6_000, budget * 3)
   let sinceAccepted = 0
 
   for (let attempt = 0; attempt < maxAttempts && accepted.length < budget; attempt += 1) {

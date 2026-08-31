@@ -203,11 +203,30 @@ export function forestFloorBlend(
   // underestimates how much floor there is. A stand's interior should be
   // entirely floor; the gain is what gets it there while leaving the fringe,
   // where every weight is small, still mostly hillside.
+  // Faded out with range, and it has to be.
+  //
+  // The mask is a compute-written `StorageTexture` with no mipmaps — building
+  // them would cost a blit per brush stroke, which is why it does not — so a
+  // pixel covering many of its two-metre cells point-samples one of them. Past
+  // a few hundred metres that is exactly the salt-and-pepper speckle you see
+  // scattered over a distant forest floor, and it is not a subtle artefact:
+  // neighbouring pixels land on unrelated cells.
+  //
+  // Fading is also the correct answer independent of the aliasing. Leaf litter,
+  // needle duff and moss are centimetre-to-decimetre structures; at half a
+  // kilometre none of them is resolvable and what the eye reads is the sward
+  // and the canopy above it, both of which carry their own distance ramps and
+  // are unaffected by this.
+  const range = worldPosition
+    .sub(foliageCameraPosition)
+    .length()
+    .toVar('forestFloorRange')
+  const detailFade = smoothstep(190, 520, range).oneMinus()
   const cover = clamp(
     litterMix.add(duffMix).add(mossCover).add(bareWeight.mul(0.9)).mul(1.45),
     0,
     1,
-  ).toVar('forestFloorCover')
+  ).mul(detailFade).toVar('forestFloorCover')
 
   // Read before the relief block, which now consults it: grass sheds the
   // terrain's rock relief the same way litter does.
@@ -287,7 +306,6 @@ export function forestFloorBlend(
   // paint; past the last ring it is the only sward there is. This is the same
   // ramp and the same constants the ground canopy uses, so the two agree by
   // construction rather than by two numbers kept in step by hand.
-  const range = worldPosition.sub(foliageCameraPosition).length()
   const shading = smoothstep(
     FOLIAGE_INSTANCED_RANGE * 0.06,
     FOLIAGE_INSTANCED_RANGE * 0.8,

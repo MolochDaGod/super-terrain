@@ -117,14 +117,19 @@ export function TreeImpostorBand({
   )
   useEffect(() => () => material.dispose(), [material])
 
-  // Capacity is fixed at build time because resizing an instanced attribute
-  // rebuilds the draw. A field's stem count is bounded by its own spline, so a
-  // generous ceiling costs only address space.
-  const capacity = useMemo(
-    () => Math.max(1024, nextPowerOfTwo(instances.length)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [instances.length === 0],
-  )
+  // Capacity grows in powers of two and never shrinks.
+  //
+  // Resizing an instanced attribute rebuilds the geometry and the draw, so this
+  // must not track the stem count directly — a field being edited changes count
+  // on every regrow. But it must not be frozen at mount either: a field grown
+  // from a hundred stems to five thousand would silently draw the first
+  // thousand and drop the rest, which reads as the forest having a hole in it
+  // rather than as a buffer limit. Doubling gives at most a handful of rebuilds
+  // over a field's whole editing life.
+  const allocated = useRef(0)
+  const needed = Math.max(1024, nextPowerOfTwo(instances.length))
+  if (needed > allocated.current) allocated.current = needed
+  const capacity = allocated.current
 
   const geometry = useMemo(() => {
     const quad = new PlaneGeometry(1, 1)
