@@ -1,5 +1,6 @@
 import { SNOW_LINE, SNOW_LINE_BAND } from '../compiler/climate'
 import { clamp, lerp, smoothstep } from '../core/bounds'
+import { setSampleFilterWidth } from '../compiler/heightField'
 import { evaluateHeight } from '../compiler/TerrainField'
 
 export interface FarFieldMeshData {
@@ -28,6 +29,7 @@ const FAR_FIELD_TARGET_EDGE_LENGTH = 64
 const FAR_FIELD_MIN_SEGMENTS = 128
 const FAR_FIELD_MAX_SEGMENTS = 512
 
+
 export function generateFarFieldMesh(
   worldSize: number,
   seed: number,
@@ -37,6 +39,12 @@ export function generateFarFieldMesh(
     FAR_FIELD_MIN_SEGMENTS,
     FAR_FIELD_MAX_SEGMENTS,
   )
+  const edgeLength = worldSize / segments
+  // Sample the proxy on its own grid rather than at full detail. Point-sampling
+  // a field that carries five-metre structure onto a thirty-metre grid does not
+  // approximate that field, it aliases it — the proxy landed above the real
+  // surface about half the time, which is exactly when it shows through.
+  setSampleFilterWidth(edgeLength)
   const width = segments + 1
   const vertexCount = width * width
   const positions = new Float32Array(vertexCount * 3)
@@ -59,6 +67,9 @@ export function generateFarFieldMesh(
     }
   }
 
+  // Everything past this point reads the positions above, not the field, so the
+  // filter is released before the colour pass calls back into it.
+  setSampleFilterWidth(0)
   calculateGridNormals(positions, normals, width)
   calculateFarFieldColors(positions, normals, colors, fullColors, width, seed)
   let cursor = 0

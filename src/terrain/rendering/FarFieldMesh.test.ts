@@ -23,10 +23,16 @@ describe('far-field terrain mesh', () => {
     const worldSize = 16_384
     const seed = 13_371
     const mesh = generateFarFieldMesh(worldSize, seed)
-    // This is a grid vertex in the denser proxy. It used to be lowered solely
-    // for overlap prevention, which made the atmosphere treat the ridge as
-    // valley floor and abruptly veil it at the residency boundary. Overlap is
-    // now handled by clearing proxy depth before resident terrain instead.
+    // The proxy must not be *systematically* lowered. It used to be sunk for
+    // overlap prevention, which made the atmosphere treat a ridge as valley
+    // floor and abruptly veil it at the residency boundary; overlap is handled
+    // by clearing proxy depth before resident terrain instead.
+    //
+    // It is sampled band-limited to its own ~32 m grid, so it is the local mean
+    // of the surface rather than a point on it and will not match exactly. That
+    // is a zero-mean low-pass, not a sink, and this checks exactly that: each
+    // vertex stays within the residual its own grid implies, and the mean error
+    // across many of them stays near zero in both directions.
     const worldX = 768
     const worldZ = 256
     const proxyHeight = interpolateGridHeight(
@@ -36,8 +42,21 @@ describe('far-field terrain mesh', () => {
       worldZ,
     )
     const terrainHeight = evaluateHeight(worldX, worldZ, seed, [])
+    const edgeLength = worldSize / (mesh.positions.length ** 0.5 / 3 ** 0.5 - 1)
+    expect(Math.abs(proxyHeight - terrainHeight)).toBeLessThan(edgeLength)
 
-    expect(proxyHeight).toBeCloseTo(terrainHeight, 4)
+    let signedTotal = 0
+    let samples = 0
+    for (let probe = 0; probe < 64; probe += 1) {
+      const x = -2_048 + probe * 61
+      const z = 256 + probe * 37
+      signedTotal +=
+        interpolateGridHeight(mesh.positions, worldSize, x, z) -
+        evaluateHeight(x, z, seed, [])
+      samples += 1
+    }
+    // No systematic offset in either direction.
+    expect(Math.abs(signedTotal / samples)).toBeLessThan(6)
   })
 
   it('uses a lower full-mode albedo instead of the washed preview palette', () => {

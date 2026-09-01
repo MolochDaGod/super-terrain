@@ -11,6 +11,7 @@ import { ModifierBounds } from './ModifierBounds'
 import { TerrainEnvironment } from './TerrainEnvironment'
 import { TerrainRenderPipeline } from './TerrainRenderPipeline'
 import { TerrainView } from './TerrainView'
+import { TerrainRocks } from './TerrainRocks'
 import { ModifierTransformGizmo } from './ModifierTransformGizmo'
 import { HeroShardGlow } from './HeroShardGlow'
 import { ValleyWater } from './ValleyWater'
@@ -103,6 +104,7 @@ export function TerrainScene({
         group={terrainGroup}
         backend={terrainBackend}
       />
+      <TerrainRocks terrain={terrain} />
       <ValleyWater terrain={terrain} mode={renderMode} />
       <HeroShardGlow />
       {hasGraniteRocks && (

@@ -1387,8 +1387,26 @@ export function reliefNormal(
 
   // Scaled by |det| so the perturbation is independent of how large the pixel's
   // world footprint is; without it the bump strength would change with distance.
+  //
+  // The same |det| is why this needs a floor. `determinant` is the world area a
+  // pixel covers on this surface, and on a near-vertical face seen near edge-on
+  // it collapses towards zero: the geometric normal is then multiplied by
+  // nothing, the expression reduces to `-surfaceGradient`, and the shading
+  // normal points wherever the height derivatives happen to. That is what
+  // turned steep faces into flat, pale, untextured planes — read as holes in
+  // the cliff, and they multiplied as the terrain gained steeper faces.
+  //
+  // Blending back to the geometric normal as the determinant vanishes keeps a
+  // grazing face shaded as the rock it is. The threshold is relative to the
+  // gradient it is competing with, so it engages only where the perturbation
+  // would actually overpower the surface rather than at some fixed world scale.
+  const gradientScale: any = surfaceGradient.length().mul(strength).add(1e-6)
+  const confidence: any = clamp(determinant.abs().div(gradientScale), 0, 1)
+  const perturbed: any = normalize(
+    vec3(normal).mul(determinant.abs()).sub(surfaceGradient.mul(strength)),
+  )
   const shaded = vec3(
-    normalize(vec3(normal).mul(determinant.abs()).sub(surfaceGradient.mul(strength))),
+    normalize(mix(vec3(normal), perturbed, confidence)),
   ).toVar('reliefNormal')
 
   return shaded

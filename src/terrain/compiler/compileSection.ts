@@ -29,7 +29,12 @@ import type {
 import { materializeModifierTransforms } from '../modifiers/transform'
 import type { CompileSectionRequest } from '../workers/protocol'
 import { decodeModifiers } from '../workers/protocol'
-import { setWorldProfile } from './heightField'
+import {
+  sampleHeightFieldCached,
+  setSampleFilterWidth,
+  setWorldProfile,
+  withCanonicalSampling,
+} from './heightField'
 import {
   evaluateEditableTerrainPoint,
   evaluateTerrainPoint,
@@ -90,6 +95,19 @@ try {
 export function compileTerrainSection(
   request: CompileSectionRequest,
 ): CompiledSection {
+  try {
+    return compileSectionBody(request)
+  } finally {
+    // The height field is also read outside compilation — planting, water, the
+    // editor's cursor — and those callers want the true surface at a point, not
+    // this section's grid-averaged one.
+    setSampleFilterWidth(0)
+  }
+}
+
+function compileSectionBody(
+  request: CompileSectionRequest,
+): CompiledSection {
   // The worker is long-lived and compiles for whichever world is current, so
   // the profile is applied per request rather than once at worker startup.
   setWorldProfile(request.config.worldProfile ?? 'natural')
@@ -111,6 +129,25 @@ export function compileTerrainSection(
   // safe to evaluate on the requested screen-error grid, then refine later.
   const sourceLevel = requiresAuthoritativeSource ? 0 : requestedLevels[0]
   const sourceResolution = request.config.lodResolutions[sourceLevel]
+  // Band-limit every field this compile reads to the grid it is about to be
+  // sampled on. Without it a coarse source is not a smoothed version of the
+  // fine one but an independent surface, which is what made a distant massif
+  // re-form as the camera approached, split neighbouring sections along their
+  // shared edge, and flip whole coarse sections to grass. It also makes a
+  // coarse compile genuinely cheaper: octaves under the grid stop hashing.
+  //
+  // Level zero is exempt, the way mip level zero is: it *is* the surface the
+  // coarser levels are approximations of, so there is nothing for it to be
+  // consistent with and filtering it would only throw away near-field detail.
+  // It is also the answer every caller outside compilation gets — the editor's
+  // cursor, planting, water, raycasts all read the unfiltered field — so
+  // leaving it alone is what keeps a brush stroke landing on the surface the
+  // user is actually looking at.
+  setSampleFilterWidth(
+    sourceLevel === 0
+      ? 0
+      : request.config.sectionSize / Math.max(1, sourceResolution),
+  )
   const source = generateSectionMesh(
     request.key,
     request.config.sectionSize,
@@ -487,6 +524,19 @@ function generateSectionMesh(
   // Procedural content can still create these modifiers, but the compiler must
   // never inject world-wide booleans behind the stack's back.
   const booleanOperations = collectBooleanOperations(modifiers)
+  // Points on an ownership plane belong to two sections at once and must come
+  // out identical in both, whatever levels they were compiled at. See
+  // `withCanonicalSampling`.
+  const onBoundary = (worldX: number, worldZ: number): boolean =>
+    Math.abs(worldX - originX) < 1e-4 ||
+    Math.abs(worldX - (originX + sectionSize)) < 1e-4 ||
+    Math.abs(worldZ - originZ) < 1e-4 ||
+    Math.abs(worldZ - (originZ + sectionSize)) < 1e-4
+  const evaluatePoint = (worldX: number, worldZ: number) =>
+    onBoundary(worldX, worldZ)
+      ? withCanonicalSampling(() =>
+        evaluateTerrainPoint(worldX, worldZ, seed, modifiers))
+      : evaluateTerrainPoint(worldX, worldZ, seed, modifiers)
   const adaptive = supportsAdaptiveSourceMesh(modifiers, densityModifiers)
     ? createErrorBoundedHeightMesh({
         originX,
@@ -494,8 +544,7 @@ function generateSectionMesh(
         size: sectionSize,
         resolution,
         errorTolerance: lodErrorBudget(sectionSize, resolution),
-        evaluate: (worldX, worldZ) =>
-          evaluateTerrainPoint(worldX, worldZ, seed, modifiers),
+        evaluate: evaluatePoint,
       })
     : undefined
   let positionArray: Float32Array
@@ -526,7 +575,7 @@ function generateSectionMesh(
 
     for (const worldZ of zAxis) {
       for (const worldX of xAxis) {
-        const point = evaluateTerrainPoint(worldX, worldZ, seed, modifiers)
+        const point = evaluatePoint(worldX, worldZ)
         positions.push(
           point.x - originX,
           point.y,
@@ -554,15 +603,18 @@ function generateSectionMesh(
     indexArray = Uint32Array.from(indices)
   }
   const surfaceNormals = calculateNormals(positionArray, indexArray)
-  stabilizeBoundaryNormals(
-    surfaceNormals,
-    parameters,
-    originX,
-    originZ,
-    sectionSize,
-    seed,
-    modifiers,
-  )
+  // Canonical for the same reason the boundary positions are: the shared edge
+  // has to shade identically from either side or the seam reads as a crease.
+  withCanonicalSampling(() =>
+    stabilizeBoundaryNormals(
+      surfaceNormals,
+      parameters,
+      originX,
+      originZ,
+      sectionSize,
+      seed,
+      modifiers,
+    ))
   const baseBuffers: BooleanMeshBuffers = {
     positions: positionArray,
     normals: surfaceNormals,
@@ -1394,6 +1446,8 @@ function calculateSurfaceFields(
       curvature[vertex],
       fields,
       patchSurfaceVertices[vertex] === 1 ? 1 : 0,
+      // Climatic bands read the unfaceted surface. See `baseHeight`.
+      sampleHeightFieldCached(x, z, seed).baseHeight,
     )
     const foundationBlend = patchFoundationBlend[vertex]!
     if (foundationBlend > 0) {
@@ -1418,6 +1472,7 @@ function calculateSurfaceFields(
         0,
         fields,
         patchSurfaceVertices[vertex] === 1 ? 1 : 0,
+        sampleHeightFieldCached(x, z, seed).baseHeight,
       )
       blendTerrainLayerWeights(weights, foundation, foundationBlend)
     }

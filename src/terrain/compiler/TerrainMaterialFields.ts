@@ -324,8 +324,35 @@ export function evaluateTerrainLayerWeights(
    * field. Freshly exposed rock carries neither soil nor plants.
    */
   freshRock = 0,
+  /**
+   * Altitude the climatic bands are measured at, in metres. Defaults to the
+   * surface height, which is correct wherever the two coincide.
+   *
+   * They stop coinciding once `applyJointFaceting` has run: it steps the
+   * surface by tens of metres between neighbouring columns, and a smoothstep on
+   * altitude across a step like that resolves to a single column on each side
+   * of the threshold. The snow line is where it showed — a one-column stripe of
+   * snow running the full height of every faceted wall, which reads as a bright
+   * tear rather than as snow. Callers that have the unfaceted height pass it
+   * here. See `HeightFieldSample.baseHeight`.
+   */
+  climaticAltitude = y,
 ): TerrainLayerWeights {
-  const slope = clamp(1 - normalY, 0, 1)
+  // The steeper of the mesh normal and the height field's own, never the mesh
+  // normal alone.
+  //
+  // Vegetation coverage is a product of narrow smoothsteps, so it behaves as a
+  // switch, and the mesh normal is the one input to it that changes with LOD: a
+  // cliff sampled on a 21 m grid comes back as a gentle ramp, the switch opens,
+  // and the whole section turns to pasture. That is the terrain flashing green
+  // when a level changes under an orbiting camera. `baseNormalY` is the
+  // undeformed height-field normal at this X/Z and is the same number at every
+  // level, so it holds the classification still.
+  //
+  // The mesh normal still gets a vote, because it is the only one of the two
+  // that knows about a CSG cut: a chamber wall carved through gentle ground has
+  // a flat `baseNormalY` and must not grow turf on its face.
+  const slope = clamp(Math.max(1 - normalY, 1 - fields.baseNormalY), 0, 1)
   const regional = fields.regional * 0.5
 
   let raw = 0
@@ -502,11 +529,18 @@ export function evaluateTerrainLayerWeights(
   const meadow = vegetated * (1 - lush)
 
   const snowEdge = raw * 30 + curvature * -46
+  // Altitude from the unfaceted surface. See `HeightFieldSample.baseHeight`:
+  // the joint faceting steps the finished height by tens of metres between
+  // adjacent columns, and testing a snow line against that puts a
+  // one-column-wide stripe of snow down the face of every cliff it cuts. The
+  // snow line is climatic and belongs to the mountain, not to which side of a
+  // fracture a column landed on.
+  const snowAltitude = climaticAltitude
   const snow =
     smoothstep(
       SNOW_LINE,
       SNOW_LINE + SNOW_LINE_BAND,
-      y + regional * 44 + fray * 30 + snowEdge,
+      snowAltitude + regional * 44 + fray * 30 + snowEdge,
     ) * falloff(0.5, 0.12, slope + snowEdge * 0.01)
   const snowFree = 1 - snow
   const lichen =

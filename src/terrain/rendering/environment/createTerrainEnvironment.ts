@@ -525,7 +525,19 @@ function createFullEnvironment(
         cascades.camera !== camera
       if (cascadesRebound) cascades!.camera = camera
 
-      if (projectionChanged || cascadesRebound) cascades?.updateFrustums()
+      // `updateFrustums` splits the *camera's* frustum, so it reads
+      // `cascades.camera.far` with no guard of its own. Between the node being
+      // constructed and `setup()` running there is a window where the node
+      // exists, has no lights and still has a null camera — and a projection
+      // change landing in that window threw `Cannot read properties of null
+      // (reading 'far')` out of `CSMShadowNode._getBreaks` on every load.
+      // Nothing is lost by skipping it: the rebind below is what first gives
+      // the node a camera, and it calls this on the same frame.
+      const cascadesFittable =
+        cascades !== undefined && cascades.camera !== null
+      if ((projectionChanged || cascadesRebound) && cascadesFittable) {
+        cascades!.updateFrustums()
+      }
       // `updateFrustums` resizes every cascade box, and the depth range has to
       // follow it.
       if (projectionChanged || cascadesRebound || cascadesCreated) fitCascadeDepth()

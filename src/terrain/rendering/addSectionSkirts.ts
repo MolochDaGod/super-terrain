@@ -1,3 +1,4 @@
+import { clamp } from '../core/bounds'
 import type { CompiledLOD } from '../core/types'
 
 export interface SkirtedGeometryData {
@@ -20,13 +21,10 @@ type SourceLod = Pick<
   'positions' | 'normals' | 'colors' | 'surfaceFields' | 'paintWeights' | 'indices'
 >
 
-/** One vertical face: the source edge it hangs from and the plane it faces. */
+/** One vertical face: the source edge it hangs from. */
 interface SkirtCandidate {
   a: number
   b: number
-  normalX: number
-  normalY: number
-  normalZ: number
 }
 
 /**
@@ -78,29 +76,51 @@ export function addSectionSkirts(
   const indices = new Uint32Array(lod.indices.length + candidates.length * 6)
   indices.set(lod.indices)
 
-  const skirtDepth = Math.max(1.5, sectionSize / 32)
+  // Deep enough to cover the disagreement between this section and a
+  // neighbour one LOD coarser, and no deeper.
+  //
+  // A skirt is not free when it is not needed. It hangs straight down from the
+  // boundary with nothing in front of it, so on a camera-facing slope viewed at
+  // a grazing angle the ground below the edge is lower than the skirt and the
+  // wall is simply *visible* — the pale slivers down the joins. Depth is what
+  // decides how often that happens.
+  //
+  // `JOINT_MAX_CUT * 1.15` gave every level the same thirty-nine metres,
+  // including LOD0 right under the camera where the artefact is most legible
+  // and where neighbouring sections actually agree to within a metre or two.
+  // The gap instead scales with the grid: measured across the shipped massif,
+  // two neighbours one level apart disagree by at most about `3 + 2.5 * s` for
+  // this section's own sample spacing `s`, since `constrainNeighborLods`
+  // guarantees the neighbour is never more than one level coarser. The cap
+  // keeps the coarsest levels from reaching further than any real gap needs.
+  //
+  // The spacing is read off the boundary ring rather than plumbed in: there is
+  // exactly one candidate per boundary sample interval, four sides' worth.
+  const boundarySamples = Math.max(1, candidates.length / 4)
+  const sampleSpacing = sectionSize / boundarySamples
+  const skirtDepth = clamp(3 + sampleSpacing * 2.5, 1.5, 24)
   let vertex = vertexCount
   let index = lod.indices.length
   for (const candidate of candidates) {
     const base = vertex
     // Top and bottom of each end, in the order the two triangles below expect.
     vertex = appendSkirtVertex(
-      candidate.a, 0, vertex, candidate,
+      candidate.a, 0, vertex,
       positions, normals, colors, surfaceFields, paintWeights,
       lod, sourceSurfaceFields, sourcePaintWeights,
     )
     vertex = appendSkirtVertex(
-      candidate.a, -skirtDepth, vertex, candidate,
+      candidate.a, -skirtDepth, vertex,
       positions, normals, colors, surfaceFields, paintWeights,
       lod, sourceSurfaceFields, sourcePaintWeights,
     )
     vertex = appendSkirtVertex(
-      candidate.b, 0, vertex, candidate,
+      candidate.b, 0, vertex,
       positions, normals, colors, surfaceFields, paintWeights,
       lod, sourceSurfaceFields, sourcePaintWeights,
     )
     vertex = appendSkirtVertex(
-      candidate.b, -skirtDepth, vertex, candidate,
+      candidate.b, -skirtDepth, vertex,
       positions, normals, colors, surfaceFields, paintWeights,
       lod, sourceSurfaceFields, sourcePaintWeights,
     )
@@ -120,13 +140,12 @@ function appendSkirtVertex(
   sourceVertex: number,
   yOffset: number,
   targetVertex: number,
-  candidate: SkirtCandidate,
   positions: Float32Array,
   normals: Float32Array,
   colors: Float32Array,
   surfaceFields: readonly Uint16Array[],
   paintWeights: Uint16Array,
-  lod: Pick<SourceLod, 'positions' | 'colors'>,
+  lod: Pick<SourceLod, 'positions' | 'normals' | 'colors'>,
   sourceSurfaceFields: readonly Uint16Array[],
   sourcePaintWeights: Uint16Array,
 ): number {
@@ -135,9 +154,17 @@ function appendSkirtVertex(
   positions[target] = lod.positions[source]
   positions[target + 1] = lod.positions[source + 1] + yOffset
   positions[target + 2] = lod.positions[source + 2]
-  normals[target] = candidate.normalX
-  normals[target + 1] = candidate.normalY
-  normals[target + 2] = candidate.normalZ
+  // The surface normal from the edge it hangs off, not the ownership plane's
+  // outward horizontal one.
+  //
+  // A horizontal normal under a sky-dominated environment shades to a flat pale
+  // blue-grey, which is why a skirt that does show through reads as a hole
+  // punched in the cliff rather than as part of it. Wearing the terrain's own
+  // normal it shades like the ground immediately above it, so the cases this
+  // cannot prevent degrade to a smear instead of a bright sliver.
+  normals[target] = lod.normals[source]
+  normals[target + 1] = lod.normals[source + 1]
+  normals[target + 2] = lod.normals[source + 2]
   colors[target] = lod.colors[source]
   colors[target + 1] = lod.colors[source + 1]
   colors[target + 2] = lod.colors[source + 2]
@@ -190,14 +217,6 @@ function createDefaultSurfaceFields(vertexCount: number): readonly [
   return fields
 }
 
-/** Outward normals of the four ownership planes, indexed by `planeOf`. */
-const PLANE_NORMALS: readonly (readonly [number, number, number])[] = [
-  [-1, 0, 0],
-  [1, 0, 0],
-  [0, 0, -1],
-  [0, 0, 1],
-]
-
 /**
  * Open edges that lie on an ownership plane, in the order they are met.
  *
@@ -244,14 +263,7 @@ function collectSkirtCandidates(
     const reversed = (use & 1) === 1
     const a = reversed ? high : low
     const b = reversed ? low : high
-    const normal = PLANE_NORMALS[planeOf(positions, a, b, sectionSize, epsilon)]
-    candidates.push({
-      a,
-      b,
-      normalX: normal[0],
-      normalY: normal[1],
-      normalZ: normal[2],
-    })
+    candidates.push({ a, b })
   }
   return candidates
 }

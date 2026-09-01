@@ -180,7 +180,20 @@ function ellipsoid(
   return (Math.sqrt(nx * nx + ny * ny + nz * nz) - 1) * Math.min(rx, ry, rz)
 }
 
-function massSdf(
+/**
+ * The mass alone: envelope, joint facets, lobes and spall scars, with none of
+ * the noise bands on top.
+ *
+ * Exported because it is the half of the field that is cheap. Everything that
+ * decides a granite boulder's *silhouette* — the boxoid envelope, the
+ * half-space cuts along three joint sets, the spalls bitten out of the corners
+ * — lives here and costs a few dozen arithmetic operations. The three bands in
+ * `BANDS` cost a Worley cell search and a dozen fBm octaves and decide only how
+ * the surface is grained. `createScatterRockGeometry` separates them for
+ * exactly that reason: it can bisect against this at fourteen samples a vertex
+ * and still pay for the expensive part only once.
+ */
+export function massSdf(
   x: number,
   y: number,
   z: number,
@@ -322,7 +335,8 @@ export function graniteOctaveBudget(cells: number): {
   return { minimumWavelength: (2 / cells) * 3 }
 }
 
-function displacement(
+/** The grain on top of the mass. See `massSdf` for why the two are separable. */
+export function displacement(
   x: number,
   y: number,
   z: number,

@@ -41,4 +41,21 @@ describe('world profile', () => {
     expect(sample.valley).toBe(0)
     expect(sample.flow).toBe(0)
   })
+
+  it('keeps joint-facet transitions sample-safe at LOD0 spacing', () => {
+    setWorldProfile('natural')
+    const spacing = 128 / 88
+    // This pair lies on the rear massif where the hard plane switch formerly
+    // introduced a 56 m drop between two LOD0 neighbours.
+    const x = 462.181818181816
+    const z = 473.81818181817954
+    const source = sampleHeightField(x, z, 13_371)
+    const neighbour = sampleHeightField(x, z + spacing, 13_371)
+    const step = Math.abs(neighbour.height - source.height)
+
+    // LOD0 is sampled 1.45 m apart. The base mountain can legitimately be
+    // steep, but a joint cut must not add another cliff-sized jump: that
+    // creates edge-on pseudo-walls that read as holes at a grazing camera.
+    expect(step).toBeLessThan(15)
+  })
 })

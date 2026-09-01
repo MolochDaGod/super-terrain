@@ -1,5 +1,6 @@
 import { clamp, lerp, smoothstep } from '../core/bounds'
 import { WATER_LEVEL } from './climate'
+import { THRUST_CENTER, THRUST_DEPTH } from '../demo/createThrustFormation'
 
 /**
  * The world's base elevation model.
@@ -24,6 +25,24 @@ import { WATER_LEVEL } from './climate'
 
 export interface HeightFieldSample {
   height: number
+  /**
+   * The surface before `applyJointFaceting` cut it, in metres.
+   *
+   * Exposed because every field keyed to *altitude* has to read this one rather
+   * than the finished height. Faceting shifts the surface locally, and using
+   * that local cut to classify climate would make snow and vegetation follow
+   * each slab rather than the mountain. The snow line is where that shows
+   * worst, because it is the brightest thing in the palette and the band reads
+   * as a tear in the terrain.
+   *
+   * Altitude is a *climatic* quantity: the snow line is where it is because of
+   * lapse rate and aspect over kilometres, and it does not step by thirty
+   * metres because a joint plane happens to pass through the hillside. So the
+   * unfaceted height is not an approximation used to dodge an artefact, it is
+   * the physically correct input, and the finished height stays where it
+   * belongs — in the geometry.
+   */
+  baseHeight: number
   /** 0 on plains, 1 in the high massif. Drives material and detail decisions. */
   massif: number
   /** 0..1 proximity to a carved drainage line; the mask the carving used. */
@@ -101,10 +120,21 @@ export function sampleBedding(x: number, z: number, seed: number): Bedding {
   // Only part of a range is well-bedded at the surface. Elsewhere the rock is
   // massive, or the beds are too thin to resolve, or the face is a fresh
   // fracture across them. Without this gate the banding rings every summit.
+  // Bedded rock is the exception in this range, not the rule.
+  //
+  // At 0.44 most of the massif came out bedded, and because terracing cuts a
+  // bench per bed and vegetation colonises the treads, the result was a set of
+  // perfectly regular parallel green stripes marching across every hillside for
+  // hundreds of metres. Nothing reads as procedural faster. The reference this
+  // world is aimed at is a granite mass: no bedding at all, its structure
+  // entirely in the joint sets. Raising the threshold leaves a minority of the
+  // range genuinely sedimentary — which is worth having for contrast — and
+  // hands the rest to `applyJointFaceting`, where the faces come from
+  // fractures rather than from layers.
   const expression = clamp(
     smoothstep(
-      0.44,
-      0.82,
+      0.68,
+      0.95,
       fbm(x * 0.00095, z * 0.00095, seed + 857, 3, 2.1, 0.5) * 0.5 + 0.5,
     ),
     0,
@@ -119,7 +149,25 @@ export function sampleBedding(x: number, z: number, seed: number): Bedding {
   }
 }
 
-const MOUNTAIN_AMPLITUDE = 470
+/**
+ * Exponent applied to the ridge field before it becomes elevation.
+ *
+ * The single strongest control over whether the range reads as rock or as
+ * fantasy. A ridged multifractal is already peaked, and raising it to a power
+ * peaks it further: at 1.55 every summit came to a point and the skyline was a
+ * row of near-identical cones, which is the look the reference photograph most
+ * obviously is not. Real granite stands in *masses* — broad shoulders and flat
+ * summit domes, with the drama in the faces below them rather than in the
+ * profile. Below one the field would flatten into plateaux; just above it
+ * keeps the ridgelines continuous while letting the tops broaden, and the
+ * relief that was in the spikes is handed to `applyJointFaceting`, which puts
+ * it into faces that meet at edges instead of into points.
+ */
+const RIDGE_SHARPNESS = 1.15
+// Reduced alongside `RIDGE_SHARPNESS`. A gentler exponent raises every value of
+// a 0..1 field, so holding the old amplitude would have added a hundred-odd
+// metres to the whole massif rather than only reshaping it.
+const MOUNTAIN_AMPLITUDE = 430
 const FOOTHILL_AMPLITUDE = 62
 const PLAIN_AMPLITUDE = 16
 const SEA_LEVEL = -8
@@ -156,6 +204,118 @@ export function getWorldProfile(): WorldProfile {
   return worldProfile
 }
 
+/**
+ * Distance between the samples the caller is about to take, in metres.
+ *
+ * This is the one thing that makes a coarse LOD a *smoothed* version of the
+ * fine one rather than an independent surface. Without it every level point
+ * samples the same unfiltered field: at the shipped resolutions LOD3 sits
+ * 11.6 m apart and LOD4 21.3 m, while this stack carries structure down to
+ * about 5 m, so the coarse levels were aliasing it — measured at 2.5 m RMS and
+ * 7.7 m worst case away from the surface they were meant to approximate. That
+ * is why a distant massif re-formed into a different mountain as the camera
+ * approached, why neighbouring sections at different levels disagreed by metres
+ * along their shared edge, and why the vegetation classifier flipped whole
+ * sections to grass when a level changed under it.
+ *
+ * Every stage below is gated on it: octaves finer than the Nyquist limit fade
+ * to their mean, and the stages that produce steps rather than noise — strata,
+ * joint faceting, the quantised plate fields — fade out entirely once the grid
+ * can no longer resolve them. Meshing a coarse level is therefore also
+ * *cheaper* than meshing a fine one by more than the vertex count alone, which
+ * is the opposite of what an unfiltered field does.
+ *
+ * Zero disables it, which is right for callers that want the true surface at a
+ * point: planting queries, water, raycasts and the editor's cursor.
+ */
+let sampleFilterWidth = 0
+
+export function setSampleFilterWidth(metres: number): void {
+  const width = Number.isFinite(metres) && metres > 0 ? metres : 0
+  if (width === sampleFilterWidth) return
+  sampleFilterWidth = width
+  clearSampleCache()
+}
+
+export function getSampleFilterWidth(): number {
+  return sampleFilterWidth
+}
+
+/**
+ * Samples per wavelength an octave needs before it is carried at full weight.
+ *
+ * Nyquist says two, and two is wrong here. Nyquist describes what an *ideal*
+ * reconstruction filter can recover; a triangle mesh reconstructs by linear
+ * interpolation between its vertices, which is a poor low-pass and passes
+ * whatever it fails to resolve straight through as shape error. Measured on
+ * the shipped massif at 21.3 m spacing, cutting at Nyquist left 2.14 m of
+ * grid-dependent divergence above the 0.84 m interpolation floor; cutting at
+ * six halves that again, and the detail given up is detail the material's own
+ * band-limited surface synthesis is already drawing per-pixel.
+ */
+const SAMPLES_PER_WAVELENGTH = 4
+
+/**
+ * Evaluates `fn` with band limiting switched off, without disturbing the cache.
+ *
+ * For the section boundary ring, which two independently compiled neighbours
+ * both own. Each would otherwise filter it to *its own* grid, so a section next
+ * to a coarser one would place the shared edge somewhere its neighbour did not
+ * — a crack, metres tall on a cliff, and the reason the skirts hanging over
+ * those cracks had grown deep enough to show through the hillside in front of
+ * them. Evaluated canonically the edge is the same curve on both sides
+ * whatever levels meet there, which is a seam that does not need hiding.
+ *
+ * The width is restored rather than re-set through `setSampleFilterWidth`
+ * because that clears the sample cache, and this runs per boundary vertex.
+ * Cached reads are bypassed while it is in effect for the same reason: a
+ * canonical sample must not be stored under a key the filtered interior will
+ * later read back.
+ */
+export function withCanonicalSampling<T>(fn: () => T): T {
+  if (sampleFilterWidth === 0) return fn()
+  const previous = sampleFilterWidth
+  sampleFilterWidth = 0
+  canonicalSampling = true
+  try {
+    return fn()
+  } finally {
+    sampleFilterWidth = previous
+    canonicalSampling = false
+  }
+}
+
+let canonicalSampling = false
+
+/**
+ * How much of one octave survives the current sample spacing.
+ *
+ * Full weight at `SAMPLES_PER_WAVELENGTH`, nothing at half that, and a linear
+ * ramp between, so an octave leaves gradually as a section coarsens instead of
+ * vanishing between one level and the next.
+ */
+function octaveGain(wavelength: number): number {
+  if (sampleFilterWidth <= 0) return 1
+  return clamp(
+    (2 * wavelength) / (SAMPLES_PER_WAVELENGTH * sampleFilterWidth) - 1,
+    0,
+    1,
+  )
+}
+
+/**
+ * The same ramp for a whole stage rather than one octave.
+ *
+ * Terracing, joint faceting and the quantised plate fields do not decompose
+ * into octaves: they put *steps* in the surface, and a step has energy at every
+ * frequency however smooth its input was. There is no partial version of one to
+ * keep, so a stage whose features are smaller than the grid can resolve is
+ * faded out as a whole and the smooth surface underneath is what remains.
+ */
+function detailGain(featureSize: number): number {
+  return octaveGain(featureSize)
+}
+
 /** Elevation the flat profile sits at: above the water level, so a new world is dry. */
 export const FLAT_GROUND_LEVEL = WATER_LEVEL + 12
 
@@ -164,9 +324,13 @@ function sampleFlatField(x: number, z: number, seed: number): HeightFieldSample 
   // it the plain shades as one flat colour and neither the sun angle nor an
   // early brush stroke is legible against it.
   const swell = fbm(x * 0.0009, z * 0.0009, seed + 61, 2, 2.1, 0.5) * 2.4
-  const grain = fbm(x * 0.021, z * 0.021, seed + 67, 2, 2.1, 0.5) * 0.35
+  const grain =
+    fbm(x * 0.021, z * 0.021, seed + 67, 2, 2.1, 0.5, 1 / 0.021) * 0.35
+  const flatHeight = FLAT_GROUND_LEVEL + swell + grain
   return {
-    height: FLAT_GROUND_LEVEL + swell + grain,
+    height: flatHeight,
+    // The flat profile is never faceted, so the two heights coincide.
+    baseHeight: flatHeight,
     massif: 0,
     valley: 0,
     flow: 0,
@@ -240,18 +404,20 @@ export function sampleHeightField(
     (z + warpZ) * 0.00085,
     seed + 101,
     9,
+    1 / 0.00085,
   )
   // Sharpening the ridge profile raises the peaks and flattens the basins,
   // which reads as glacial relief rather than as noise.
-  const mountains = Math.pow(ridge, 1.55) * MOUNTAIN_AMPLITUDE * massif
+  const mountains = Math.pow(ridge, RIDGE_SHARPNESS) * MOUNTAIN_AMPLITUDE * massif
 
   // --- 3. foothills and plains -----------------------------------------
   const foothills =
-    billow(x * 0.0034, z * 0.0034, seed + 211, 4) *
+    billow(x * 0.0034, z * 0.0034, seed + 211, 4, 1 / 0.0034) *
     FOOTHILL_AMPLITUDE *
     (0.35 + massif * 0.9)
   const plains =
-    fbm(x * 0.0062, z * 0.0062, seed + 307, 4, 2.15, 0.52) * PLAIN_AMPLITUDE
+    fbm(x * 0.0062, z * 0.0062, seed + 307, 4, 2.15, 0.52, 1 / 0.0062) *
+    PLAIN_AMPLITUDE
 
   let height = SEA_LEVEL + mountains + foothills + plains + along * 0.004
 
@@ -263,6 +429,7 @@ export function sampleHeightField(
     (z + warpX * 0.4) * 0.00062,
     seed + 401,
     5,
+    1 / 0.00062,
   )
   const valley = clamp(smoothstep(0.62, 0.98, 1 - drainage), 0, 1)
   const cutDepth = (26 + massif * 120) * valley
@@ -296,9 +463,11 @@ export function sampleHeightField(
   const showcaseBasin = 1 - smoothstep(0.55, 0.96, showcaseDistance)
   if (showcaseBasin > 0.001) {
     const floorUndulation =
-      fbm(x * 0.012, z * 0.012, seed + 1_013, 2, 2.15, 0.48) * 1.8
+      fbm(x * 0.012, z * 0.012, seed + 1_013, 2, 2.15, 0.48, 1 / 0.012) * 1.8
     const bedrockRibs =
-      (ridgedMultifractal(x * 0.024, z * 0.024, seed + 1_019, 3) - 0.48) * 2.25
+      (ridgedMultifractal(x * 0.024, z * 0.024, seed + 1_019, 3, 1 / 0.024) -
+        0.48) *
+      2.25
     const basinFloor =
       WATER_LEVEL + 8 + (x - 300) * 0.006 + floorUndulation + bedrockRibs
     height = lerp(height, basinFloor, showcaseBasin * 0.88)
@@ -312,7 +481,8 @@ export function sampleHeightField(
   // are all real terrain and remain editable.
   const showcaseRiver = sampleShowcaseRiverProfile(x, z, seed)
   if (showcaseRiver.valley > 0.001) {
-    const gravel = fbm(x * 0.027, z * 0.027, seed + 1_091, 2, 2.1, 0.5) * 1.35
+    const gravel =
+      fbm(x * 0.027, z * 0.027, seed + 1_091, 2, 2.1, 0.5, 1 / 0.027) * 1.35
     const riverBed = WATER_LEVEL - 4.6 + gravel
     height = lerp(
       height,
@@ -335,6 +505,7 @@ export function sampleHeightField(
     z * 0.032,
     seed + 1_127,
     2,
+    1 / 0.032,
   )
   height +=
     (glacialRubble - 0.52) *
@@ -392,10 +563,22 @@ export function sampleHeightField(
     const faultShelf =
       smoothstep(0.08, 0.2, faultFraction) *
       (1 - smoothstep(0.62, 0.84, faultFraction))
+    // Each term is a zero-mean displacement about the smooth surface, so a grid
+    // that cannot resolve one drops it and lands on the surface it was
+    // perturbing.
+    //
+    // What has to be resolved is the *plateau*, not the noise wavelength that
+    // generated it. Quantising divides one 83 m noise cell into six levels, so
+    // the flats are about fourteen metres across and the risers between them
+    // are infinitely sharp — a 21 m grid lands on one side or the other of a
+    // riser at random and moves the surface by most of the sixteen-metre step.
+    // Gating on the wavelength instead left this term 95% active at the
+    // coarsest level and it was the single largest source of LOD disagreement
+    // in the massif.
     height += (
-      (jointBlocks - 0.5) * 16.5 +
-      (faceChips - 0.5) * 4.8 +
-      (faultShelf - 0.38) * 4.4
+      (jointBlocks - 0.5) * 16.5 * detailGain(1 / 0.012 / 6) +
+      (faceChips - 0.5) * 4.8 * detailGain(1 / 0.034 / 5) +
+      (faultShelf - 0.38) * 4.4 * detailGain(1 / 0.031 * 0.15)
     ) * rearMassifDetail
   }
 
@@ -427,9 +610,10 @@ export function sampleHeightField(
     )
     const blockFaces = Math.floor(blockField * 6) / 5
     const chipFaces = Math.floor(chipField * 5) / 4
+    // Plateau width again, not wavelength: six and five levels respectively.
     height += (
-      (blockFaces - 0.5) * 3.15 +
-      (chipFaces - 0.5) * 0.72
+      (blockFaces - 0.5) * 3.15 * detailGain(1 / 0.071 / 6) +
+      (chipFaces - 0.5) * 0.72 * detailGain(1 / 0.16 / 5)
     ) * rubbleMask
   }
 
@@ -447,8 +631,32 @@ export function sampleHeightField(
   const steepness = estimateSteepness(x, z, seed, massif)
   const bedding = sampleBedding(x, z, seed)
   const terraced = applyStrata(height, x, z, seed, massif, steepness, bedding)
+  // Faceting runs after terracing, not before it. The beds decide where the
+  // rock is weak and the joints then break it along those weaknesses; doing it
+  // the other way round terraces a surface that has already been cut into
+  // planes and puts a staircase across every facet.
+  const faceted = applyJointFaceting(
+    terraced,
+    x,
+    z,
+    seed,
+    massif,
+    steepness,
+    valley,
+    bedding,
+  )
 
-  return { height: terraced, massif, valley, flow, steepness, bedding, aridity, erg }
+  return {
+    height: faceted.height,
+    baseHeight: terraced,
+    massif,
+    valley,
+    flow,
+    steepness,
+    bedding,
+    aridity,
+    erg,
+  }
 }
 
 /**
@@ -509,6 +717,10 @@ export function sampleHeightFieldCached(
   z: number,
   seed: number,
 ): HeightFieldSample {
+  // See `withCanonicalSampling`: the cache is keyed on position alone, so a
+  // sample taken at a different filter width must neither be read from it nor
+  // written to it.
+  if (canonicalSampling) return sampleHeightField(x, z, seed)
   if (seed !== sampleCacheSeed) {
     clearSampleCache()
     sampleCacheSeed = seed
@@ -587,7 +799,7 @@ function sampleShowcaseRiverProfile(
     Math.sin(z * 0.009) * 15 +
     Math.sin(z * 0.002 + seed * 0.0007) * 18
   const bankNoise =
-    fbm(x * 0.012, z * 0.012, seed + 1_073, 2, 2.05, 0.5) * 10
+    fbm(x * 0.012, z * 0.012, seed + 1_073, 2, 2.05, 0.5, 1 / 0.012) * 10
   const relative = x - centreX + bankNoise
   const distance = Math.abs(relative)
   // A second meltwater thread splits around a gravel bar through the middle
@@ -634,23 +846,52 @@ function estimateSteepness(
   massif: number,
 ): number {
   if (massif < 0.05) return 0
+  // A fixed baseline, deliberately not the sample spacing.
+  //
+  // Scaling it with the grid was measured to make no useful difference to the
+  // geometry's LOD agreement, and it costs something that matters more: this
+  // value reaches the material classifier as `baseNormalY`, which is the one
+  // slope input the vegetation gate can rely on *not* to move between levels.
   const delta = 9
-  const centre = coarseRelief(x, z, seed)
-  const dx = coarseRelief(x + delta, z, seed) - centre
-  const dz = coarseRelief(x, z + delta, seed) - centre
-  return Math.hypot(dx, dz) / delta
+  // The domain warp is evaluated once and shared by all three probes. It varies
+  // over hundreds of metres and they are nine metres apart, so computing it per
+  // probe measured the same displacement three times over — four of the ten
+  // noise octaves this estimate costs, and it is called for every vertex of
+  // every section.
+  const warpX = fbm(x * 0.0011, z * 0.0011, seed + 71, 2, 2.2, 0.5) * 240
+  const warpZ =
+    fbm(x * 0.0011 + 5.7, z * 0.0011 - 3.1, seed + 73, 2, 2.2, 0.5) * 240
+  const centre = warpedRelief(x, z, warpX, warpZ, seed)
+  const dx = warpedRelief(x + delta, z, warpX, warpZ, seed) - centre
+  const dz = warpedRelief(x, z + delta, warpX, warpZ, seed) - centre
+  // Scaled by the same mask the relief itself is scaled by.
+  //
+  // `coarseRelief` is the bare ridge stack at full amplitude, but the height
+  // field only ever adds `mountains = relief * massif`. Reporting the unmasked
+  // gradient therefore over-states the slope by 1/massif — tenfold out on the
+  // fringes, where the ground is nearly flat and this claimed a 45-degree face.
+  // Everything keyed to steepness inherited that: terracing and joint faceting
+  // fired on gentle ground, and once the material classifier started reading
+  // this slope it stripped the vegetation off entire temperate hillsides.
+  return (Math.hypot(dx, dz) / delta) * massif
 }
 
-function coarseRelief(x: number, z: number, seed: number): number {
-  const warpX = fbm(x * 0.0011, z * 0.0011, seed + 71, 2, 2.2, 0.5) * 240
-  const warpZ = fbm(x * 0.0011 + 5.7, z * 0.0011 - 3.1, seed + 73, 2, 2.2, 0.5) * 240
+/** The mountain term at a point whose domain warp the caller already has. */
+function warpedRelief(
+  x: number,
+  z: number,
+  warpX: number,
+  warpZ: number,
+  seed: number,
+): number {
   const ridge = ridgedMultifractal(
     (x + warpX) * 0.00085,
     (z + warpZ) * 0.00085,
     seed + 101,
     6,
+    1 / 0.00085,
   )
-  return Math.pow(ridge, 1.55) * MOUNTAIN_AMPLITUDE
+  return Math.pow(ridge, RIDGE_SHARPNESS) * MOUNTAIN_AMPLITUDE
 }
 
 /**
@@ -676,10 +917,16 @@ function applyStrata(
   steepness: number,
   bedding: Bedding,
 ): number {
+  // A ledge-and-riser profile at a bed's own spacing is invisible on a grid
+  // that cannot resolve one, and point-sampling it there does not average it —
+  // it lands on an arbitrary phase of the staircase and moves the surface by
+  // most of a bed. Terracing pulls towards the *nearest* plane, above or below,
+  // so its mean displacement is zero and fading it out is a true low-pass.
   const exposure =
     smoothstep(0.38, 1.4, steepness) *
     massif *
-    (0.46 + bedding.expression * 0.54)
+    (0.46 + bedding.expression * 0.54) *
+    detailGain(bedding.thickness)
   if (exposure < 0.02) return height
 
   // Distance from the origin along the bedding normal, in bed counts. The
@@ -692,15 +939,426 @@ function applyStrata(
   // Beds alternate resistant and weak, so ledges vary in prominence instead of
   // arriving as a regular comb.
   const hardness = 0.5 + fbm(index * 0.7, index * 1.3, seed + 701, 2, 2, 0.5) * 0.5
-  // A narrow transition is what makes the riser near-vertical; widening it
-  // turns the same code into gentle steps.
+  // Wide enough that the riser stays rasterisable.
+  //
+  // A narrow transition makes the riser near-vertical, and near-vertical is
+  // where a height field stops working: the face becomes a ribbon of triangles
+  // spanning tens of metres of drop across one sample of ground, and seen
+  // anywhere near edge-on it projects to less than a pixel. The rasteriser then
+  // produces no fragment for it and the background shows through — the pale
+  // slivers that have been read as holes in the cliff for weeks. Measured
+  // before this bound, the steepest faces in the massif stood at 88 degrees.
+  //
+  // The band is expressed as the share of a bed the riser occupies, and a bed
+  // is `thickness` thick, so this is a real world-space run: at the 9-26 m
+  // thicknesses `sampleBedding` produces it keeps the face near seventy
+  // degrees, which still reads as a wall from any distance and survives being
+  // drawn.
+  const riserBand = Math.max(
+    STRATA_MIN_RISER_BAND,
+    STRATA_MIN_RISER_METRES / Math.max(1, bedding.thickness),
+  )
   const snapped =
-    index + smoothstep(0.44 - hardness * 0.12, 0.56 + hardness * 0.16, fraction)
+    index +
+    smoothstep(0.5 - riserBand * 0.5, 0.5 + riserBand * 0.5, fraction)
   // Convert the correction back to a vertical displacement. Dividing by the
   // normal's vertical component moves the point onto the plane along Y, which
   // is the only axis a heightfield may move on.
   const shift = ((snapped - band) * bedding.thickness) / bedding.normalY
   return height + shift * clamp(0.72 * exposure * hardness, 0, 1)
+}
+
+/**
+ * Least share of a bed its riser may occupy, and the least run in metres.
+ *
+ * Both bounds exist because bed thickness varies four-fold: the fraction keeps
+ * thin beds from stacking into a comb, the metre floor keeps thick ones from
+ * standing a thirty-metre step on a two-metre run.
+ */
+const STRATA_MIN_RISER_BAND = 0.34
+const STRATA_MIN_RISER_METRES = 7
+
+/**
+ * Joint-plane faceting: what makes a rock face a rock face.
+ *
+ * Everything upstream of this is a smooth, C1-continuous sum of noise —
+ * `ridgedMultifractal`, `billow`, `fbm` — and a smooth function has no edges
+ * in it anywhere. Every silhouette it produces is a contour of one differentiable
+ * surface, which is precisely why a procedural mountain reads as a height field
+ * however much relief it is given and however good the material on top of it is.
+ * The two existing attempts at breaking that up quantise the height into steps,
+ * and quantising a height gives *horizontal terraces* — flat-topped plateaux at
+ * discrete elevations. A real face has almost no horizontal surfaces on it.
+ *
+ * What it has instead is planar facets at every angle: slabs tens of metres
+ * across, meeting each other along sharp arêtes, all of them parallel to one of
+ * a handful of regional joint attitudes. That structure is not decoration on
+ * the landform, it *is* the landform — a rock mass is a solid bounded by the
+ * fractures running through it, and erosion exposes those fractures as faces
+ * because they are where the rock was already weakest.
+ *
+ * So this cuts, rather than adds. Each joint set is a family of parallel planes
+ * spaced through the rock; the exposed surface is the lower envelope of the
+ * smooth height and every plane that passes below it. Cutting is what makes the
+ * result planar: where a plane wins, the surface *is* that plane over its whole
+ * extent, so the facet is genuinely flat and its boundary with the next facet is
+ * genuinely an edge. Adding a signal, however sharp, can only ever modulate the
+ * smooth surface and leaves it smooth.
+ *
+ * Three properties follow from the construction rather than from tuning:
+ *
+ *   Faces are planar.       A plane clipped against a surface is a plane.
+ *   Edges are straight.     Two planes meet in a line.
+ *   Faces are parallel.     Every facet of one set shares one attitude, which
+ *                           is what makes a real cliff read as *structured*
+ *                           rather than as randomly crumpled.
+ *
+ * The sets are keyed to the same `Bedding` attitude the material shades its
+ * strata from, so the geometric facet and the shaded band belong to one rock.
+ */
+
+/**
+ * How far a joint plane may cut below the smooth surface, in metres.
+ *
+ * A cap, not a target. Without one a plane that happens to pass far below the
+ * ground removes an entire ridge, and the landform the regional fields worked
+ * to produce disappears into a heap of triangles. Twenty-eight metres is deep
+ * enough for a facet to read as a face at three hundred metres and shallow
+ * enough that the massif keeps its shape.
+ */
+export const JOINT_MAX_CUT = 26
+/**
+ * Rounding on the arête where two facets meet, in metres.
+ *
+ * Real fracture edges are not razors — they are chipped and weathered back by
+ * metres. It matters more for the mesh than for realism: a true crease falls
+ * between source samples at 1.45 m spacing and aliases, and at the first
+ * working version of this stage — 1.6 m of rounding against steps of twenty
+ * metres — the aliasing was the dominant feature of the whole massif, which
+ * came out as a forest of pinnacles rather than a face of slabs. The rounding
+ * has to be a real fraction of the step it is smoothing, not of the sample
+ * spacing.
+ */
+const JOINT_EDGE_ROUNDING = 5.5
+
+
+/**
+ * Mean depth one joint family removes, as a fraction of its step height.
+ *
+ * Closed form. `jointPlaneHeight` blends from the plane below a point to the
+ * one above across the interval, so with `f` the phase the plane sits
+ * `(S(f) - f) * spacing / normalY` from the surface for `S` the smoothstep.
+ * That is a cut only on the lower half, and the mean is
+ * `∫₀^½ f df − ∫₀^½ (3f² − 2f³) df = 0.125 − 0.09375 = 0.03125`.
+ *
+ * It matters because a joint cut is one-sided: this is what the cut is
+ * band-limited *towards*, and getting it wrong makes the massif change height
+ * with distance.
+ */
+const JOINT_MEAN_CUT_FRACTION = 0.03125
+
+/** Smooth minimum. Rounds the intersection of two surfaces over `k` metres. */
+function smoothMin(a: number, b: number, k: number): number {
+  if (k <= 0) return Math.min(a, b)
+  const spread = Math.abs(a - b)
+  if (spread >= k) return Math.min(a, b)
+  const h = k - spread
+  return Math.min(a, b) - (h * h) / (k * 4)
+}
+
+/**
+ * Clips the surface against one family of parallel planes.
+ *
+ * `along` is the signed distance from the origin measured along the plane
+ * normal, in metres; the planes sit at multiples of `spacing` along it, offset
+ * by `phase`. Only the nearest plane below the point can cut it, so this is one
+ * floor and one divide rather than a search.
+ *
+ * The phase is a per-family constant rather than a per-plane jitter, and that
+ * is a correctness requirement rather than a simplification: jittering each
+ * plane independently lets one plane cross another, and once the family is no
+ * longer monotonic in its index the floor above selects a plane that is not the
+ * nearest one below — which puts a facet on the wrong side of its own edge.
+ *
+ * The normal's vertical component is what limits this. A heightfield stores one
+ * height per column, so it can express a plane of any dip short of vertical and
+ * cannot express an overhang at all; as `normalY` approaches zero the plane's
+ * height at a column runs to infinity and the cut does nothing. Rather than let
+ * that degrade silently, the caller only ever passes attitudes this can carry.
+ */
+function clipToJointSet(
+  height: number,
+  x: number,
+  z: number,
+  normalX: number,
+  normalY: number,
+  normalZ: number,
+  spacing: number,
+  phase: number,
+  strength: number,
+): number {
+  const along = normalX * x + normalY * height + normalZ * z
+  // The plane at or just *below* the point, along the normal. It is the only
+  // one that can remove anything: a plane above the surface clips nothing, and
+  // selecting it — which the first version of this did — makes the whole stage
+  // an expensive no-op that leaves the terrain exactly as smooth as it found
+  // it. `floor` selects the slab, but its hard switch must not survive into a
+  // height field: unlike a closed mesh it has no vertical face to fill that
+  // discontinuity. `jointPlaneHeight` blends through the following plane over
+  // the inter-plane interval, retaining the joint direction without producing
+  // an unfillable wall.
+  const planeHeight = jointPlaneHeight(
+    along,
+    x,
+    z,
+    normalX,
+    normalY,
+    normalZ,
+    spacing,
+    phase,
+  )
+  // A plane that would take more than the cap is pulled back to it, so a facet
+  // deepens smoothly to its limit instead of the cut switching off. The water
+  // line is a second, absolute floor: the exposure gate already keeps this
+  // stage away from the shore, and this makes it impossible for a facet to
+  // breach the surface of a river or a lake even if that gate is ever loosened.
+  const floorHeight = Math.max(height - JOINT_MAX_CUT, WATER_LEVEL + 6)
+  const clipped = smoothMin(
+    height,
+    Math.max(planeHeight, floorHeight),
+    JOINT_EDGE_ROUNDING,
+  )
+  // Band-limited towards the mean cut, not towards no cut.
+  //
+  // A joint cut is one-sided: it only ever removes rock. Fading it out the way
+  // the zero-mean stages fade would let the massif *grow* by tens of metres as
+  // it recedes — the same "different mountain", from the other direction. So
+  // once the grid can no longer resolve a facet, what remains is the average
+  // depth the family removes, which `JOINT_MEAN_CUT_FRACTION` gives in closed
+  // form, and only the sharpness of the arête is lost.
+  //
+  // Widening `smoothMin` instead of this looks like the natural move and is
+  // wrong: it subtracts up to `k / 4` on its own, so a rounding scaled to a
+  // 21 m grid pulled the whole surface thirteen metres down.
+  // Gated on the *facet*, not on the step between facets.
+  //
+  // A tall step is not what a coarse grid cannot carry — a wide flat plane with
+  // one sharp edge is perfectly representable at any spacing. What it cannot
+  // carry is the arête, which is `JOINT_EDGE_ROUNDING` wide however large the
+  // slabs are, and a grid that lands two samples either side of one puts the
+  // crease wherever the samples happen to fall. Fading on a fraction of the
+  // facet width retires the whole family once its edges stop resolving, and the
+  // mean-cut blend below keeps the massif at the height it had.
+  // Always on. The riser widens with the sample spacing, so the family stays
+  // resolvable at every level and needs no fade of its own; fading it as well
+  // stripped distant mountains back to smooth shapes, which is exactly the
+  // "far away it is a completely different, flatter mountain" this pass is
+  // meant to remove. What changes with distance is the softness of the arête,
+  // not whether the faces are there.
+  // Always on. The facet's edge is spread over the whole inter-plane interval,
+  // so it stays resolvable at every level and the family needs no fade of its
+  // own. Fading it as well is what stripped distant mountains back to smooth
+  // shapes — the "far away it is a completely different, flatter mountain"
+  // this pass exists to remove. What changes with distance is the softness of
+  // the arête, not whether the faces are there at all.
+  const band = detailGain(spacing * 2)
+  const cut = band >= 1
+    ? clipped - height
+    : lerp(
+      -JOINT_MEAN_CUT_FRACTION * spacing / normalY,
+      clipped - height,
+      band,
+    )
+  return height + Math.max(cut, floorHeight - height) * strength
+}
+
+function jointPlaneHeight(
+  along: number,
+  x: number,
+  z: number,
+  normalX: number,
+  normalY: number,
+  normalZ: number,
+  spacing: number,
+  phase: number,
+): number {
+  const coordinate = (along - phase) / spacing
+  const planeIndex = Math.floor(coordinate)
+  const planeOffset = planeIndex * spacing + phase
+  const current = (planeOffset - normalX * x - normalZ * z) / normalY
+
+  const fraction = coordinate - planeIndex
+  // Blended across the whole inter-plane interval, deliberately.
+  //
+  // Holding the plane flat and stepping over a narrow riser is what makes a
+  // facet read as a face, and it was tried: the massif gained real buttresses
+  // and walls. It also put ten per cent of the surface past eighty degrees,
+  // and that is where a height field stops being able to draw itself. Such a
+  // face is a ribbon of triangles carrying tens of metres of drop across one
+  // sample of ground; seen near edge-on it projects to under a pixel, the
+  // rasteriser emits no fragment, and the background shows through as a pale
+  // sliver. Those slivers are the "holes in the cliff".
+  //
+  // It is not a tuning problem. The riser's gradient goes as
+  // `1.5 * (spacing / riser) * (nx / ny)`, so holding a facet under seventy
+  // degrees at this joint spacing needs a riser of twenty-three to
+  // fifty-five metres — which is the whole interval, i.e. this. Sharp facets
+  // and bounded slope cannot both exist in a height field; the faces have to
+  // come from the 3D path instead.
+  const next = current + spacing / normalY
+  return lerp(
+    current,
+    next,
+    smoothstep(0, 1, fraction),
+  )
+}
+
+/**
+ * Facets exposed bedrock against the regional joint sets.
+ *
+ * Two sets: the bedding, which supplies the slabs, and one conjugate shear set
+ * that truncates them. See the note on the shear set for why a heightfield
+ * cannot usefully take the third.
+ */
+function applyJointFaceting(
+  height: number,
+  x: number,
+  z: number,
+  seed: number,
+  massif: number,
+  steepness: number,
+  valley: number,
+  bedding: Bedding,
+): { height: number; wall: number } {
+  // Bedrock is exposed where the ground is too steep to hold cover. Below that
+  // it is under soil and scree and has no business being faceted — a faceted
+  // meadow is worse than a smooth one.
+  //
+  // The other two gates are about what this stage is allowed to *remove*, and
+  // they were both missing from the first version. Faceting only ever cuts
+  // downward, by up to `JOINT_MAX_CUT`, and a stage that quietly takes thirty
+  // metres out of any steep ground anywhere takes it out of the valley walls
+  // and the river banks too — which put the deep water through the floor of
+  // its own channel and left the authored portal chambers opening onto a
+  // surface thirty metres below where they were cut. Neither showed up in a
+  // frame; both showed up as a failing assertion about the ground the rest of
+  // the composition is built on.
+  //
+  // A valley floor is a depositional surface. Whatever the joints in the rock
+  // beneath it are doing, what is at the surface is alluvium, and it is flat.
+  const drained = 1 - smoothstep(0.18, 0.62, valley)
+  // Authored topology owns its own ground.
+  //
+  // The hero thrust formation is exact CSG: its chambers are cut *into* a
+  // surface, and their apertures only open where that surface is where the
+  // author put it. Faceting takes up to thirty metres out of any steep ground
+  // it is given, so run over the landmark it moves the wall the chambers were
+  // cut through and leaves them opening onto nothing — the geometry is still
+  // there, and it no longer meets the outside. Procedural structure yields to
+  // the composition here rather than the other way round, and the radius is
+  // the formation's own depth with a wide margin: the chambers are cut
+  // through its outer face, so the ground that has to stay put reaches well
+  // beyond the centre the depth is measured from.
+  const authoredX = (x - THRUST_CENTER.x) / (THRUST_DEPTH * 2.4)
+  const authoredZ = (z - THRUST_CENTER.z) / (THRUST_DEPTH * 2.4)
+  const authored = smoothstep(
+    0.7,
+    1.15,
+    Math.hypot(authoredX, authoredZ),
+  )
+  // Nothing is faceted within a good margin of the water line. Rock does
+  // outcrop at a shoreline, but a cut here has nowhere to go: the channel was
+  // carved to a depth the river needs, and taking another thirty metres out of
+  // its bank drops the bed itself below the water it is supposed to contain.
+  const aboveWater = smoothstep(WATER_LEVEL + 10, WATER_LEVEL + 52, height)
+  // Faceting has to *make* the steep ground, not wait for it.
+  //
+  // With the ridge exponent broadened so the massif stands in masses rather
+  // than spikes, the noise no longer hands over the near-vertical slopes this
+  // gate used to open on, and keying it at 0.42 left the whole range smooth —
+  // broad, yes, and completely characterless. In real granite the faces are
+  // where they are *because* the joints are there: erosion strips the rock back
+  // to the fractures, and a moderate slope is exactly the ground on which that
+  // produces a wall. So the gate opens on moderate ground and the cut is deep
+  // enough to build a face from it.
+  const exposure =
+    smoothstep(0.2, 0.72, steepness) *
+    smoothstep(0.25, 0.7, massif) *
+    drained *
+    aboveWater *
+    authored
+  if (exposure < 0.02) return { height, wall: 0 }
+
+  // Block size varies over the massif: some of a face is closely jointed and
+  // breaks into small plates, some is massive and gives one huge slab. This is
+  // the single strongest cue that a cliff is rock rather than a shape.
+  const spacingField =
+    fbm(x * 0.00085, z * 0.00085, seed + 1_303, 2, 2.1, 0.5) * 0.5 + 0.5
+  // Slab scale, and it has to be. A family's facets are separated by a step of
+  // `spacing / normalY`, so the spacing is not just how big a facet is — it is
+  // also how tall the wall at its edge is. At nine to twenty-four metres, with
+  // three families intersecting, the walls were as tall as the facets were
+  // wide and the massif came out as a forest of columns. Wide spacing gives
+  // what the reference actually shows: slabs tens of metres across with one
+  // clean edge each.
+  const spacing = 34 + spacingField * 46
+  // Where the family sits between its planes. Drifts over kilometres, so one
+  // massif is broken on one set of surfaces rather than the phase resetting
+  // from column to column.
+  const phase =
+    (fbm(x * 0.0007, z * 0.0007, seed + 1_297, 2, 2.1, 0.5) * 0.5 + 0.5) * spacing
+
+  // Set one is the bedding itself, which is already the attitude the material
+  // shades its bands from.
+  let result = height
+  if (bedding.normalY > 0.22) {
+    result = clipToJointSet(
+      result,
+      x,
+      z,
+      bedding.normalX,
+      bedding.normalY,
+      bedding.normalZ,
+      spacing,
+      phase,
+      exposure,
+    )
+  }
+
+  // Two conjugate sets, steeply inclined and rotated either side of the
+  // bedding strike. Their dip is kept clear of vertical: a heightfield cannot
+  // represent a plane steeper than its own columns, and a near-vertical joint
+  // asked to cut one produces a numerical cliff rather than a facet.
+  //
+  // One conjugate shear set, not two. Two is what a rock mass has and two is
+  // what this had first; the trouble is that a heightfield can only ever show
+  // the *lower* envelope of them, so a second steep family does not add a
+  // second visible direction of face — it subtracts from the first, and what
+  // survives is the narrow intersection of both. Cutting to one leaves whole
+  // slabs standing, which is the thing the second family was destroying.
+  const strike = Math.atan2(bedding.normalX, bedding.normalZ)
+  const shearDip =
+    0.62 + (fbm(x * 0.0006, z * 0.0006, seed + 1_311, 2, 2.1, 0.5) * 0.5 + 0.5) * 0.34
+  const sinDip = Math.sin(shearDip)
+  const azimuth = strike + 1.02
+  result = clipToJointSet(
+    result,
+    x,
+    z,
+    Math.sin(azimuth) * sinDip,
+    Math.cos(shearDip),
+    Math.cos(azimuth) * sinDip,
+    spacing * 1.34,
+    phase * 1.7,
+    // Subordinate on purpose. The bedding set carries the face; this one
+    // truncates its slabs at an angle so they end in a real edge rather than
+    // running off the side of the landform. Kept well below half now that the
+    // risers are sharp: two families cutting hard in different directions
+    // leaves only their intersection standing, which is a spike, not a slab.
+    exposure * 0.28,
+  )
+
+  return { height: result, wall: exposure }
 }
 
 /**
@@ -856,11 +1514,30 @@ export function duneField(x: number, z: number, seed: number): number {
   return (primary * chain + superimposed) * DUNE_AMPLITUDE
 }
 
+/**
+ * Mean of one ridged octave's signal, `(1 - |2u - 1|)^2` for uniform `u`.
+ *
+ * Needed because a ridged octave is not zero-mean. Dropping one below the
+ * sample spacing would therefore lower the surface, and a massif that loses
+ * height as it recedes is exactly the "different mountain" the LOD is supposed
+ * to be avoiding. Substituting the mean removes the detail and keeps the level.
+ */
+const RIDGE_OCTAVE_MEAN = 1 / 3
+/** Mean of one billow octave's signal, `|2u - 1|`. */
+const BILLOW_OCTAVE_MEAN = 0.5
+
+/**
+ * `baseWavelength` is the world-space wavelength of octave zero, in metres, and
+ * is what lets the octave loop stop at the sample spacing. Passing zero — the
+ * default — disables band limiting for callers whose finest octave is far
+ * coarser than any grid this world meshes at.
+ */
 function ridgedMultifractal(
   x: number,
   z: number,
   seed: number,
   octaves: number,
+  baseWavelength = 0,
 ): number {
   let sum = 0
   let amplitude = 0.52
@@ -868,13 +1545,33 @@ function ridgedMultifractal(
   let weight = 1
   let total = 0
   for (let octave = 0; octave < octaves; octave += 1) {
-    let signal = 1 - Math.abs(valueNoise(x * frequency, z * frequency, seed + octave * 37) * 2 - 1)
-    signal *= signal
-    // Weighting each octave by the previous one concentrates detail on the
-    // ridges and leaves the flanks smooth — the defining trait of the form.
-    signal *= weight
-    weight = clamp(signal * 2.2, 0, 1)
+    const band = baseWavelength > 0
+      ? octaveGain(baseWavelength / frequency)
+      : 1
+    // Below the sample spacing the octave carries its expected value instead of
+    // its noise. The recursion still advances, so the octaves under it stay on
+    // the same footing they would have had — and it costs no hashing, which is
+    // where the compile-time saving at coarse LODs comes from.
+    let signal: number
+    if (band <= 0) {
+      signal = weight * RIDGE_OCTAVE_MEAN
+    } else {
+      let raw = 1 - Math.abs(
+        valueNoise(x * frequency, z * frequency, seed + octave * 37) * 2 - 1,
+      )
+      raw *= raw
+      // Weighting each octave by the previous one concentrates detail on the
+      // ridges and leaves the flanks smooth — the defining trait of the form.
+      raw *= weight
+      // Fade the last resolvable octave towards its mean rather than switching
+      // it off, so a section does not change shape the instant it crosses an
+      // LOD boundary.
+      signal = band >= 1
+        ? raw
+        : lerp(weight * RIDGE_OCTAVE_MEAN, raw, band)
+    }
     sum += signal * amplitude
+    weight = clamp(signal * 2.2, 0, 1)
     total += amplitude
     amplitude *= 0.52
     frequency *= 2.07
@@ -882,14 +1579,25 @@ function ridgedMultifractal(
   return clamp(sum / total, 0, 1)
 }
 
-function billow(x: number, z: number, seed: number, octaves: number): number {
+function billow(
+  x: number,
+  z: number,
+  seed: number,
+  octaves: number,
+  baseWavelength = 0,
+): number {
   let sum = 0
   let amplitude = 0.5
   let frequency = 1
   let total = 0
   for (let octave = 0; octave < octaves; octave += 1) {
-    const signal = Math.abs(valueNoise(x * frequency, z * frequency, seed + octave * 53) * 2 - 1)
-    sum += signal * amplitude
+    const band = baseWavelength > 0
+      ? octaveGain(baseWavelength / frequency)
+      : 1
+    const signal = band > 0
+      ? Math.abs(valueNoise(x * frequency, z * frequency, seed + octave * 53) * 2 - 1)
+      : BILLOW_OCTAVE_MEAN
+    sum += (band >= 1 ? signal : lerp(BILLOW_OCTAVE_MEAN, signal, band)) * amplitude
     total += amplitude
     amplitude *= 0.5
     frequency *= 2.03
@@ -904,14 +1612,29 @@ function fbm(
   octaves: number,
   lacunarity: number,
   gain: number,
+  baseWavelength = 0,
 ): number {
   let sum = 0
   let amplitude = 0.5
   let frequency = 1
-  let total = 0
+  // The divisor is the *full* octave stack's amplitude, not just the octaves
+  // that survive band limiting. An fbm octave is zero-mean, so leaving one out
+  // is a genuine low-pass of the same field — but only if the octaves that
+  // remain keep the absolute amplitude they always had. Dividing by a shrunken
+  // total would instead amplify what is left, and the coarse LOD would come
+  // back as a different, louder surface.
+  const total = gain === 1
+    ? 0.5 * octaves
+    : 0.5 * (1 - Math.pow(gain, octaves)) / (1 - gain)
   for (let octave = 0; octave < octaves; octave += 1) {
-    sum += (valueNoise(x * frequency, z * frequency, seed + octave * 17) * 2 - 1) * amplitude
-    total += amplitude
+    const band = baseWavelength > 0
+      ? octaveGain(baseWavelength / frequency)
+      : 1
+    if (band <= 0) break
+    sum +=
+      (valueNoise(x * frequency, z * frequency, seed + octave * 17) * 2 - 1) *
+      amplitude *
+      band
     amplitude *= gain
     frequency *= lacunarity
   }

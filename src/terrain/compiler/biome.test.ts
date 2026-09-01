@@ -13,6 +13,8 @@ interface Probe {
   z: number
   y: number
   aridity: number
+  /** Height-field slope here, so "flat ground" cases can select for it. */
+  steepness: number
 }
 
 /** Coarse survey of the whole world, reused by every case below. */
@@ -21,7 +23,13 @@ const probes: Probe[] = (() => {
   for (let x = -HALF_WORLD; x < HALF_WORLD; x += 512) {
     for (let z = -HALF_WORLD; z < HALF_WORLD; z += 512) {
       const sample = sampleHeightField(x, z, SEED)
-      found.push({ x, z, y: sample.height, aridity: sample.aridity })
+      found.push({
+        x,
+        z,
+        y: sample.height,
+        aridity: sample.aridity,
+        steepness: sample.steepness,
+      })
     }
   }
   return found
@@ -63,7 +71,13 @@ describe('aridity as a biome selector', () => {
 })
 
 describe('arid coverage', () => {
-  const low = probes.filter((probe) => probe.y < 140)
+  // Low *and* gentle. `flatGroundWeights` states a flat mesh normal, and the
+  // classifier now cross-checks that against the height field's own slope so a
+  // cliff cannot be talked into growing pasture by a coarse LOD's flattened
+  // normal. A probe on a thirty-five-degree massif face therefore comes back as
+  // rock however wet its climate is — correctly — and selecting it here would
+  // only be testing that the slope gate works, under the name of the climate.
+  const low = probes.filter((probe) => probe.y < 140 && probe.steepness < 0.2)
   const driest = [...low].sort((a, b) => b.aridity - a.aridity).slice(0, 12)
   const wettest = [...low].sort((a, b) => a.aridity - b.aridity).slice(0, 12)
 
