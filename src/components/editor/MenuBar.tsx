@@ -27,6 +27,9 @@ import {
   Triangle,
   HardDrive,
   PackageOpen,
+  Cloud,
+  FileImage,
+  Download,
 } from 'lucide-react'
 import type { BenchmarkScenario, WorldTerrain } from '../../terrain/WorldTerrain'
 import type { EditorStore, TransformMode } from '../../terrain/editor/EditorStore'
@@ -57,6 +60,8 @@ import {
   toggleSelectionVisible,
 } from './editorActions'
 import { WorkspaceToggle, type Workspace } from './WorkspaceToggle'
+import { PuterDialog } from './PuterDialog'
+import { ImageImportDialog } from './ImageImportDialog'
 
 const TRANSFORM_LABELS: {
   value: TransformMode
@@ -95,6 +100,9 @@ export function EditorMenuBar({
   onWorkspaceChange,
 }: EditorMenuBarProps) {
   const [exportingGodot, setExportingGodot] = useState(false)
+  const [exportingGlb, setExportingGlb] = useState(false)
+  const [showPuterDialog, setShowPuterDialog] = useState(false)
+  const [showImageImport, setShowImageImport] = useState(false)
   const snapshot = useEditorSnapshot(editor)
   const selection = currentSelection(terrain, snapshot)
   const isMac =
@@ -125,6 +133,17 @@ export function EditorMenuBar({
             shortcut={`${mod}S`}
             icon={Save}
             onSelect={() => void saveWorld(terrain, editor)}
+          />
+          <MenuItem
+            label="Puter cloud storage…"
+            icon={Cloud}
+            onSelect={() => setShowPuterDialog(true)}
+          />
+          <MenuSeparator />
+          <MenuItem
+            label="Import image as terrain…"
+            icon={FileImage}
+            onSelect={() => setShowImageImport(true)}
           />
           <MenuItem
             label="Import GLB as CSG volume…"
@@ -429,6 +448,38 @@ export function EditorMenuBar({
         </Menu>
 
         <Menu label="Export">
+          <MenuGroupLabel>Fleet-ready GLB</MenuGroupLabel>
+          <MenuItem
+            label={exportingGlb ? 'Building GLB…' : 'Terrain GLB (for fleet)'}
+            icon={Download}
+            disabled={exportingGlb}
+            onSelect={() => {
+              setExportingGlb(true)
+              void (async () => {
+                try {
+                  const { downloadGlb, exportTerrainGlb } = await import(
+                    '../../terrain/export/glbExport'
+                  )
+                  const result = await exportTerrainGlb({
+                    terrain,
+                    lights: editor.getSnapshot().lights,
+                    onProgress: ({ message }) => editor.patch({ status: message }),
+                  })
+                  downloadGlb(result)
+                  editor.patch({
+                    status: `GLB exported · ${result.triangleCount.toLocaleString()} triangles · ready for grudge-convert`,
+                  })
+                } catch (error: unknown) {
+                  editor.patch({
+                    status: `GLB export failed · ${error instanceof Error ? error.message : String(error)}`,
+                  })
+                } finally {
+                  setExportingGlb(false)
+                }
+              })()
+            }}
+          />
+          <MenuSeparator />
           <MenuGroupLabel>Godot 4</MenuGroupLabel>
           <MenuItem
             label={exportingGodot ? 'Building Godot project…' : 'Godot project (.zip)'}
@@ -461,14 +512,14 @@ export function EditorMenuBar({
             }}
           />
           <MenuSeparator />
-          <MenuGroupLabel>Includes</MenuGroupLabel>
+          <MenuGroupLabel>Notes</MenuGroupLabel>
           <MenuItem
-            label="Scene, meshes, procedural PBR textures"
+            label="GLB: terrain + rocks + water + lights"
             disabled
             onSelect={() => {}}
           />
           <MenuItem
-            label="Water, rocks, lights, source & collision"
+            label="No R2 upload, no CDN purge, unpublished"
             disabled
             onSelect={() => {}}
           />
@@ -490,6 +541,19 @@ export function EditorMenuBar({
 
       <WorkspaceToggle workspace={workspace} onChange={onWorkspaceChange} />
       <TelemetryChips terrain={terrain} editor={editor} />
+
+      <PuterDialog
+        terrain={terrain}
+        editor={editor}
+        open={showPuterDialog}
+        onClose={() => setShowPuterDialog(false)}
+      />
+      <ImageImportDialog
+        terrain={terrain}
+        editor={editor}
+        open={showImageImport}
+        onClose={() => setShowImageImport(false)}
+      />
     </header>
   )
 }
