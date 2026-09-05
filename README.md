@@ -1,4 +1,4 @@
-# Mesh Terrain Lab
+# Grudge Terrain
 
 A browser-first, partitioned mesh-terrain editor inspired by Unreal Engine 5.8's Mesh Terrain architecture. It runs on Three.js `WebGPURenderer` through React Three Fiber and keeps terrain authoring, compilation, streaming, and rendering as separate systems.
 
