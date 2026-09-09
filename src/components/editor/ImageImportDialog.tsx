@@ -88,11 +88,13 @@ export const ImageImportDialog = memo(function ImageImportDialog({
         })
         
         if (result) {
+          // Apply mesh to terrain section using replaceSectionMesh
+          const sectionKey = { x: result.sectionX, z: result.sectionZ }
+          const insertedCount = terrain.replaceSectionMesh(sectionKey, result.mesh)
+          
           editor.patch({
-            status: `Heightmap imported to section (${result.sectionX}, ${result.sectionZ})`,
+            status: `Heightmap imported to section (${result.sectionX}, ${result.sectionZ}) with ${insertedCount} triangles`,
           })
-          // TODO: Apply mesh to terrain section using terrain.replaceSectionMesh()
-          // This requires wiring the imported mesh into WorldTerrain's section storage
         } else {
           setError('Failed to generate terrain mesh from heightmap')
         }

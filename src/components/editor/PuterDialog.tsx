@@ -2,6 +2,7 @@
  * Puter authentication and project management UI.
  * 
  * Shows sign-in status, project list, and save/load controls.
+ * Falls back to guest IndexedDB storage when not signed in.
  */
 
 import { memo, useState, useEffect, useCallback } from 'react'
@@ -17,8 +18,22 @@ import {
   deleteTerrainProject,
   setLastProjectId,
 } from '../../lib/puterSdk'
+import {
+  saveGuestProject,
+  loadGuestProject,
+  listGuestProjects,
+  deleteGuestProject,
+} from '../../lib/guestProjectStorage'
 import type { EditorStore } from '../../terrain/editor/EditorStore'
 import type { WorldTerrain } from '../../terrain/WorldTerrain'
+import type { TerrainModifier } from '../../terrain/modifiers/types'
+import type { GraniteRock } from '../../terrain/rocks/types'
+
+interface ProjectMetadata {
+  mapId: string
+  name: string
+  savedAt?: string
+}
 
 interface PuterDialogProps {
   terrain: WorldTerrain
@@ -35,11 +50,12 @@ export const PuterDialog = memo(function PuterDialog({
 }: PuterDialogProps) {
   const [signedIn, setSignedIn] = useState(false)
   const [user, setUser] = useState<{ username: string } | null>(null)
-  const [projects, setProjects] = useState<string[]>([])
+  const [projects, setProjects] = useState<ProjectMetadata[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [projectName, setProjectName] = useState('')
   const [action, setAction] = useState<'save' | 'load'>('save')
+  const [currentMapId, setCurrentMapId] = useState<string | undefined>(undefined)
 
   const refreshAuth = useCallback(async () => {
     try {
@@ -53,7 +69,9 @@ export const PuterDialog = memo(function PuterDialog({
         setProjects(projectList)
       } else {
         setUser(null)
-        setProjects([])
+        // Load guest projects from IndexedDB
+        const guestProjects = await listGuestProjects()
+        setProjects(guestProjects)
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to check auth status')
@@ -114,44 +132,91 @@ export const PuterDialog = memo(function PuterDialog({
         savedAt: new Date().toISOString(),
       }
       
-      await saveTerrainProjectToPuter(projectName.trim(), worldData)
-      await setLastProjectId(projectName.trim())
+      let savedMapId: string
+      if (signedIn) {
+        // Save to Puter cloud storage
+        savedMapId = await saveTerrainProjectToPuter(
+          projectName.trim(),
+          worldData,
+          currentMapId,
+        )
+        await setLastProjectId(savedMapId)
+        editor.patch({ status: `Project "${projectName.trim()}" saved to Puter cloud` })
+      } else {
+        // Save to guest IndexedDB
+        savedMapId = await saveGuestProject(projectName.trim(), worldData, currentMapId)
+        editor.patch({ status: `Project "${projectName.trim()}" saved locally` })
+      }
+      
+      setCurrentMapId(savedMapId)
       await refreshAuth()
-      editor.patch({ status: `Project "${projectName.trim()}" saved to Puter` })
       onClose()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Save failed')
     } finally {
       setLoading(false)
     }
-  }, [projectName, terrain, editor, refreshAuth, onClose])
+  }, [projectName, signedIn, currentMapId, terrain, editor, refreshAuth, onClose])
 
-  const handleLoad = useCallback(async (name: string) => {
+  const handleLoad = useCallback(async (mapId: string, name: string) => {
     setLoading(true)
     setError(null)
     
     try {
-      const data = await loadTerrainProjectFromPuter(name)
-      await setLastProjectId(name)
-      editor.patch({ status: `Project "${name}" loaded from Puter (reload world to apply)` })
-      // TODO: Apply loaded data to terrain (requires world reload)
-      console.log('Loaded project data:', data)
+      let data: unknown
+      if (signedIn) {
+        data = await loadTerrainProjectFromPuter(mapId)
+        await setLastProjectId(mapId)
+      } else {
+        data = await loadGuestProject(mapId)
+      }
+      
+      // Apply loaded data to terrain
+      const worldData = data as {
+        modifiers?: TerrainModifier[]
+        rocks?: GraniteRock[]
+        water?: { state?: string; coverage?: string }
+        lights?: unknown
+      }
+      
+      if (worldData.modifiers) {
+        terrain.modifiers.replace(worldData.modifiers)
+      }
+      
+      if (worldData.rocks) {
+        terrain.rocks.replace(worldData.rocks)
+      }
+      
+      if (worldData.water) {
+        terrain.water.restore(worldData.water)
+      }
+      
+      if (worldData.lights) {
+        editor.patch({ lights: worldData.lights })
+      }
+      
+      setCurrentMapId(mapId)
+      editor.patch({ status: `Project "${name}" loaded and applied` })
       onClose()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Load failed')
     } finally {
       setLoading(false)
     }
-  }, [editor, onClose])
+  }, [signedIn, terrain, editor, onClose])
 
-  const handleDelete = useCallback(async (name: string) => {
+  const handleDelete = useCallback(async (mapId: string, name: string) => {
     if (!confirm(`Delete project "${name}"?`)) return
     
     setLoading(true)
     setError(null)
     
     try {
-      await deleteTerrainProject(name)
+      if (signedIn) {
+        await deleteTerrainProject(mapId)
+      } else {
+        await deleteGuestProject(mapId)
+      }
       await refreshAuth()
       editor.patch({ status: `Project "${name}" deleted` })
     } catch (err: unknown) {
@@ -159,7 +224,7 @@ export const PuterDialog = memo(function PuterDialog({
     } finally {
       setLoading(false)
     }
-  }, [refreshAuth, editor])
+  }, [signedIn, refreshAuth, editor])
 
   if (!open) return null
 
@@ -178,11 +243,13 @@ export const PuterDialog = memo(function PuterDialog({
         <div className="flex items-center gap-2">
           <Cloud size={16} className="text-[#77e8be]" />
           <h2 className="text-base font-semibold text-white/85">
-            Puter Cloud Storage
+            {signedIn ? 'Puter Cloud Storage' : 'Local Project Storage'}
           </h2>
         </div>
         <p className="mt-1 text-[11px] text-white/42">
-          Save and load terrain projects to your Puter account
+          {signedIn
+            ? 'Save and load terrain projects to your Puter account'
+            : 'Projects saved locally in browser IndexedDB'}
         </p>
 
         <div className="mt-4 space-y-3">
@@ -267,23 +334,28 @@ export const PuterDialog = memo(function PuterDialog({
                     </p>
                   ) : (
                     <div className="max-h-48 space-y-1 overflow-y-auto">
-                      {projects.map((name) => (
+                      {projects.map((project) => (
                         <div
-                          key={name}
+                          key={project.mapId}
                           className="flex items-center justify-between rounded-lg border border-white/[0.09] bg-white/[0.02] px-3 py-2"
                         >
                           <button
                             type="button"
                             className="flex-1 text-left text-[11px] text-white/80 hover:text-white/100"
-                            onClick={() => handleLoad(name)}
+                            onClick={() => handleLoad(project.mapId, project.name)}
                             disabled={loading}
                           >
-                            {name}
+                            <div className="font-medium">{project.name}</div>
+                            {project.savedAt && (
+                              <div className="text-[10px] text-white/40">
+                                {new Date(project.savedAt).toLocaleString()}
+                              </div>
+                            )}
                           </button>
                           <button
                             type="button"
                             className="ml-2 text-white/40 hover:text-red-400"
-                            onClick={() => handleDelete(name)}
+                            onClick={() => handleDelete(project.mapId, project.name)}
                             disabled={loading}
                             aria-label="Delete"
                           >
@@ -306,7 +378,9 @@ export const PuterDialog = memo(function PuterDialog({
         </div>
 
         <div className="mt-4 text-[10px] text-white/30">
-          Admin seats: grudachain / molochdadev
+          {signedIn
+            ? 'Admin seats: grudachain / molochdadev'
+            : 'Sign in to Puter for cloud storage across devices'}
         </div>
       </div>
     </div>

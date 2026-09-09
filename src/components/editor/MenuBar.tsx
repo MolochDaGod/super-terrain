@@ -116,7 +116,7 @@ export function EditorMenuBar({
           <Sparkles size={11} strokeWidth={1.9} />
         </span>
         <span className="hidden text-[11px] font-semibold tracking-tight text-white/78 sm:inline">
-          Mesh Terrain
+          Grudge Terrain
         </span>
       </div>
 
